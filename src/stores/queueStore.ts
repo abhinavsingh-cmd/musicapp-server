@@ -1,0 +1,360 @@
+import { create } from 'zustand';
+import { Song } from '../types/music';
+import { getRecommendations, preloadSongs, createExcludeSet } from '../services/recommendationService';
+import { useAudioStore } from './audioStore';
+
+const QUEUE_KEY = 'playback-queue';
+const MAX_RECENT = 50;
+const MIN_QUEUE_SIZE = 10;
+const PRELOAD_COUNT = 3;
+
+function loadQueue(): { queue: Song[]; currentIndex: number; repeatMode: RepeatMode; isShuffled: boolean; autoplayEnabled: boolean } {
+  try {
+    const raw = localStorage.getItem(QUEUE_KEY);
+    if (!raw) return { queue: [], currentIndex: 0, repeatMode: 'off', isShuffled: false, autoplayEnabled: true };
+    const parsed = JSON.parse(raw);
+    return {
+      queue: parsed.queue || [],
+      currentIndex: parsed.currentIndex || 0,
+      repeatMode: parsed.repeatMode || 'off',
+      isShuffled: parsed.isShuffled || false,
+      autoplayEnabled: parsed.autoplayEnabled !== false,
+    };
+  } catch {
+    return { queue: [], currentIndex: 0, repeatMode: 'off', isShuffled: false, autoplayEnabled: true };
+  }
+}
+
+function persistQueue(state: QueueState): void {
+  try {
+    localStorage.setItem(QUEUE_KEY, JSON.stringify({
+      queue: state.queue,
+      currentIndex: state.currentIndex,
+      repeatMode: state.repeatMode,
+      isShuffled: state.isShuffled,
+      autoplayEnabled: state.autoplayEnabled,
+    }));
+  } catch { }
+}
+
+function loadRecent(): Song[] {
+  try {
+    return JSON.parse(localStorage.getItem('recently-played') || '[]');
+  } catch { return []; }
+}
+
+function persistRecent(songs: Song[]): void {
+  try {
+    localStorage.setItem('recently-played', JSON.stringify(songs.slice(0, MAX_RECENT)));
+  } catch { }
+}
+
+export type RepeatMode = 'off' | 'all' | 'one';
+
+export interface QueueState {
+  queue: Song[];
+  currentIndex: number;
+  recentlyPlayed: Song[];
+  repeatMode: RepeatMode;
+  isShuffled: boolean;
+  originalQueue: Song[];
+  autoplayEnabled: boolean;
+  isFetchingRecommendations: boolean;
+
+  setQueue: (songs: Song[], startIndex?: number) => void;
+  playAtIndex: (index: number) => void;
+  nextSong: () => Promise<Song | null>;
+  previousSong: () => Promise<Song | null>;
+
+  addToQueue: (song: Song) => void;
+  addNext: (song: Song) => void;
+  removeFromQueue: (index: number) => void;
+  reorderQueue: (fromIndex: number, toIndex: number) => void;
+  clearQueue: () => void;
+  shuffleQueue: () => void;
+  unshuffleQueue: () => void;
+
+  toggleShuffle: () => void;
+  cycleRepeat: () => void;
+  toggleAutoplay: () => void;
+
+  addRecent: (song: Song) => void;
+  clearRecent: () => void;
+
+  ensureQueueSize: () => Promise<void>;
+  preloadNextSongs: () => void;
+  appendRecommendations: (songs: Song[]) => void;
+}
+
+const saved = loadQueue();
+
+export const useQueueStore = create<QueueState>((set, get) => ({
+  queue: saved.queue,
+  currentIndex: saved.currentIndex,
+  recentlyPlayed: loadRecent(),
+  repeatMode: saved.repeatMode,
+  isShuffled: saved.isShuffled,
+  originalQueue: [],
+  autoplayEnabled: saved.autoplayEnabled,
+  isFetchingRecommendations: false,
+
+  setQueue: (songs, startIndex = 0) => {
+    if (songs.length === 0) return;
+    const song = songs[startIndex];
+    set({
+      queue: songs,
+      currentIndex: startIndex,
+      isShuffled: false,
+      originalQueue: [],
+    });
+    persistQueue(get());
+    get().addRecent(song);
+  },
+
+  playAtIndex: (index) => {
+    const { queue } = get();
+    if (index < 0 || index >= queue.length) return;
+    const song = queue[index];
+    set({ currentIndex: index });
+    persistQueue(get());
+    get().addRecent(song);
+  },
+
+  nextSong: async () => {
+    const { queue, currentIndex, repeatMode, isShuffled, autoplayEnabled } = get();
+    if (queue.length === 0) return null;
+
+    if (repeatMode === 'one') {
+      const song = queue[currentIndex];
+      return song;
+    }
+
+    let nextIndex: number;
+    if (isShuffled) {
+      nextIndex = Math.floor(Math.random() * queue.length);
+      while (nextIndex === currentIndex && queue.length > 1) {
+        nextIndex = Math.floor(Math.random() * queue.length);
+      }
+    } else {
+      nextIndex = currentIndex + 1;
+      if (nextIndex >= queue.length) {
+        if (repeatMode === 'all') {
+          nextIndex = 0;
+        } else if (autoplayEnabled && currentIndex === queue.length - 1) {
+          await get().ensureQueueSize();
+          const newQueue = get().queue;
+          if (newQueue.length > queue.length) {
+            return get().nextSong();
+          }
+          return null;
+        } else {
+          return null;
+        }
+      }
+    }
+
+    const song = queue[nextIndex];
+    set({ currentIndex: nextIndex });
+    persistQueue(get());
+    get().addRecent(song);
+    
+    if (autoplayEnabled && nextIndex >= queue.length - 3) {
+      get().ensureQueueSize();
+    }
+    
+    get().preloadNextSongs();
+    return song;
+  },
+
+  previousSong: () => {
+    const { queue, currentIndex, isShuffled } = get();
+    if (queue.length === 0) return null;
+
+    let prevIndex: number;
+    if (isShuffled) {
+      prevIndex = Math.floor(Math.random() * queue.length);
+      while (prevIndex === currentIndex && queue.length > 1) {
+        prevIndex = Math.floor(Math.random() * queue.length);
+      }
+    } else {
+      prevIndex = (currentIndex - 1 + queue.length) % queue.length;
+    }
+
+    const song = queue[prevIndex];
+    set({ currentIndex: prevIndex });
+    persistQueue(get());
+    get().addRecent(song);
+    return song;
+  },
+
+  addToQueue: (song) => {
+    set((s) => ({ queue: [...s.queue, song] }));
+    persistQueue(get());
+  },
+
+  addNext: (song) => {
+    set((s) => {
+      const insertAt = s.currentIndex + 1;
+      const newQueue = [...s.queue];
+      newQueue.splice(insertAt, 0, song);
+      return { queue: newQueue };
+    });
+    persistQueue(get());
+  },
+
+  removeFromQueue: (index) => {
+    const { queue, currentIndex } = get();
+    if (index < 0 || index >= queue.length) return;
+    const newQueue = queue.filter((_, i) => i !== index);
+    let newIndex = currentIndex;
+    if (index < currentIndex) {
+      newIndex = currentIndex - 1;
+    } else if (index === currentIndex) {
+      newIndex = Math.min(currentIndex, newQueue.length - 1);
+    }
+    set({ queue: newQueue, currentIndex: Math.max(0, newIndex) });
+    persistQueue(get());
+  },
+
+  reorderQueue: (fromIndex, toIndex) => {
+    set((s) => {
+      const q = [...s.queue];
+      const [moved] = q.splice(fromIndex, 1);
+      q.splice(toIndex, 0, moved);
+      let newCurrent = s.currentIndex;
+      if (s.currentIndex === fromIndex) {
+        newCurrent = toIndex;
+      } else if (fromIndex < s.currentIndex && toIndex >= s.currentIndex) {
+        newCurrent = s.currentIndex - 1;
+      } else if (fromIndex > s.currentIndex && toIndex <= s.currentIndex) {
+        newCurrent = s.currentIndex + 1;
+      }
+      return { queue: q, currentIndex: newCurrent };
+    });
+    persistQueue(get());
+  },
+
+  clearQueue: () => {
+    set({ queue: [], currentIndex: 0, isShuffled: false, originalQueue: [] });
+    persistQueue(get());
+  },
+
+  shuffleQueue: () => {
+    const { queue, currentIndex } = get();
+    if (queue.length <= 1) return;
+    const current = queue[currentIndex];
+    const others = queue.filter((_, i) => i !== currentIndex);
+    for (let i = others.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [others[i], others[j]] = [others[j], others[i]];
+    }
+    set({
+      originalQueue: queue,
+      queue: [current, ...others],
+      currentIndex: 0,
+      isShuffled: true,
+    });
+    persistQueue(get());
+  },
+
+  unshuffleQueue: () => {
+    const { originalQueue, currentIndex } = get();
+    if (originalQueue.length === 0) return;
+    const currentSong = get().queue[currentIndex];
+    const idx = originalQueue.findIndex((s) => s.id === currentSong?.id);
+    set({
+      queue: originalQueue,
+      currentIndex: idx >= 0 ? idx : 0,
+      isShuffled: false,
+      originalQueue: [],
+    });
+    persistQueue(get());
+  },
+
+  toggleShuffle: () => {
+    const { isShuffled } = get();
+    if (isShuffled) {
+      get().unshuffleQueue();
+    } else {
+      get().shuffleQueue();
+    }
+  },
+
+  cycleRepeat: () => {
+    set((s) => {
+      const modes: RepeatMode[] = ['off', 'all', 'one'];
+      const next = modes[(modes.indexOf(s.repeatMode) + 1) % modes.length];
+      return { repeatMode: next };
+    });
+    persistQueue(get());
+  },
+
+  toggleAutoplay: () => {
+    set((s) => ({ autoplayEnabled: !s.autoplayEnabled }));
+    persistQueue(get());
+  },
+
+  addRecent: (song) => {
+    set((s) => {
+      const filtered = s.recentlyPlayed.filter((r) => r.id !== song.id);
+      const updated = [song, ...filtered].slice(0, MAX_RECENT);
+      persistRecent(updated);
+      return { recentlyPlayed: updated };
+    });
+  },
+
+  clearRecent: () => {
+    set({ recentlyPlayed: [] });
+    localStorage.removeItem('recently-played');
+  },
+
+  ensureQueueSize: async () => {
+    const { queue, currentIndex, autoplayEnabled, isFetchingRecommendations } = get();
+    if (!autoplayEnabled || isFetchingRecommendations || queue.length >= MIN_QUEUE_SIZE) return;
+    
+    set({ isFetchingRecommendations: true });
+    
+    try {
+      const currentSong = queue[currentIndex];
+      const excludeIds = new Set(queue.map(s => s.id));
+      
+      const recommendations = await getRecommendations({
+        seedSong: currentSong,
+        limit: MIN_QUEUE_SIZE - queue.length + 5,
+        excludeIds,
+      });
+      
+      if (recommendations.length > 0) {
+        get().appendRecommendations(recommendations);
+      }
+    } catch (error) {
+      console.error('Failed to fetch recommendations:', error);
+      const fallback = await getRecommendations({ limit: MIN_QUEUE_SIZE, excludeIds: new Set(queue.map(s => s.id)) });
+      if (fallback.length > 0) {
+        get().appendRecommendations(fallback);
+      }
+    } finally {
+      set({ isFetchingRecommendations: false });
+    }
+  },
+
+  preloadNextSongs: () => {
+    const { queue, currentIndex } = get();
+    const nextSongs = queue.slice(currentIndex + 1, currentIndex + 4);
+    if (nextSongs.length > 0) {
+      preloadSongs(nextSongs, 3);
+    }
+  },
+
+  appendRecommendations: (songs: Song[]) => {
+    const { queue } = get();
+    const existingIds = new Set(queue.map(s => s.id));
+    const newSongs = songs.filter(s => !existingIds.has(s.id));
+    
+    if (newSongs.length > 0) {
+      set((s) => ({ queue: [...s.queue, ...newSongs] }));
+      persistQueue(get());
+      preloadSongs(newSongs.slice(0, 3), 3);
+    }
+  },
+}));
