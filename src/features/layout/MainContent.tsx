@@ -1,5 +1,5 @@
 import { memo, Suspense } from 'react';
-import { Outlet } from 'react-router-dom';
+import { Outlet, useNavigate } from 'react-router-dom';
 import { Search, Settings } from 'lucide-react';
 import { cn } from '../../utils/cn';
 
@@ -11,6 +11,7 @@ const PageFallback = memo(() => (
 PageFallback.displayName = 'PageFallback';
 
 export const MainContent = memo(() => {
+  const navigate = useNavigate();
   return (
     <main className="flex-1 overflow-y-auto relative">
       <header className={cn(
@@ -23,14 +24,14 @@ export const MainContent = memo(() => {
         </div>
         <div className="flex items-center space-x-2">
           <button
-            onClick={() => window.location.href = '/search'}
+            onClick={() => navigate('/search')}
             className="p-2.5 rounded-xl glassmorphism hover:shadow-lg transition-all"
             aria-label="Search"
           >
             <Search className="w-5 h-5 text-gray-300" />
           </button>
           <button
-            onClick={() => window.location.href = '/settings'}
+            onClick={() => navigate('/settings')}
             className="p-2.5 rounded-xl glassmorphism hover:shadow-lg transition-all"
             aria-label="Settings"
           >

@@ -904,7 +904,18 @@ const distPath = path.join(__dirname, "dist");
 const fs = require("fs");
 if (fs.existsSync(distPath)) {
   app.use(express.static(distPath));
-  app.get("*", (req, res) => {
+  // Serve APK with download headers
+  app.get("/download", (req, res) => {
+    const apkPath = path.join(distPath, "MusicApp.apk");
+    if (fs.existsSync(apkPath)) {
+      res.setHeader("Content-Type", "application/vnd.android.package-archive");
+      res.setHeader("Content-Disposition", 'attachment; filename="MusicApp.apk"');
+      res.sendFile(apkPath);
+    } else {
+      res.status(404).json({ error: "APK not found" });
+    }
+  });
+  app.get("/{*splat}", (req, res) => {
     if (!req.path.startsWith("/api/")) {
       res.sendFile(path.join(distPath, "index.html"));
     }
