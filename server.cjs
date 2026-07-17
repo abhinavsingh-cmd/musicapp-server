@@ -785,6 +785,12 @@ app.get("/api/youtube/trending", (req, res) => {
   }
 });
 
+app.get("/api/health", (req, res) => {
+  execFile("yt-dlp", ["--version"], (err, stdout) => {
+    res.json({ status: "ok", ytDlpVersion: stdout.trim(), node: process.version });
+  });
+});
+
 // Audio streaming endpoint - streams audio from YouTube
 app.get("/api/stream/:videoId", (req, res) => {
   const videoId = req.params.videoId;
@@ -799,8 +805,7 @@ app.get("/api/stream/:videoId", (req, res) => {
     "-o", "-",
     "--no-warnings",
     "--no-check-certificates",
-    "--extractor-args", "youtube:player_client=web",
-    "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "--extractor-args", "youtube:player_client=mediaconnect",
     audioUrl
   ], { stdio: ["ignore", "pipe", "pipe"] });
 
@@ -814,16 +819,19 @@ app.get("/api/stream/:videoId", (req, res) => {
     }
   }, 30000);
 
-  yt.stdout.once("data", () => {
-    headersSent = true;
-    clearTimeout(startupTimeout);
-    res.setHeader("Content-Type", "audio/webm");
-    res.setHeader("Accept-Ranges", "bytes");
-    res.setHeader("Cache-Control", "no-cache");
-    res.setHeader("X-Content-Type-Options", "nosniff");
+  let firstChunk = true;
+  yt.stdout.on("data", (chunk) => {
+    if (firstChunk) {
+      firstChunk = false;
+      headersSent = true;
+      clearTimeout(startupTimeout);
+      res.setHeader("Content-Type", "audio/webm");
+      res.setHeader("Accept-Ranges", "bytes");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+    }
+    res.write(chunk);
   });
-
-  yt.stdout.pipe(res);
 
   yt.stderr.on("data", (data) => {
     console.error("[Stream]", data.toString().trim());
@@ -871,6 +879,7 @@ app.get("/api/download/:videoId", (req, res) => {
     "-o", "-",
     "--no-warnings",
     "--no-check-certificates",
+    "--extractor-args", "youtube:player_client=mediaconnect",
     audioUrl
   ], { stdio: ["ignore", "pipe", "pipe"] });
 
