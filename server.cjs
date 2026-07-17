@@ -805,7 +805,7 @@ app.get("/api/stream/:videoId", (req, res) => {
     "-o", "-",
     "--no-warnings",
     "--no-check-certificates",
-    "--extractor-args", "youtube:player_client=mediaconnect",
+    "--extractor-args", "youtube:player_client=android",
     audioUrl
   ], { stdio: ["ignore", "pipe", "pipe"] });
 
@@ -833,21 +833,24 @@ app.get("/api/stream/:videoId", (req, res) => {
     res.write(chunk);
   });
 
+  let stderrOutput = "";
   yt.stderr.on("data", (data) => {
-    console.error("[Stream]", data.toString().trim());
+    const msg = data.toString().trim();
+    console.error("[Stream]", msg);
+    stderrOutput += msg + "\n";
   });
 
   yt.on("error", (err) => {
     clearTimeout(startupTimeout);
     console.error("[Stream] Process error:", err.message);
-    if (!res.headersSent) res.status(500).json({ error: "Stream error" });
+    if (!res.headersSent) res.status(500).json({ error: "Stream error", detail: err.message });
   });
 
   yt.on("close", (code) => {
     clearTimeout(startupTimeout);
     if (code && code !== 0 && !headersSent) {
       console.error("[Stream] yt-dlp exited with code:", code);
-      if (!res.headersSent) res.status(500).json({ error: "Stream failed" });
+      if (!res.headersSent) res.status(500).json({ error: "Stream failed", code, detail: stderrOutput.slice(0, 500) });
     }
   });
 
@@ -879,7 +882,7 @@ app.get("/api/download/:videoId", (req, res) => {
     "-o", "-",
     "--no-warnings",
     "--no-check-certificates",
-    "--extractor-args", "youtube:player_client=mediaconnect",
+    "--extractor-args", "youtube:player_client=android",
     audioUrl
   ], { stdio: ["ignore", "pipe", "pipe"] });
 
