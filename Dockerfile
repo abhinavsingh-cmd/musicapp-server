@@ -8,7 +8,6 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm install --omit=dev
 COPY server.cjs ./
-COPY dist/ ./dist/
 
 EXPOSE 3001
 CMD ["node", "server.cjs"]
