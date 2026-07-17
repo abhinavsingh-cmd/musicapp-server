@@ -940,23 +940,10 @@ app.get("/api/audio-info/:videoId", (req, res) => {
   });
 });
 
-// Serve static frontend in production
-const distPath = path.join(__dirname, "dist");
-const fs = require("fs");
-if (fs.existsSync(distPath)) {
-  // Static middleware first - serves exact files
-  app.use(express.static(distPath, {
-    index: "index.html",
-    maxAge: "1h"
-  }));
-  // SPA fallback - only for non-file, non-API routes
-  app.use((req, res, next) => {
-    if (req.method === "GET" && !req.path.startsWith("/api/") && !req.path.includes(".")) {
-      return res.sendFile(path.join(distPath, "index.html"));
-    }
-    next();
-  });
-}
+// API root
+app.get("/api", (req, res) => {
+  res.json({ status: "ok", songs: songs.length, version: "1.0.0" });
+});
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, "0.0.0.0", () => {
