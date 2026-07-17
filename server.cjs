@@ -800,14 +800,17 @@ app.get("/api/stream/:videoId", (req, res) => {
 
   const audioUrl = "https://www.youtube.com/watch?v=" + videoId;
 
-  const yt = spawn("yt-dlp", [
+  const ytArgs = [
     "-f", "bestaudio/best",
     "-o", "-",
-    "--no-warnings",
     "--no-check-certificates",
-    "--extractor-args", "youtube:player_client=android",
+    "--extractor-args", "youtube:player_client=tv,web_creator,web",
+    "--add-header", "User-Agent:Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
     audioUrl
-  ], { stdio: ["ignore", "pipe", "pipe"] });
+  ];
+
+  console.log("[Stream] Starting yt-dlp for", videoId);
+  const yt = spawn("yt-dlp", ytArgs, { stdio: ["ignore", "pipe", "pipe"] });
 
   let headersSent = false;
   let startupTimeout = setTimeout(() => {
@@ -880,9 +883,9 @@ app.get("/api/download/:videoId", (req, res) => {
     "--audio-format", "mp3",
     "--audio-quality", "0",
     "-o", "-",
-    "--no-warnings",
     "--no-check-certificates",
-    "--extractor-args", "youtube:player_client=android",
+    "--extractor-args", "youtube:player_client=tv,web_creator,web",
+    "--add-header", "User-Agent:Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
     audioUrl
   ], { stdio: ["ignore", "pipe", "pipe"] });
 
