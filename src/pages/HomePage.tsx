@@ -3,7 +3,7 @@ import { useAudioStore } from '../stores/audioStore';
 import { SongTable } from '../features/library/SongTable';
 import { PlaylistDetail } from '../features/playlist/PlaylistDetail';
 import { Song } from '../types/music';
-import { fetchSongs } from '../services/musicApi';
+import { fetchSongs, fetchYouTubeTrending } from '../services/musicApi';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Disc3, TrendingUp, Play, Music, Sparkles, Headphones, Radio, Zap, Globe, Loader2 } from 'lucide-react';
 
@@ -44,22 +44,9 @@ export const HomePage: React.FC = () => {
 
   useEffect(() => {
     setTrendingLoading(true);
-    fetch('/api/youtube/trending')
-      .then(r => r.json())
-      .then(data => {
-        const ytSongs: Song[] = (data.results || []).map((r: any) => ({
-          id: 'trending-' + r.id,
-          youtubeId: r.id,
-          title: r.title,
-          artist: r.artist,
-          genre: 'Trending',
-          duration: r.duration,
-          coverArt: r.thumbnail,
-          album: '',
-          audioUrl: '',
-          releaseYear: 0,
-        }));
-        setTrending(ytSongs);
+    fetchYouTubeTrending()
+      .then(songs => {
+        setTrending(songs);
         setTrendingLoading(false);
       })
       .catch(() => setTrendingLoading(false));

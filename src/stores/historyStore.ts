@@ -13,7 +13,6 @@ export interface HistoryStore {
   clearHistory: () => void;
   getRecent: (count?: number) => HistoryEntry[];
   getMostPlayed: (count?: number) => Song[];
-  getTotalListeningTime: () => number; // seconds
 }
 
 const STORAGE_KEY = 'listening_history';
@@ -71,10 +70,5 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
       .sort((a, b) => b.count - a.count)
       .slice(0, count)
       .map(e => e.song);
-  },
-
-  getTotalListeningTime: () => {
-    const { history } = get();
-    return history.reduce((acc, entry) => acc + (entry.song.duration || 0), 0);
   },
 }));

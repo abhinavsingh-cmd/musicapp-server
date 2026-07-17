@@ -42,30 +42,62 @@ export class EqualizerService {
   private _gains: number[] = DEFAULT_BANDS.map(() => 0);
   private _enabled = false;
   private _preset = 'Flat';
+  private _supported = typeof AudioContext !== 'undefined';
   private listeners: Array<() => void> = [];
+
+  get supported(): boolean { return this._supported; }
 
   async init(audioElement: HTMLAudioElement): Promise<void> {
     if (this.audioContext) return;
+    if (!this._supported) return;
 
-    this.audioContext = new AudioContext();
-    this.sourceNode = this.audioContext.createMediaElementSource(audioElement);
+    try {
+      this.audioContext = new AudioContext();
+      if (this.audioContext.state === 'suspended') {
+        this.audioContext.resume().catch(() => {});
+      }
 
-    // Create 10 band filters
-    const frequencies = DEFAULT_BANDS.map(b => b.frequency);
-    let prevNode: AudioNode = this.sourceNode;
+      this.sourceNode = this.audioContext.createMediaElementSource(audioElement);
 
-    for (let i = 0; i < frequencies.length; i++) {
-      const filter = this.audioContext.createBiquadFilter();
-      filter.type = i === 0 ? 'lowshelf' : i === frequencies.length - 1 ? 'highshelf' : 'peaking';
-      filter.frequency.value = frequencies[i];
-      filter.gain.value = 0;
-      filter.Q.value = 1.4;
-      prevNode.connect(filter);
-      prevNode = filter;
-      this.filters.push(filter);
+      const frequencies = DEFAULT_BANDS.map(b => b.frequency);
+      let prevNode: AudioNode = this.sourceNode;
+
+      for (let i = 0; i < frequencies.length; i++) {
+        const filter = this.audioContext.createBiquadFilter();
+        filter.type = i === 0 ? 'lowshelf' : i === frequencies.length - 1 ? 'highshelf' : 'peaking';
+        filter.frequency.value = frequencies[i];
+        filter.gain.value = 0;
+        filter.Q.value = 1.4;
+        prevNode.connect(filter);
+        prevNode = filter;
+        this.filters.push(filter);
+      }
+
+      prevNode.connect(this.audioContext.destination);
+    } catch (err) {
+      console.warn('Equalizer init failed:', err);
+      this._supported = false;
     }
+  }
 
-    prevNode.connect(this.audioContext.destination);
+  async resume(): Promise<void> {
+    if (this.audioContext && this.audioContext.state === 'suspended') {
+      try {
+        await this.audioContext.resume();
+      } catch {
+        // Requires user gesture on some platforms
+      }
+    }
+  }
+
+  destroy(): void {
+    if (this.audioContext) {
+      try { this.audioContext.close(); } catch {}
+      this.audioContext = null;
+    }
+    this.sourceNode = null;
+    this.filters = [];
+    this._enabled = false;
   }
 
   setBand(index: number, gain: number): void {

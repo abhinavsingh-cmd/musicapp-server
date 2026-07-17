@@ -7,7 +7,7 @@ import { defineConfig, globalIgnores } from 'eslint/config'
 export default defineConfig([
   globalIgnores(['dist', 'trendingScraper.js', 'rebuild-server.cjs', 'server.cjs', 'fix-ids.cjs']),
   {
-    files: ['**/*.{js,jsx}'],
+    files: ['**/*.{js,jsx,ts,tsx}'],
     extends: [
       js.configs.recommended,
       reactHooks.configs.flat.recommended,

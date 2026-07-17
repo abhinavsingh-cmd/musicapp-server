@@ -1,4 +1,4 @@
-import React, { memo } from 'react';
+import React, { memo, useRef } from 'react';
 import { useAudioStore } from '../../../stores/audioStore';
 import { useDownloadsStore } from '../../../stores/downloadsStore';
 import { cn } from '../../../utils/cn';
@@ -24,6 +24,14 @@ export const PlayerControls: React.FC<PlayerControlsProps> = memo(({ className }
   const downloadSong = useDownloadsStore((s) => s.downloadSong);
   const isDownloaded = useDownloadsStore((s) => s.isDownloaded);
   const isDownloading = useDownloadsStore((s) => s.isDownloading);
+  const lastSkipRef = useRef(0);
+
+  const handleSkip = (fn: () => void) => {
+    const now = Date.now();
+    if (now - lastSkipRef.current < 300) return;
+    lastSkipRef.current = now;
+    fn();
+  };
 
   const isFav = currentSong ? favorites.includes(currentSong.id) : false;
   const RepeatIcon = repeatMode === 'one' ? Repeat1 : Repeat;
@@ -51,7 +59,7 @@ export const PlayerControls: React.FC<PlayerControlsProps> = memo(({ className }
 
         {/* Previous */}
         <motion.button 
-          onClick={previousSong} 
+          onClick={() => handleSkip(previousSong)} 
           whileHover={{ scale: 1.15 }} 
           whileTap={{ scale: 0.85 }} 
           disabled={!currentSong} 
@@ -85,7 +93,7 @@ export const PlayerControls: React.FC<PlayerControlsProps> = memo(({ className }
 
         {/* Next */}
         <motion.button 
-          onClick={nextSong} 
+          onClick={() => handleSkip(nextSong)} 
           whileHover={{ scale: 1.15 }} 
           whileTap={{ scale: 0.85 }} 
           disabled={!currentSong} 

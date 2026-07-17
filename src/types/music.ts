@@ -43,22 +43,6 @@ export interface Album {
   genre: string;
 }
 
-export interface AudioState {
-  currentSong: Song | null;
-  playlist: Song[];
-  currentIndex: number;
-  isPlaying: boolean;
-  volume: number;
-  isShuffled: boolean;
-  repeatMode: 'off' | 'all' | 'one';
-  isLoading: boolean;
-  error: string | null;
-  progress: number;
-  duration: number;
-  favorites: string[];
-  shuffleHistory: number[];
-}
-
 export interface User {
   id: string;
   name: string;

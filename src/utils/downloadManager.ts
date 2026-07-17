@@ -286,7 +286,6 @@ export async function getDownload(id: string): Promise<DownloadedSong | null> {
   const db = await openDB();
   const result = await txGet<DownloadedSong>(db, STORE_SONGS, id);
   db.close();
-  if (result?.audioBlob) result.audioUrl = URL.createObjectURL(result.audioBlob);
   return result || null;
 }
 
@@ -300,7 +299,6 @@ export async function getDownloadByYoutubeId(youtubeId: string): Promise<Downloa
     req.onerror = () => resolve(undefined);
   });
   db.close();
-  if (result?.audioBlob) result.audioUrl = URL.createObjectURL(result.audioBlob);
   return result || null;
 }
 
@@ -308,9 +306,6 @@ export async function getAllDownloads(): Promise<DownloadedSong[]> {
   const db = await openDB();
   const results = await txGetAll<DownloadedSong>(db, STORE_SONGS);
   db.close();
-  for (const s of results) {
-    if (s.audioBlob) s.audioUrl = URL.createObjectURL(s.audioBlob);
-  }
   return results.sort((a, b) => b.downloadedAt - a.downloadedAt);
 }
 

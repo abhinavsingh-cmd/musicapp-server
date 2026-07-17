@@ -1,12 +1,10 @@
 import { create } from 'zustand';
 import { Song } from '../types/music';
-import { getRecommendations, preloadSongs, createExcludeSet } from '../services/recommendationService';
-import { useAudioStore } from './audioStore';
+import { getRecommendations, preloadSongs } from '../services/recommendationService';
 
 const QUEUE_KEY = 'playback-queue';
 const MAX_RECENT = 50;
 const MIN_QUEUE_SIZE = 10;
-const PRELOAD_COUNT = 3;
 
 function loadQueue(): { queue: Song[]; currentIndex: number; repeatMode: RepeatMode; isShuffled: boolean; autoplayEnabled: boolean } {
   try {
@@ -166,7 +164,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
     return song;
   },
 
-  previousSong: () => {
+  previousSong: async () => {
     const { queue, currentIndex, isShuffled } = get();
     if (queue.length === 0) return null;
 

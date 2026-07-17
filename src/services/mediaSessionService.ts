@@ -31,19 +31,22 @@ class MediaSessionService {
     this.callbacks = callbacks;
     if (!this.supported) return;
 
-    navigator.mediaSession.setActionHandler('play', () => callbacks.onPlay());
-    navigator.mediaSession.setActionHandler('pause', () => callbacks.onPause());
-    navigator.mediaSession.setActionHandler('nexttrack', () => callbacks.onNext());
-    navigator.mediaSession.setActionHandler('previoustrack', () => callbacks.onPrevious());
-    navigator.mediaSession.setActionHandler('seekforward', () => callbacks.onSeekForward());
-    navigator.mediaSession.setActionHandler('seekbackward', () => callbacks.onSeekBackward());
-    navigator.mediaSession.setActionHandler('stop', () => callbacks.onStop());
+    const handlers: [string, (() => void) | null][] = [
+      ['play', () => callbacks.onPlay()],
+      ['pause', () => callbacks.onPause()],
+      ['nexttrack', () => callbacks.onNext()],
+      ['previoustrack', () => callbacks.onPrevious()],
+      ['seekforward', () => callbacks.onSeekForward()],
+      ['seekbackward', () => callbacks.onSeekBackward()],
+      ['stop', () => callbacks.onStop()],
+    ];
 
-    // Safari iOS may not support all handlers – wrap in try/catch
-    try {
-      // Some browsers throw for unsupported actions
-    } catch {
-      // ignore
+    for (const [action, handler] of handlers) {
+      try {
+        navigator.mediaSession.setActionHandler(action as MediaSessionAction, handler);
+      } catch {
+        // Some browsers throw for unsupported actions (e.g. Safari iOS)
+      }
     }
   }
 

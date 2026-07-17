@@ -3,7 +3,6 @@ import { useHistoryStore } from '../stores/historyStore';
 import { useQueueStore } from '../stores/queueStore';
 import { useAudioStore } from '../stores/audioStore';
 import { fetchSongs } from '../services/musicApi';
-import { fetchYouTubeTrending } from './musicApi';
 
 const RECENTLY_PLAYED_LIMIT = 100;
 const RECOMMENDATION_COUNT = 50;
@@ -134,17 +133,6 @@ async function getQueueBasedSongs(excludeIds: Set<string>, limit: number): Promi
     .slice(0, limit);
 }
 
-async function getTrendingSongs(excludeIds: Set<string>, limit: number): Promise<Song[]> {
-  try {
-    const trending = await fetchYouTubeTrending();
-    return trending
-      .filter(s => !excludeIds.has(s.id))
-      .slice(0, limit);
-  } catch {
-    return [];
-  }
-}
-
 async function getPopularSongs(excludeIds: Set<string>, limit: number): Promise<Song[]> {
   const allSongs = await fetchSongs();
   return allSongs
@@ -225,10 +213,6 @@ export async function getRecommendations(options: RecommendationOptions = {}): P
   if (popularSongs.length) sources.push({ name: 'popular', weight: 10, songs: popularSongs });
   
   return rankAndDedupe(sources, excludeIds, limit);
-}
-
-export async function getFallbackRecommendations(excludeIds: Set<string>, limit: number): Promise<Song[]> {
-  return getTrendingSongs(excludeIds, limit);
 }
 
 export async function preloadSongs(songs: Song[], count: number = PRELOAD_COUNT): Promise<void> {

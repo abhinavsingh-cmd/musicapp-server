@@ -24,8 +24,7 @@ class BackgroundPlaybackService {
   private isBackground = false;
   private backgroundCallbacks: BackgroundCallback[] = [];
   private interruptionCallbacks: InterruptionCallback[] = [];
-  private audioElements: Set<HTMLAudioElement> = new Set();
-  private wasPlayingBeforeBackground = false;
+  private audioElements: Map<HTMLAudioElement, Array<() => void>> = new Map();
   private visibilityHandler: (() => void) | null = null;
   private freezeHandler: (() => void) | null = null;
   private resumeHandler: (() => void) | null = null;
@@ -58,42 +57,32 @@ class BackgroundPlaybackService {
 
     // Save state before page unload
     window.addEventListener('beforeunload', this.handleBeforeUnload);
-
-    // Audio element interruption events
-    this.setupAudioInterruptionListeners();
   }
 
   /** Register an audio element for interruption monitoring */
   registerAudioElement(audio: HTMLAudioElement): void {
-    this.audioElements.add(audio);
-
-    // Handle headphone unplug / Bluetooth disconnect via audio events
-    audio.addEventListener('abort', () => {
+    const abortHandler = () => {
       this.notifyInterruption('audio-route-change');
-    });
-
-    // Handle 'emptied' event (can indicate audio route change on iOS)
-    audio.addEventListener('emptied', () => {
+    };
+    const emptiedHandler = () => {
       if (this.audioElements.has(audio)) {
         this.notifyInterruption('audio-route-change');
       }
-    });
+    };
 
-    // Handle media intervention (e.g. incoming call on mobile)
-    // The 'interrupted' event is not in standard typings but exists on some browsers
-    try {
-      audio.addEventListener('pause', () => {
-        // If audio was playing and suddenly paused without user action, it's an interruption
-        // This is a heuristic for incoming calls
-      });
-    } catch {
-      // ignore
-    }
+    audio.addEventListener('abort', abortHandler);
+    audio.addEventListener('emptied', emptiedHandler);
+    this.audioElements.set(audio, [abortHandler, emptiedHandler]);
   }
 
   /** Unregister an audio element */
   unregisterAudioElement(audio: HTMLAudioElement): void {
-    this.audioElements.delete(audio);
+    const handlers = this.audioElements.get(audio);
+    if (handlers) {
+      audio.removeEventListener('abort', handlers[0]);
+      audio.removeEventListener('emptied', handlers[1]);
+      this.audioElements.delete(audio);
+    }
   }
 
   /** Subscribe to background/foreground transitions */
@@ -117,15 +106,6 @@ class BackgroundPlaybackService {
     return this.isBackground;
   }
 
-  /** Set whether audio was playing before going to background (for resume logic) */
-  setWasPlayingBeforeBackground(wasPlaying: boolean): void {
-    this.wasPlayingBeforeBackground = wasPlaying;
-  }
-
-  getWasPlayingBeforeBackground(): boolean {
-    return this.wasPlayingBeforeBackground;
-  }
-
   /** Destroy all listeners */
   destroy(): void {
     if (this.visibilityHandler) {
@@ -138,6 +118,10 @@ class BackgroundPlaybackService {
       document.removeEventListener('resume', this.resumeHandler);
     }
     window.removeEventListener('beforeunload', this.handleBeforeUnload);
+    for (const [audio, handlers] of this.audioElements) {
+      audio.removeEventListener('abort', handlers[0]);
+      audio.removeEventListener('emptied', handlers[1]);
+    }
     this.audioElements.clear();
     this.backgroundCallbacks = [];
     this.interruptionCallbacks = [];
@@ -147,11 +131,6 @@ class BackgroundPlaybackService {
     // Trigger immediate save via callbacks
     this.backgroundCallbacks.forEach((cb) => cb(true));
   };
-
-  private setupAudioInterruptionListeners(): void {
-    // Monitor for audio context state changes (e.g. system audio interruption)
-    // This is handled per-audio-element when registered
-  }
 
   private notifyInterruption(type: InterruptionType): void {
     this.interruptionCallbacks.forEach((cb) => cb(type));

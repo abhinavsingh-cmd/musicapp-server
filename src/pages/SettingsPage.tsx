@@ -1,18 +1,14 @@
 import React, { useState } from 'react';
 import { backupService } from '../services/backupService';
-import { crossfadeService } from '../services/crossfadeService';
 import { useQueueStore } from '../stores/queueStore';
-import { EqualizerUI } from '../features/player/controls/EqualizerUI';
 import { ThemePicker } from '../features/theme/ThemePicker';
 import { motion } from 'framer-motion';
-import { Settings, Download, Upload, Save, Zap, Keyboard, Loader2, Check, X, ToggleLeft, ToggleRight } from 'lucide-react';
+import { Settings, Download, Upload, Save, Zap, Loader2, Check, X, ToggleLeft } from 'lucide-react';
 
 export const SettingsPage: React.FC = () => {
   const [exporting, setExporting] = useState(false);
   const [importing, setImporting] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
-  const [crossfadeEnabled, setCrossfadeEnabled] = useState(crossfadeService.enabled);
-  const [crossfadeDuration, setCrossfadeDuration] = useState(crossfadeService.duration);
   const [autoplayEnabled, setAutoplayEnabled] = useState(useQueueStore.getState().autoplayEnabled);
 
   const handleExport = async () => {
@@ -43,19 +39,9 @@ export const SettingsPage: React.FC = () => {
     setTimeout(() => setMessage(null), 3000);
   };
 
-  const toggleCrossfade = () => {
-    crossfadeService.toggle();
-    setCrossfadeEnabled(crossfadeService.enabled);
-  };
-
   const toggleAutoplay = () => {
     useQueueStore.getState().toggleAutoplay();
     setAutoplayEnabled(useQueueStore.getState().autoplayEnabled);
-  };
-
-  const handleCrossfadeDuration = (value: number) => {
-    crossfadeService.setDuration(value);
-    setCrossfadeDuration(crossfadeService.duration);
   };
 
   return (

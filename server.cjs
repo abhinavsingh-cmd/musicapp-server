@@ -795,17 +795,31 @@ app.get("/api/stream/:videoId", (req, res) => {
   const audioUrl = "https://www.youtube.com/watch?v=" + videoId;
 
   const yt = spawn("yt-dlp", [
-    "-f", "bestaudio[ext=m4a]/bestaudio",
+    "-f", "bestaudio",
     "-o", "-",
     "--no-warnings",
     "--no-check-certificates",
     audioUrl
   ], { stdio: ["ignore", "pipe", "pipe"] });
 
-  res.setHeader("Content-Type", "audio/mpeg");
-  res.setHeader("Accept-Ranges", "bytes");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("X-Content-Type-Options", "nosniff");
+  let headersSent = false;
+  let startupTimeout = setTimeout(() => {
+    if (!headersSent) {
+      yt.kill("SIGTERM");
+      if (!res.headersSent) {
+        res.status(504).json({ error: "Stream timed out" });
+      }
+    }
+  }, 15000);
+
+  yt.stdout.once("data", () => {
+    headersSent = true;
+    clearTimeout(startupTimeout);
+    res.setHeader("Content-Type", "audio/webm");
+    res.setHeader("Accept-Ranges", "bytes");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+  });
 
   yt.stdout.pipe(res);
 
@@ -814,11 +828,21 @@ app.get("/api/stream/:videoId", (req, res) => {
   });
 
   yt.on("error", (err) => {
+    clearTimeout(startupTimeout);
     console.error("[Stream] Process error:", err.message);
     if (!res.headersSent) res.status(500).json({ error: "Stream error" });
   });
 
+  yt.on("close", (code) => {
+    clearTimeout(startupTimeout);
+    if (code && code !== 0 && !headersSent) {
+      console.error("[Stream] yt-dlp exited with code:", code);
+      if (!res.headersSent) res.status(500).json({ error: "Stream failed" });
+    }
+  });
+
   req.on("close", () => {
+    clearTimeout(startupTimeout);
     yt.kill("SIGTERM");
   });
 });

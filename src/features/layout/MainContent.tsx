@@ -1,14 +1,7 @@
-import { memo, Suspense } from 'react';
+import { memo } from 'react';
 import { Outlet, useNavigate } from 'react-router-dom';
 import { Search, Settings } from 'lucide-react';
 import { cn } from '../../utils/cn';
-
-const PageFallback = memo(() => (
-  <div className="flex-1 flex items-center justify-center py-20">
-    <div className="w-8 h-8 border-2 border-[var(--color-accent)] border-t-transparent rounded-full animate-spin" />
-  </div>
-));
-PageFallback.displayName = 'PageFallback';
 
 export const MainContent = memo(() => {
   const navigate = useNavigate();
@@ -41,9 +34,7 @@ export const MainContent = memo(() => {
       </header>
 
       <div className="flex-1 overflow-y-auto relative">
-        <Suspense fallback={<PageFallback />}>
-          <Outlet />
-        </Suspense>
+        <Outlet />
       </div>
     </main>
   );

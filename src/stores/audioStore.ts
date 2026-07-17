@@ -18,7 +18,6 @@ export interface AudioStore {
   progress: number;
   duration: number;
   favorites: string[];
-  playbackMode: 'youtube' | 'offline';
 
   loadSong: (song: Song, playlist: Song[], index: number) => void;
   play: () => void;
@@ -143,9 +142,6 @@ function initAudioServiceHandler() {
       case 'canplay':
         useAudioStore.setState({ isLoading: false });
         break;
-      case 'playing':
-        useAudioStore.setState({ isPlaying: true, isLoading: false });
-        break;
     }
   });
 }
@@ -207,18 +203,6 @@ window.addEventListener('beforeunload', () => {
   persistPlaybackState();
 });
 
-export function cleanupAudioStore() {
-  if (audioServiceUnsub) {
-    audioServiceUnsub();
-    audioServiceUnsub = null;
-  }
-  if (persistenceInterval) {
-    clearInterval(persistenceInterval);
-    persistenceInterval = null;
-  }
-  currentSongIdRef = null;
-}
-
 export const useAudioStore = create<AudioStore>((set, get) => ({
   currentSong: null,
   isPlaying: false,
@@ -230,7 +214,6 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
   progress: 0,
   duration: 0,
   favorites: loadFavorites(),
-  playbackMode: 'youtube',
 
   loadSong: (song: Song, playlist: Song[], index: number) => {
     const { currentSong } = get();
@@ -287,7 +270,9 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
         isLoading: true,
         duration: song.duration,
       });
-      audioService.play(song, useQueueStore.getState().queue, useQueueStore.getState().currentIndex);
+      audioService.play(song, useQueueStore.getState().queue, useQueueStore.getState().currentIndex).catch(err => {
+        set({ error: err.message, isLoading: false, isPlaying: false });
+      });
     } else {
       set({ isPlaying: false, progress: 0 });
     }
@@ -303,7 +288,9 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
         isLoading: true,
         duration: song.duration,
       });
-      audioService.play(song, useQueueStore.getState().queue, useQueueStore.getState().currentIndex);
+      audioService.play(song, useQueueStore.getState().queue, useQueueStore.getState().currentIndex).catch(err => {
+        set({ error: err.message, isLoading: false, isPlaying: false });
+      });
     }
   },
 
@@ -351,8 +338,12 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
       qs.setQueue(saved.queue, saved.currentIndex || 0);
       if (saved.isShuffled !== qs.isShuffled) qs.toggleShuffle();
       if (saved.repeatMode !== qs.repeatMode) {
-        while (useQueueStore.getState().repeatMode !== saved.repeatMode) {
-          qs.cycleRepeat();
+        const modes: Array<'off' | 'all' | 'one'> = ['off', 'all', 'one'];
+        const targetIdx = modes.indexOf(saved.repeatMode);
+        if (targetIdx >= 0) {
+          while (useQueueStore.getState().repeatMode !== saved.repeatMode) {
+            qs.cycleRepeat();
+          }
         }
       }
     }

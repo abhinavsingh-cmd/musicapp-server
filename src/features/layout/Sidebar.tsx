@@ -201,7 +201,7 @@ export const Sidebar = memo(({ className, isOpen = true, onClose }: SidebarProps
 
           <div className="lg:hidden p-3 flex justify-end">
             <motion.button
-              onClick={onClose}
+              onClick={handleClose}
               whileHover={{ scale: 1.1, rotate: 90 }}
               whileTap={{ scale: 0.9 }}
               className="w-8 h-8 rounded-full bg-white/5 flex items-center justify-center text-gray-400 hover:text-white hover:bg-white/10 transition-all"

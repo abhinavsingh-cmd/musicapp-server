@@ -19,6 +19,8 @@ export interface DownloadsState {
   loading: boolean;
   isOnline: boolean;
   cacheSize: number;
+  /** Cache of blob URLs keyed by download id */
+  blobUrlCache: Record<string, string>;
 
   loadDownloads: () => Promise<void>;
   downloadSong: (song: Song) => Promise<void>;
@@ -38,6 +40,7 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
   loading: false,
   isOnline: navigator.onLine,
   cacheSize: 0,
+  blobUrlCache: {},
 
   loadDownloads: async () => {
     set({ loading: true });
@@ -108,13 +111,27 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
 
   removeSong: async (id: string) => {
     await removeDownload(id);
-    set((s) => ({ downloads: s.downloads.filter((d) => d.id !== id) }));
+    set((s) => {
+      const blobUrl = s.blobUrlCache[id];
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
+      const { [id]: _, ...rest } = s.blobUrlCache;
+      return { downloads: s.downloads.filter((d) => d.id !== id), blobUrlCache: rest };
+    });
   },
 
   isDownloaded: (youtubeId: string) => get().downloads.some((d) => d.youtubeId === youtubeId || d.id === youtubeId),
   isDownloading: (youtubeId: string) => get().downloadingIds.has(youtubeId),
   getProgress: (youtubeId: string) => get().progressMap[youtubeId] || null,
-  getBlobUrl: (youtubeId: string) => get().downloads.find((d) => d.youtubeId === youtubeId || d.id === youtubeId)?.audioUrl || null,
+  getBlobUrl: (youtubeId: string) => {
+    const state = get();
+    const download = state.downloads.find((d) => d.youtubeId === youtubeId || d.id === youtubeId);
+    if (!download?.audioBlob) return null;
+    const cached = state.blobUrlCache[download.id];
+    if (cached) return cached;
+    const url = URL.createObjectURL(download.audioBlob);
+    set((s) => ({ blobUrlCache: { ...s.blobUrlCache, [download.id]: url } }));
+    return url;
+  },
 
   setOnline: (online: boolean) => set({ isOnline: online }),
 
