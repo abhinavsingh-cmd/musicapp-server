@@ -6,9 +6,9 @@ RUN apt-get update && apt-get install -y python3 python3-pip ffmpeg curl && \
 
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm install
-COPY . .
-RUN npm run build
+RUN npm install --omit=dev
+COPY server.cjs ./
+COPY dist/ ./dist/
 
 EXPOSE 3001
 CMD ["node", "server.cjs"]

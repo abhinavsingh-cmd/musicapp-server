@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" width="192" height="192">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#8B5CF6"/>
+      <stop offset="50%" style="stop-color:#D946EF"/>
+      <stop offset="100%" style="stop-color:#F0ABFC"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#ffffff;stop-opacity:0.4"/>
+      <stop offset="100%" style="stop-color:#ffffff;stop-opacity:0"/>
+    </linearGradient>
+  </defs>
+  
+  <circle cx="96" cy="96" r="90" fill="url(#bg)"/>
+  <ellipse cx="75" cy="68" rx="38" ry="30" fill="url(#shine)" opacity="0.5"/>
+  <circle cx="68" cy="60" r="15" fill="white" opacity="0.15"/>
+  <circle cx="45" cy="50" r="8" fill="white" opacity="0.2"/>
+  <circle cx="150" cy="45" r="6" fill="white" opacity="0.15"/>
+  
+  <ellipse cx="76" cy="120" rx="20" ry="15" transform="rotate(-20 76 120)" fill="white"/>
+  <rect x="93" y="52" width="6" height="70" rx="3" fill="white" transform="rotate(-5 96 87)"/>
+  <path d="M99 52 C99 52 118 60 118 75 C118 83 106 79 99 73" fill="white" opacity="0.9"/>
+  
+  <g fill="white" opacity="0.8">
+    <path d="M138 75 L140 70 L142 75 L147 77 L142 79 L140 84 L138 79 L133 77 Z"/>
+    <path d="M52 98 L53.5 94 L55 98 L59 99.5 L55 101 L53.5 105 L52 101 L48 99.5 Z" transform="scale(0.6) translate(30 40)"/>
+  </g>
+</svg>
