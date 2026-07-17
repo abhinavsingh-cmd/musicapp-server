@@ -795,10 +795,12 @@ app.get("/api/stream/:videoId", (req, res) => {
   const audioUrl = "https://www.youtube.com/watch?v=" + videoId;
 
   const yt = spawn("yt-dlp", [
-    "-f", "bestaudio",
+    "-f", "bestaudio/best",
     "-o", "-",
     "--no-warnings",
     "--no-check-certificates",
+    "--extractor-args", "youtube:player_client=web",
+    "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     audioUrl
   ], { stdio: ["ignore", "pipe", "pipe"] });
 
@@ -810,7 +812,7 @@ app.get("/api/stream/:videoId", (req, res) => {
         res.status(504).json({ error: "Stream timed out" });
       }
     }
-  }, 15000);
+  }, 30000);
 
   yt.stdout.once("data", () => {
     headersSent = true;
