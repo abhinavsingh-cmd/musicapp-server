@@ -104,6 +104,10 @@ async function fetchLibrarySearch(query: string): Promise<Song[]> {
   const q = query.toLowerCase();
   try {
     const res = await apiFetch(api(`/search?q=${encodeURIComponent(query)}`));
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      throw new Error(`Expected JSON, got ${contentType.slice(0, 40) || 'unknown'}`);
+    }
     const data = await res.json();
     const serverSongs = (data.songs || []).map((s: any) => ({
       id: String(s.id || ''),
@@ -137,26 +141,38 @@ async function fetchLibrarySearch(query: string): Promise<Song[]> {
   }
 }
 
-async function fetchYouTubeSearch(query: string): Promise<YTSong[]> {
-  try {
-    const res = await apiFetch(api(`/youtube/search?q=${encodeURIComponent(query)}`), { timeout: 20_000 });
-    if (!res.ok) return [];
-    const data = await res.json();
-    const results = Array.isArray(data.results) ? data.results : [];
-    return results
-      .filter((r: any) => r && r.id)
-      .map((r: any) => ({
-        id: String(r.id),
-        title: String(r.title || 'Unknown'),
-        artist: String(r.artist || r.channel || 'Unknown'),
-        duration: Number(r.duration) || 0,
-        thumbnail: String(r.thumbnail || ''),
-        viewCount: Number(r.viewCount || r.view_count) || 0,
-      }))
-      .filter(isMusicResult);
-  } catch {
-    return [];
+async function fetchYouTubeSearch(query: string, maxRetries = 2): Promise<YTSong[]> {
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const res = await apiFetch(api(`/youtube/search?q=${encodeURIComponent(query)}`), { timeout: 20_000 });
+      if (!res.ok) return [];
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        throw new Error(`Expected JSON, got ${contentType.slice(0, 40) || 'unknown'}`);
+      }
+      const data = await res.json();
+      const results = Array.isArray(data.results) ? data.results : [];
+      return results
+        .filter((r: any) => r && r.id)
+        .map((r: any) => ({
+          id: String(r.id),
+          title: String(r.title || 'Unknown'),
+          artist: String(r.artist || r.channel || 'Unknown'),
+          duration: Number(r.duration) || 0,
+          thumbnail: String(r.thumbnail || ''),
+          viewCount: Number(r.viewCount || r.view_count) || 0,
+        }))
+        .filter(isMusicResult);
+    } catch (err: any) {
+      lastError = err;
+      if (attempt < maxRetries) {
+        await new Promise(r => setTimeout(r, 800 * Math.pow(2, attempt)));
+      }
+    }
   }
+  console.warn('[SearchStore] YouTube search failed after retries:', lastError?.message);
+  return [];
 }
 
 // ---- Store ----
@@ -195,45 +211,60 @@ export const useSearchStore = create<SearchState>((set, get) => ({
     const trimmed = query.trim();
     set({ debouncedQuery: trimmed, loading: true, ytLoading: true, page: 1, hasMore: true, error: null });
 
-    const [libResults, ytResults] = await Promise.all([
-      fetchLibrarySearch(trimmed),
-      fetchYouTubeSearch(trimmed),
-    ]);
+    try {
+      const [libResults, ytResults] = await Promise.all([
+        fetchLibrarySearch(trimmed),
+        fetchYouTubeSearch(trimmed),
+      ]);
 
-    set({
-      libraryResults: libResults,
-      ytResults: ytResults.slice(0, 15),
-      suggestions: libResults.slice(0, 5),
-      loading: false,
-      ytLoading: false,
-    });
+      set({
+        libraryResults: libResults || [],
+        ytResults: (ytResults || []).slice(0, 15),
+        suggestions: (libResults || []).slice(0, 5),
+        loading: false,
+        ytLoading: false,
+      });
+    } catch (err) {
+      console.error('[SearchStore] search failed:', err);
+      set({ loading: false, ytLoading: false, error: 'Search failed. Please try again.' });
+    }
   },
 
   searchYouTube: async (query: string, page = 1) => {
     set({ ytLoading: true, error: null });
-    const results = await fetchYouTubeSearch(query);
-    const sliced = results.slice(0, page * 15);
-    set({
-      ytResults: sliced,
-      ytLoading: false,
-      page,
-      hasMore: results.length > page * 15,
-    });
+    try {
+      const results = await fetchYouTubeSearch(query);
+      const sliced = (results || []).slice(0, page * 15);
+      set({
+        ytResults: sliced,
+        ytLoading: false,
+        page,
+        hasMore: (results || []).length > page * 15,
+      });
+    } catch (err) {
+      console.error('[SearchStore] searchYouTube failed:', err);
+      set({ ytLoading: false });
+    }
   },
 
   loadMore: async () => {
     const { debouncedQuery, page, hasMore } = get();
     if (!hasMore || !debouncedQuery) return;
     set({ ytLoading: true, error: null });
-    const results = await fetchYouTubeSearch(debouncedQuery);
-    const nextPage = page + 1;
-    const sliced = results.slice(0, nextPage * 15);
-    set({
-      ytResults: sliced,
-      ytLoading: false,
-      page: nextPage,
-      hasMore: results.length > nextPage * 15,
-    });
+    try {
+      const results = await fetchYouTubeSearch(debouncedQuery);
+      const nextPage = page + 1;
+      const sliced = (results || []).slice(0, nextPage * 15);
+      set({
+        ytResults: sliced,
+        ytLoading: false,
+        page: nextPage,
+        hasMore: (results || []).length > nextPage * 15,
+      });
+    } catch (err) {
+      console.error('[SearchStore] loadMore failed:', err);
+      set({ ytLoading: false });
+    }
   },
 
   clear: () => set({
@@ -257,7 +288,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
 // ---- Derived selectors ----
 
 export function selectFilteredLibrary(state: SearchState): Song[] {
-  let songs = state.libraryResults;
+  let songs = state.libraryResults || [];
   const { filter, sort, durationFilter, genreFilter } = state;
 
   if (filter === 'genres' && genreFilter) {
@@ -271,13 +302,13 @@ export function selectFilteredLibrary(state: SearchState): Song[] {
 }
 
 export function selectUniqueArtists(state: SearchState): string[] {
-  return extractUnique(state.libraryResults, 'artist');
+  return extractUnique(state.libraryResults || [], 'artist');
 }
 
 export function selectUniqueAlbums(state: SearchState): string[] {
-  return extractUnique(state.libraryResults, 'album');
+  return extractUnique(state.libraryResults || [], 'album');
 }
 
 export function selectUniqueGenres(state: SearchState): string[] {
-  return extractUnique(state.libraryResults, 'genre');
+  return extractUnique(state.libraryResults || [], 'genre');
 }

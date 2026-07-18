@@ -61,6 +61,7 @@ export const AlbumArtBackground: React.FC = () => {
           <img
             src={coverUrl}
             alt=""
+            decoding="async"
             className="absolute inset-0 w-full h-full object-cover"
             style={imageStyle}
           />
@@ -69,6 +70,7 @@ export const AlbumArtBackground: React.FC = () => {
           <img
             src={prevCoverUrl}
             alt=""
+            decoding="async"
             className="absolute inset-0 w-full h-full object-cover"
             style={imageStyle}
           />
@@ -84,6 +86,7 @@ export const AlbumArtBackground: React.FC = () => {
           <img
             src={prevCoverUrl}
             alt=""
+            decoding="async"
             className="absolute inset-0 w-full h-full object-cover"
             style={imageStyle}
           />
@@ -92,6 +95,7 @@ export const AlbumArtBackground: React.FC = () => {
           <img
             src={coverUrl}
             alt=""
+            decoding="async"
             className="absolute inset-0 w-full h-full object-cover"
             style={imageStyle}
           />

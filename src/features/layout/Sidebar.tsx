@@ -43,57 +43,36 @@ const createItems = [
   { icon: Plus, label: 'New Album', path: '/create-album' },
 ];
 
-const NavItem = memo(function NavItem({ item, index, isActive, onClose }: { 
+const NavItem = memo(function NavItem({ item, isActive, onClose }: { 
   item: typeof navItems[0]; 
-  index: number;
   isActive: boolean;
   onClose?: () => void;
 }) {
   const Icon = item.icon;
   
   return (
-    <motion.div
-      key={item.path}
-      initial={{ opacity: 0, x: -20 }}
-      animate={{ opacity: 1, x: 0 }}
-      transition={{ delay: 0.15 + index * 0.04 }}
-    >
+    <div key={item.path}>
       <Link
         to={item.path}
         onClick={onClose}
         className={cn(
-          "flex items-center space-x-3 px-3 py-2.5 rounded-xl transition-all duration-300 group relative overflow-hidden",
+          "flex items-center space-x-3 px-3 py-2.5 rounded-xl transition-all duration-200 group relative overflow-hidden",
           isActive
-            ? "text-[var(--color-text)] font-semibold"
+            ? "text-[var(--color-text)] font-semibold bg-white/5"
             : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
         )}
       >
-        <AnimatePresence>
-          {isActive && (
-            <motion.div
-              layoutId="sidebar-active"
-              className="absolute inset-0 liquid-glass rounded-xl"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ type: 'spring', stiffness: 300, damping: 25 }}
-            />
-          )}
-        </AnimatePresence>
-        
         {isActive && (
-          <motion.div
-            layoutId="sidebar-indicator"
-            className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-6 rounded-r-full"
+          <div
+            className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-6 rounded-r-full transition-all duration-200"
             style={{ background: 'linear-gradient(to bottom, var(--color-accent), var(--color-accent-dark))' }}
-            transition={{ type: 'spring', stiffness: 300, damping: 25 }}
           />
         )}
         
         <Icon
           size={20}
           className={cn(
-            "relative z-10 transition-all duration-300",
+            "relative z-10 transition-all duration-200",
             isActive
               ? "text-[var(--color-accent)]"
               : "text-[var(--color-text-muted)] group-hover:text-[var(--color-accent)] group-hover:scale-110"
@@ -101,7 +80,7 @@ const NavItem = memo(function NavItem({ item, index, isActive, onClose }: {
         />
         <span className="relative z-10 font-medium">{item.label}</span>
       </Link>
-    </motion.div>
+    </div>
   );
 });
 NavItem.displayName = 'NavItem';
@@ -230,11 +209,10 @@ export const Sidebar = memo(({ className, isOpen = true, onClose }: SidebarProps
             </motion.div>
 
             <nav className="space-y-1 px-3">
-              {navItems.map((item, index) => (
+              {navItems.map((item) => (
                 <NavItem 
                   key={item.path} 
                   item={item} 
-                  index={index} 
                   isActive={location.pathname === item.path}
                   onClose={handleClose}
                 />

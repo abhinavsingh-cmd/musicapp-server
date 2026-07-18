@@ -4,9 +4,9 @@ import { AuthProvider } from './contexts/AuthContext';
 import { LayoutProvider } from './contexts/LayoutContext';
 import { ThemeProvider } from './contexts/ThemeContext';
 import { AppLayout } from './features/layout/AppLayout';
-import { LoginPage } from './pages/LoginPage';
 import { ErrorBoundary } from './components/ErrorBoundary';
 
+const LoginPage = lazy(() => import('./pages/LoginPage'));
 const NotFoundPage = lazy(() => import('./pages/NotFoundPage'));
 const HomePage = lazy(() => import('./pages/HomePage'));
 const LibraryPage = lazy(() => import('./pages/LibraryPage'));
@@ -35,7 +35,9 @@ const App: React.FC = () => {
               <Routes>
                 <Route path="/login" element={
                   <ErrorBoundary level="page">
-                    <LoginPage />
+                    <Suspense fallback={<PageSpinner />}>
+                      <LoginPage />
+                    </Suspense>
                   </ErrorBoundary>
                 } />
                 <Route element={<AppLayout />}>

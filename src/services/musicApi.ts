@@ -70,22 +70,37 @@ export async function searchSongs(query: string): Promise<Song[]> {
 }
 
 export async function fetchYouTubeTrending(): Promise<Song[]> {
-  try {
-    const res = await apiFetch(api('/youtube/trending'), { timeout: 20_000 });
-    const data = await res.json();
-    return (data.results || []).map((r: any) => ({
-      id: 'trending-' + r.id,
-      youtubeId: r.id,
-      title: r.title || 'Unknown',
-      artist: r.artist || 'Unknown',
-      genre: 'Trending',
-      duration: r.duration || 0,
-      coverArt: r.thumbnail || '',
-      album: '',
-      audioUrl: '',
-      releaseYear: 0,
-    }));
-  } catch {
-    return [];
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt <= 2; attempt++) {
+    try {
+      const res = await apiFetch(api('/youtube/trending'), { timeout: 20_000 });
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        throw new Error(`Expected JSON, got ${contentType.slice(0, 40) || 'unknown'}`);
+      }
+      const data = await res.json();
+      const results = (data.results || [])
+        .filter((r: any) => r && r.id)
+        .map((r: any) => ({
+          id: 'trending-' + r.id,
+          youtubeId: r.id,
+          title: r.title || 'Unknown',
+          artist: r.artist || 'Unknown',
+          genre: 'Trending',
+          duration: r.duration || 0,
+          coverArt: r.thumbnail || '',
+          album: '',
+          audioUrl: '',
+          releaseYear: 0,
+        }));
+      return results;
+    } catch (err: any) {
+      lastError = err;
+      if (attempt < 2) {
+        await new Promise(r => setTimeout(r, 800 * Math.pow(2, attempt)));
+      }
+    }
   }
+  console.warn('[MusicApi] fetchYouTubeTrending failed after retries:', lastError?.message);
+  return [];
 }

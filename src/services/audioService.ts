@@ -3,6 +3,7 @@ import { backgroundPlaybackService } from './backgroundPlaybackService';
 import { equalizerService } from './equalizerService';
 import { backgroundAudio } from './backgroundAudio';
 import { youtubePlayerService } from './youtubePlayerService';
+import { api } from '../config/api';
 
 function isNativePlatform(): boolean {
   return !!(window as any).Capacitor;
@@ -26,6 +27,10 @@ function log(...args: any[]) {
   console.log('[AudioService]', ...args);
 }
 
+function logWarn(...args: any[]) {
+  console.warn('[AudioService]', ...args);
+}
+
 function logError(...args: any[]) {
   console.error('[AudioService]', ...args);
 }
@@ -46,14 +51,10 @@ export class AudioService {
   };
 
   private listeners = new Set<AudioEventHandler>();
-  private pendingPlayPromise: Promise<void> | null = null;
-  private playbackTransitionLock = false;
   private currentPlaybackId = 0;
   private lastProgressNotify = 0;
-  private maxRetries = 3;
-  private abortController: AbortController | null = null;
-  private isDestroyed = false;
   private consecutiveFailures = 0;
+  private progressInterval: ReturnType<typeof setInterval> | null = null;
 
   private getHtmlAudio(): HTMLAudioElement {
     if (!this.htmlAudio) {
@@ -93,7 +94,7 @@ export class AudioService {
   }
 
   private handleEnded = (): void => {
-    log('Audio ended');
+    log('HTML audio ended');
     this.setState({ isPlaying: false, currentTime: 0 });
     this.stopProgressTracking();
     this.emit('ended');
@@ -161,7 +162,6 @@ export class AudioService {
   }
 
   private emit(event: AudioEventType, data?: any): void {
-    if (this.isDestroyed) return;
     this.listeners.forEach(cb => {
       try { cb(event, data); } catch (e) { console.error('[AudioService] Listener error:', e); }
     });
@@ -177,65 +177,135 @@ export class AudioService {
   }
 
   async play(song: Song, playlist: Song[] = [], startIndex: number = 0): Promise<void> {
-    if (this.isDestroyed) return;
-    
-    log('play() called for:', song.title, 'by', song.artist, '| youtubeId:', song.youtubeId, '| audioUrl:', song.audioUrl ? song.audioUrl.substring(0, 60) + '...' : 'none');
+    log('play() called for:', song.title, '| youtubeId:', song.youtubeId || 'none', '| audioUrl:', song.audioUrl ? 'exists' : 'none');
     
     const playbackId = ++this.currentPlaybackId;
+    this.stopCurrentPlayback();
     
-    while (this.playbackTransitionLock) {
-      await new Promise(r => setTimeout(r, 10));
-      if (this.isDestroyed || this.currentPlaybackId !== playbackId) return;
+    this.setState({ 
+      currentSong: song, 
+      isLoading: true, 
+      error: null, 
+      duration: song.duration, 
+      currentTime: 0,
+      isPlaying: false 
+    });
+    
+    this.emit('loaded', { song, playlist, index: startIndex });
+    
+    const audio = this.getHtmlAudio();
+    
+    // ---- Playback priority chain ----
+    // 1. audioUrl exists → HTML audio (sampleSongs, downloaded songs, blob URLs)
+    // 2. youtubeId exists → try server stream first → fallback to YouTube IFrame
+    // 3. neither → error
+    
+    if (song.audioUrl && song.audioUrl.trim()) {
+      log('Path 1: HTML audio via audioUrl:', song.audioUrl.substring(0, 80));
+      this.useYoutubePlayer = false;
+      await this.playWithHtmlAudio(audio, song.audioUrl, song, playbackId);
+      return;
     }
     
-    if (this.isDestroyed || this.currentPlaybackId !== playbackId) return;
-    
-    this.playbackTransitionLock = true;
-    
-    try {
-      this.abortController?.abort();
-      this.abortController = new AbortController();
+    if (song.youtubeId) {
+      log('Path 2: Server stream → YouTube IFrame fallback for:', song.youtubeId);
+      this.useYoutubePlayer = false;
+      const streamUrl = api(`/stream/${song.youtubeId}`);
+      const playedViaStream = await this.tryServerStream(audio, streamUrl, song, playbackId);
+      if (playedViaStream) return;
       
-      this.clearAllTimers();
-      this.stopCurrentPlayback();
-      
-      this.setState({ 
-        currentSong: song, 
-        isLoading: true, 
-        error: null, 
-        duration: song.duration, 
-        currentTime: 0,
-        isPlaying: false 
-      });
-      
-      this.emit('loaded', { song, playlist, index: startIndex });
-      
-      const audio = this.getHtmlAudio();
-      
-      // Determine playback method
-      if (song.youtubeId) {
-        // YouTube IFrame API (primary path for server songs and APK)
-        log('Using YouTube IFrame API for:', song.youtubeId);
-        this.useYoutubePlayer = true;
-        await this.playWithYouTubePlayer(song, playbackId);
-      } else if (song.audioUrl) {
-        // Direct audio URL (sampleSongs, downloaded songs, blob URLs)
-        log('Using HTML audio for:', song.audioUrl.substring(0, 80));
-        this.useYoutubePlayer = false;
-        await this.playWithHtmlAudio(audio, song.audioUrl, song, playbackId);
-      } else {
-        logError('No audio source for song:', song.title);
-        this.setState({ error: 'No audio source for this song', isLoading: false });
-        this.emit('error', 'No audio source for this song');
-        this.emit('ended');
-        return;
-      }
-    } finally {
-      this.pendingPlayPromise = null;
-      if (this.currentPlaybackId === playbackId) {
-        this.playbackTransitionLock = false;
-      }
+      log('Path 2b: Server stream failed, falling back to YouTube IFrame');
+      this.useYoutubePlayer = true;
+      await this.playWithYouTubePlayer(song, playbackId);
+      return;
     }
+    
+    logError('No audio source for song:', song.title);
+    this.setState({ error: 'No audio source available', isLoading: false });
+    this.emit('error', 'No audio source available');
+    this.emit('ended');
+  }
+
+  private async tryServerStream(
+    audio: HTMLAudioElement,
+    streamUrl: string,
+    song: Song,
+    playbackId: number,
+  ): Promise<boolean> {
+    log('Trying server stream:', streamUrl);
+    audio.src = streamUrl;
+    audio.volume = this.state.volume;
+    
+    await equalizerService.resume();
+    
+    const timeoutMs = 12000;
+    let resolved = false;
+    
+    const result = await new Promise<'success' | 'error' | 'timeout'>((resolve) => {
+      const timer = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          audio.removeAttribute('src');
+          audio.load();
+          resolve('timeout');
+        }
+      }, timeoutMs);
+      
+      const onCanPlay = () => {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(timer);
+        audio.removeEventListener('error', onError);
+        resolve('success');
+      };
+      
+      const onError = () => {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(timer);
+        audio.removeEventListener('canplay', onCanPlay);
+        resolve('error');
+      };
+      
+      audio.addEventListener('canplay', onCanPlay, { once: true });
+      audio.addEventListener('error', onError, { once: true });
+      
+      try {
+        audio.load();
+      } catch (err) {
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timer);
+          resolve('error');
+        }
+      }
+    });
+    
+    if (this.currentPlaybackId !== playbackId) return false;
+    
+    if (result === 'success') {
+      log('Server stream ready, playing:', song.title);
+      try {
+        audio.volume = this.state.volume;
+        await audio.play();
+        if (this.currentPlaybackId !== playbackId) return false;
+        log('Server stream playing successfully:', song.title);
+        this.consecutiveFailures = 0;
+        this.setState({ isPlaying: true, isLoading: false, error: null });
+        this.startProgressTracking();
+        this.emit('play', { song });
+        if (isNativePlatform()) {
+          backgroundAudio.startService({ title: song.title, artist: song.artist }).catch(() => {});
+        }
+        return true;
+      } catch (err) {
+        logWarn('Server stream play() rejected:', err);
+      }
+    } else {
+      logWarn('Server stream failed:', result);
+    }
+    
+    return false;
   }
 
   private stopCurrentPlayback(): void {
@@ -250,7 +320,7 @@ export class AudioService {
       this.stopYouTubePlayer();
 
       this.ytUnsubscribe = youtubePlayerService.subscribe((event, data) => {
-        if (this.isDestroyed || this.currentPlaybackId !== playbackId) return;
+        if (this.currentPlaybackId !== playbackId) return;
 
         switch (event) {
           case 'play':
@@ -291,9 +361,8 @@ export class AudioService {
             this.consecutiveFailures++;
             this.setState({ error: `Playback error: ${data}`, isLoading: false, isPlaying: false });
             this.emit('error', `Playback error: ${data}`);
-            // Auto-skip on fatal YouTube errors (100=not found, 150=not embeddable)
             if (data === 100 || data === 150 || this.consecutiveFailures >= 2) {
-              log('YouTube fatal error, auto-skipping to next song');
+              log('YouTube fatal/error limit, auto-skipping');
               this.emit('ended');
             }
             break;
@@ -301,6 +370,7 @@ export class AudioService {
       });
 
       await youtubePlayerService.load(song);
+      if (this.currentPlaybackId !== playbackId) return;
       this.setState({ isLoading: false, duration: song.duration });
       this.emit('loaded', { song });
       log('YouTube video loaded:', song.youtubeId);
@@ -323,16 +393,17 @@ export class AudioService {
     await equalizerService.resume();
 
     let lastError: any = null;
-    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
-      if (this.isDestroyed || this.currentPlaybackId !== playbackId) return;
+    const maxRetries = 3;
+    
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      if (this.currentPlaybackId !== playbackId) return;
 
       try {
-        log(`HTML audio attempt ${attempt + 1}/${this.maxRetries + 1} for:`, song.title);
+        log(`HTML audio attempt ${attempt + 1}/${maxRetries + 1} for:`, song.title);
         audio.load();
-        this.pendingPlayPromise = audio.play();
-        await this.pendingPlayPromise;
+        await audio.play();
 
-        if (this.isDestroyed || this.currentPlaybackId !== playbackId) return;
+        if (this.currentPlaybackId !== playbackId) return;
 
         log('HTML audio playing successfully:', song.title);
         this.consecutiveFailures = 0;
@@ -349,7 +420,7 @@ export class AudioService {
 
         if (err instanceof DOMException && err.name === 'AbortError') return;
 
-        if (attempt < this.maxRetries) {
+        if (attempt < maxRetries) {
           audio.src = '';
           const delay = 1000 * (attempt + 1);
           log(`Retrying in ${delay}ms...`);
@@ -378,18 +449,37 @@ export class AudioService {
     if (this.htmlAudio) {
       this.htmlAudio.pause();
       this.htmlAudio.currentTime = 0;
-      this.htmlAudio.src = '';
+      this.htmlAudio.removeAttribute('src');
+      try { this.htmlAudio.load(); } catch {}
     }
   }
 
-  private clearAllTimers(): void {
-  }
-
   private startProgressTracking(): void {
+    this.stopProgressTracking();
     this.lastProgressNotify = 0;
+    this.progressInterval = setInterval(() => {
+      if (!this.state.isPlaying) return;
+      if (this.useYoutubePlayer) {
+        const ytTime = youtubePlayerService.getCurrentTime();
+        if (ytTime > 0) {
+          this.state.currentTime = ytTime;
+          this.state.duration = youtubePlayerService.getDuration() || this.state.duration;
+          const now = Date.now();
+          if (now - this.lastProgressNotify >= 500) {
+            this.lastProgressNotify = now;
+            this.emit('progress', this.state.currentTime);
+            this.emit('timeupdate', this.state.currentTime);
+          }
+        }
+      }
+    }, 500);
   }
 
   private stopProgressTracking(): void {
+    if (this.progressInterval !== null) {
+      clearInterval(this.progressInterval);
+      this.progressInterval = null;
+    }
   }
 
   pause(): void {
@@ -410,34 +500,38 @@ export class AudioService {
   }
 
   resume(): void {
-    log('resume() called, isPlaying:', this.state.isPlaying, 'currentSong:', this.state.currentSong?.title);
+    log('resume() called, isPlaying:', this.state.isPlaying, 'song:', this.state.currentSong?.title);
     
-    // Guard: skip if already playing or no song loaded
-    if (this.state.isPlaying || !this.state.currentSong) return;
+    if (!this.state.currentSong) {
+      logWarn('resume() called with no current song');
+      return;
+    }
+    
+    if (this.state.isPlaying) {
+      log('resume() called while already playing');
+      return;
+    }
 
     if (this.useYoutubePlayer) {
       log('Resuming YouTube player');
       youtubePlayerService.play();
-    } else if (this.htmlAudio) {
-      log('Resuming HTML audio, src:', this.htmlAudio.src?.substring(0, 80));
+    } else if (this.htmlAudio && this.htmlAudio.src) {
+      log('Resuming HTML audio');
       equalizerService.resume().then(() => {
         this.htmlAudio?.play().catch(err => {
           logError('HTML audio resume play() failed:', err);
+          this.consecutiveFailures++;
+          this.emit('error', 'Resume failed');
         });
       });
-    }
-
-    this.setState({ isPlaying: true });
-    this.startProgressTracking();
-    this.emit('play', { song: this.state.currentSong });
-    if (isNativePlatform()) {
-      backgroundAudio.startService({ title: this.state.currentSong.title, artist: this.state.currentSong.artist }).catch(() => {});
+    } else {
+      logWarn('resume() called but no audio source available');
+      return;
     }
   }
 
   stop(): void {
     log('stop() called');
-    this.clearAllTimers();
     this.stopCurrentPlayback();
     this.setState({ 
       isPlaying: false, 
@@ -452,7 +546,8 @@ export class AudioService {
   }
 
   seek(seconds: number): void {
-    const clamped = Math.max(0, Math.min(seconds, this.useYoutubePlayer ? this.getDuration() : this.state.duration));
+    const maxDur = this.useYoutubePlayer ? this.getDuration() : this.state.duration;
+    const clamped = Math.max(0, Math.min(seconds, maxDur || 0));
     this.state.currentTime = clamped;
     if (this.useYoutubePlayer) {
       youtubePlayerService.seek(clamped);
@@ -506,11 +601,7 @@ export class AudioService {
   }
 
   destroy(): void {
-    this.isDestroyed = true;
-    this.abortController?.abort();
-    this.clearAllTimers();
     this.stopCurrentPlayback();
-    
     this.detachHtmlAudioListeners();
     this.stopYouTubePlayer();
     youtubePlayerService.destroy();
@@ -531,7 +622,6 @@ export class AudioService {
       error: null,
     };
     this.currentPlaybackId = 0;
-    this.playbackTransitionLock = false;
     this.consecutiveFailures = 0;
   }
 }

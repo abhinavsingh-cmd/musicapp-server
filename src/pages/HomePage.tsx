@@ -42,9 +42,9 @@ const HeroSection = memo(({ songCount, onPlayAll, onPlayTrending }: { songCount:
       <AnimatePresence mode="wait">
         <motion.div
           key={heroIdx}
-          initial={{ opacity: 0, scale: 1.1 }}
-          animate={{ opacity: 1, scale: 1 }}
-          exit={{ opacity: 0, scale: 0.9 }}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
           transition={{ duration: 1, ease: 'easeInOut' }}
           className={`absolute inset-0 bg-gradient-to-br ${HERO_GRADIENTS[heroIdx]}`}
         />
@@ -52,22 +52,10 @@ const HeroSection = memo(({ songCount, onPlayAll, onPlayTrending }: { songCount:
       
       <div className="absolute inset-0 bg-gradient-to-b from-black/20 via-transparent to-black/40" />
       
-      <div className="absolute inset-0 overflow-hidden">
-        <motion.div 
-          animate={{ x: [0, 30, -20, 0], y: [0, -20, 30, 0], scale: [1, 1.1, 0.9, 1] }}
-          transition={{ duration: 20, repeat: Infinity, ease: 'easeInOut' }}
-          className="absolute top-10 left-10 w-40 h-40 rounded-full bg-white/10 blur-2xl"
-        />
-        <motion.div 
-          animate={{ x: [0, -40, 20, 0], y: [0, 30, -30, 0], scale: [1, 0.9, 1.2, 1] }}
-          transition={{ duration: 25, repeat: Infinity, ease: 'easeInOut' }}
-          className="absolute bottom-10 right-20 w-56 h-56 rounded-full bg-white/5 blur-3xl"
-        />
-        <motion.div 
-          animate={{ x: [0, 20, -30, 0], y: [0, -40, 20, 0] }}
-          transition={{ duration: 18, repeat: Infinity, ease: 'easeInOut' }}
-          className="absolute top-1/2 left-1/2 w-32 h-32 rounded-full bg-violet-500/20 blur-2xl"
-        />
+      <div className="absolute inset-0 overflow-hidden pointer-events-none">
+        <div className="absolute top-10 left-10 w-40 h-40 rounded-full bg-white/10 blur-2xl" />
+        <div className="absolute bottom-10 right-20 w-56 h-56 rounded-full bg-white/5 blur-3xl" />
+        <div className="absolute top-1/2 left-1/2 w-32 h-32 rounded-full bg-violet-500/20 blur-2xl" />
       </div>
       
       <motion.div 

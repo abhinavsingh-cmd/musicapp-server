@@ -40,11 +40,14 @@ interface SortablePlaylistSongRowProps {
   onRemove: () => void;
 }
 
-const SortablePlaylistSongRow: React.FC<SortablePlaylistSongRowProps> = ({
+const SortablePlaylistSongRow: React.FC<SortablePlaylistSongRowProps> = React.memo(({
   song, index, isCurrent, isPlaying, onPlay, onRemove,
 }) => {
-  const { downloadSong, isDownloaded, isDownloading } = useDownloadsStore();
-  const { favorites, toggleFavorite } = useAudioStore();
+  const isDownloadedFn = useDownloadsStore((s) => s.isDownloaded);
+  const isDownloadingFn = useDownloadsStore((s) => s.isDownloading);
+  const downloadSong = useDownloadsStore((s) => s.downloadSong);
+  const favorites = useAudioStore((s) => s.favorites);
+  const toggleFavorite = useAudioStore((s) => s.toggleFavorite);
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: song.id + '-' + index });
 
   const style = {
@@ -130,14 +133,14 @@ const SortablePlaylistSongRow: React.FC<SortablePlaylistSongRowProps> = ({
           <Heart size={14} fill={favorites.includes(song.id) ? "currentColor" : "none"} />
         </button>
         <button
-          onClick={(e) => { e.stopPropagation(); if (song.youtubeId && !isDownloaded(song.youtubeId) && !isDownloading(song.youtubeId)) downloadSong(song); }}
-          disabled={!song.youtubeId || isDownloaded(song.youtubeId ?? '') || isDownloading(song.youtubeId ?? '')}
+          onClick={(e) => { e.stopPropagation(); if (song.youtubeId && !isDownloadedFn(song.youtubeId) && !isDownloadingFn(song.youtubeId)) downloadSong(song); }}
+          disabled={!song.youtubeId || isDownloadedFn(song.youtubeId ?? '') || isDownloadingFn(song.youtubeId ?? '')}
           className={cn(
             "p-1.5 rounded-lg transition-all",
-            isDownloaded(song.youtubeId ?? '') ? "text-emerald-400" : isDownloading(song.youtubeId ?? '') ? "text-violet-400" : "text-gray-500 opacity-0 group-hover:opacity-100 hover:text-violet-400"
+            isDownloadedFn(song.youtubeId ?? '') ? "text-emerald-400" : isDownloadingFn(song.youtubeId ?? '') ? "text-violet-400" : "text-gray-500 opacity-0 group-hover:opacity-100 hover:text-violet-400"
           )}
         >
-          {isDownloaded(song.youtubeId ?? '') ? <Check size={14} /> : isDownloading(song.youtubeId ?? '') ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+          {isDownloadedFn(song.youtubeId ?? '') ? <Check size={14} /> : isDownloadingFn(song.youtubeId ?? '') ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
         </button>
         <button
           onClick={(e) => { e.stopPropagation(); onRemove(); }}
@@ -148,9 +151,8 @@ const SortablePlaylistSongRow: React.FC<SortablePlaylistSongRowProps> = ({
       </div>
     </div>
   );
-};
-
-// ---- Main component ----
+});
+SortablePlaylistSongRow.displayName = 'SortablePlaylistSongRow';
 
 interface PlaylistDetailProps {
   playlist: Playlist;
@@ -175,7 +177,7 @@ export const PlaylistDetail: React.FC<PlaylistDetailProps> = ({ playlist, onClos
   const [library, setLibrary] = useState<Song[]>([]);
 
   useEffect(() => {
-    fetchSongs().then(setLibrary);
+    fetchSongs().then(setLibrary).catch(() => {});
   }, []);
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -192,7 +194,7 @@ export const PlaylistDetail: React.FC<PlaylistDetailProps> = ({ playlist, onClos
   // Resolve songs from IDs
   const playlistSongs = useMemo(() => {
     const songMap = new Map(library.map((s) => [s.id, s]));
-    return playlist.songIds.map((id) => songMap.get(id)).filter(Boolean) as Song[];
+    return (playlist.songIds || []).map((id) => songMap.get(id)).filter(Boolean) as Song[];
   }, [playlist.songIds, library]);
 
   // Filter songs by search
@@ -497,7 +499,15 @@ export const PlaylistDetail: React.FC<PlaylistDetailProps> = ({ playlist, onClos
               <div className="space-y-1">
                 {filteredSongs.map((song) => {
                   const realIndex = playlistSongs.indexOf(song);
-                  return (
+  if (!playlist) {
+    return (
+      <div className="min-h-screen bg-[#0a0a14] flex items-center justify-center text-gray-400">
+        Playlist not found
+      </div>
+    );
+  }
+
+  return (
                     <SortablePlaylistSongRow
                       key={song.id + '-' + realIndex}
                       song={song}

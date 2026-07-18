@@ -1,8 +1,7 @@
-import React from 'react';
+import React, { memo } from 'react';
 import { Playlist } from '../../types/music';
 import { cn } from '../../utils/cn';
 import { Music, Clock, Play } from 'lucide-react';
-import { motion } from 'framer-motion';
 
 interface PlaylistCardProps {
   playlist: Playlist;
@@ -10,70 +9,54 @@ interface PlaylistCardProps {
   onPlayPlaylist?: (playlist: Playlist) => void;
 }
 
-export const PlaylistCard: React.FC<PlaylistCardProps> = ({
+const formatDuration = (seconds: number) => {
+  const hours = Math.floor(seconds / 3600);
+  const mins = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+  if (hours > 0) {
+    return `${hours}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  }
+  return `${mins}:${secs.toString().padStart(2, '0')}`;
+};
+
+export const PlaylistCard: React.FC<PlaylistCardProps> = memo(({
   playlist,
   className,
   onPlayPlaylist
 }) => {
-  const formatDuration = (seconds: number) => {
-    const hours = Math.floor(seconds / 3600);
-    const mins = Math.floor((seconds % 3600) / 60);
-    const secs = Math.floor(seconds % 60);
-    if (hours > 0) {
-      return `${hours}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-    }
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
-  };
-
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      whileHover={{
-        y: -6,
-        scale: 1.02,
-        transition: { type: 'spring', stiffness: 400, damping: 15 },
-      }}
-      whileTap={{ scale: 0.97 }}
+    <div
       className={cn(
-        "claymorphism p-5 rounded-2xl cursor-pointer relative overflow-hidden card-shine",
-        "group",
+        "claymorphism p-5 rounded-2xl cursor-pointer relative overflow-hidden card-shine group",
+        "transition-all duration-200 hover:-translate-y-1.5 hover:scale-[1.02] active:scale-[0.97]",
         className
       )}
       onClick={() => onPlayPlaylist?.(playlist)}
     >
       <div className="relative mb-4">
         {playlist.coverArt ? (
-          <motion.img
+          <img
             src={playlist.coverArt}
             alt={playlist.name}
-            className="w-full aspect-square rounded-xl object-cover shadow-lg"
-            whileHover={{ scale: 1.05, rotate: 1 }}
-            transition={{ type: 'spring', stiffness: 300 }}
+            loading="lazy"
+            decoding="async"
+            className="w-full aspect-square rounded-xl object-cover shadow-lg transition-transform duration-200 group-hover:scale-105 group-hover:rotate-1"
           />
         ) : (
           <div className="w-full aspect-square rounded-xl bg-gradient-to-br from-violet-500/20 to-pink-500/20 flex items-center justify-center">
             <Music size={48} className="text-violet-400" />
           </div>
         )}
-        <motion.div
-          className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent rounded-xl"
-          initial={{ opacity: 0 }}
-          whileHover={{ opacity: 1 }}
-        />
-        <motion.button
-          className="absolute bottom-2 right-2 w-12 h-12 bg-gradient-to-br from-green-400 to-emerald-500 rounded-full flex items-center justify-center shadow-lg"
-          initial={{ opacity: 0, scale: 0 }}
-          whileHover={{ scale: 1.1 }}
-          whileInView={{ opacity: 1, scale: 1 }}
-          transition={{ type: 'spring', stiffness: 300 }}
+        <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent rounded-xl opacity-0 group-hover:opacity-100 transition-opacity duration-200" />
+        <button
+          className="absolute bottom-2 right-2 w-12 h-12 bg-gradient-to-br from-green-400 to-emerald-500 rounded-full flex items-center justify-center shadow-lg opacity-0 group-hover:opacity-100 scale-75 group-hover:scale-100 transition-all duration-200"
           onClick={(e) => {
             e.stopPropagation();
             onPlayPlaylist?.(playlist);
           }}
         >
           <Play size={20} className="text-white ml-0.5" />
-        </motion.button>
+        </button>
       </div>
 
       <div className="space-y-1">
@@ -94,6 +77,7 @@ export const PlaylistCard: React.FC<PlaylistCardProps> = ({
           </span>
         </div>
       </div>
-    </motion.div>
+    </div>
   );
-};
+});
+PlaylistCard.displayName = 'PlaylistCard';

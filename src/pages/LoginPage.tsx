@@ -187,9 +187,11 @@ export const LoginPage: React.FC = () => {
           </p>
           <p className="text-xs text-gray-500 dark:text-gray-500 mt-1">
             Any password works. Or sign up with any email.
-          </p>
+           </p>
         </motion.div>
       </motion.div>
     </div>
   );
 };
+
+export default LoginPage;

@@ -220,16 +220,19 @@ export async function preloadSongs(songs: Song[], count: number = PRELOAD_COUNT)
   await Promise.all(
     toPreload.map(async (song) => {
       if (song.audioUrl && (song.audioUrl.startsWith('blob:') || song.audioUrl.startsWith('http'))) {
+        const audio = new Audio();
+        audio.preload = 'metadata';
+        audio.src = song.audioUrl;
         try {
-          const audio = new Audio();
-          audio.preload = 'metadata';
-          audio.src = song.audioUrl;
           await new Promise<void>((resolve) => {
             audio.onloadedmetadata = () => resolve();
             audio.onerror = () => resolve();
             setTimeout(resolve, 3000);
           });
-        } catch {}
+        } finally {
+          audio.removeAttribute('src');
+          audio.load();
+        }
       }
     })
   );

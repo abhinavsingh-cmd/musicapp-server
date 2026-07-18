@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { api, apiFetch } from '../config/api';
+import { api, apiFetch, ApiError } from '../config/api';
 
 export interface ChartSong {
   id: string;
@@ -22,6 +22,35 @@ interface ChartsStore {
   fetchCharts: () => Promise<void>;
 }
 
+async function fetchTrendingWithRetry(maxRetries = 2): Promise<any[]> {
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const res = await apiFetch(api('/youtube/trending'), { timeout: 20_000 });
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        throw new ApiError(
+          `Expected JSON, got ${contentType.slice(0, 40) || 'unknown'}`,
+          res.status,
+          'BAD_RESPONSE',
+          api('/youtube/trending'),
+        );
+      }
+      const data = await res.json();
+      return data.results || [];
+    } catch (err: any) {
+      lastError = err;
+      if (err instanceof ApiError && err.status >= 400 && err.status < 500 && err.status !== 429) {
+        throw err;
+      }
+      if (attempt < maxRetries) {
+        await new Promise(r => setTimeout(r, 800 * Math.pow(2, attempt)));
+      }
+    }
+  }
+  throw lastError || new Error('Failed to fetch trending');
+}
+
 export const useChartsStore = create<ChartsStore>((set) => ({
   topCharts: [],
   globalCharts: [],
@@ -33,19 +62,22 @@ export const useChartsStore = create<ChartsStore>((set) => ({
   fetchCharts: async () => {
     set({ loading: true, error: null });
     try {
-      const res = await apiFetch(api('/youtube/trending'), { timeout: 20_000 });
-      const data = await res.json();
+      const results = await fetchTrendingWithRetry();
 
-      const charts: ChartSong[] = (data.results || []).map((r: any, i: number) => ({
-        id: r.id,
-        title: r.title,
-        artist: r.artist,
-        thumbnail: r.thumbnail,
-        rank: i + 1,
-        trend: i < 3 ? 'up' as const : i < 10 ? 'same' as const : 'down' as const,
-        youtubeId: r.id,
-        duration: r.duration,
-      }));
+      const charts: ChartSong[] = results
+        .filter((r: any) => r && r.id && r.title)
+        .map((r: any, i: number) => ({
+          id: r.id,
+          title: r.title || 'Unknown',
+          artist: r.artist || 'Unknown',
+          thumbnail: r.thumbnail || '',
+          rank: i + 1,
+          trend: i < 3 ? 'up' as const : i < 10 ? 'same' as const : 'down' as const,
+          youtubeId: r.id,
+          duration: r.duration || 0,
+        }));
+
+      if (charts.length === 0) return;
 
       set({
         topCharts: charts.slice(0, 50),
@@ -66,6 +98,7 @@ export const useChartsStore = create<ChartsStore>((set) => ({
           c.artist.toLowerCase().includes('kpop')
         ).slice(0, 50),
         loading: false,
+        error: null,
       });
     } catch {
       set({ error: 'Failed to load charts', loading: false });

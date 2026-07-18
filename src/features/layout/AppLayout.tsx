@@ -1,4 +1,5 @@
 import React, { memo } from 'react';
+import { ErrorBoundary } from '../../components/ErrorBoundary';
 import { Sidebar } from './Sidebar';
 import { MainContent } from './MainContent';
 import { RightPlayer } from './RightPlayer';
@@ -21,16 +22,22 @@ export const AppLayout: React.FC = memo(() => {
       <AlbumArtBackground />
       <OfflineIndicator />
       
-      <Sidebar isOpen={sidebarOpen} onClose={() => {}} />
+      <ErrorBoundary level="section" fallback={<div className="w-64 bg-[var(--color-surface)] border-r border-[var(--color-border)] h-full" />}>
+        <Sidebar isOpen={sidebarOpen} onClose={() => {}} />
+      </ErrorBoundary>
       
       <div className={cn(
         "flex-1 flex flex-col overflow-hidden relative z-10 min-w-0 min-h-0",
         "lg:pl-0"
       )}>
-        <MainContent />
+        <ErrorBoundary level="section" fallback={<div className="flex-1 flex items-center justify-center text-[var(--color-text-secondary)]">Content unavailable</div>}>
+          <MainContent />
+        </ErrorBoundary>
       </div>
       
-      <RightPlayer />
+      <ErrorBoundary level="section" fallback={<div className="h-24 bg-[var(--color-surface)] border-t border-[var(--color-border)]" />}>
+        <RightPlayer />
+      </ErrorBoundary>
     </div>
   );
 });

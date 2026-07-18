@@ -5,7 +5,13 @@ import { motion } from 'framer-motion';
 import { Power } from 'lucide-react';
 
 export const EqualizerUI: React.FC = () => {
-  const { enabled, preset, gains, toggle, setBand, setPreset, bands } = useEqualizerStore();
+  const enabled = useEqualizerStore((s) => s.enabled);
+  const preset = useEqualizerStore((s) => s.preset);
+  const gains = useEqualizerStore((s) => s.gains);
+  const toggle = useEqualizerStore((s) => s.toggle);
+  const setBand = useEqualizerStore((s) => s.setBand);
+  const setPreset = useEqualizerStore((s) => s.setPreset);
+  const bands = useEqualizerStore((s) => s.bands);
 
   return (
     <div className="bg-[#1a1a2e] rounded-2xl p-6 border border-white/5">

@@ -4,34 +4,28 @@
  * Handles audio interruptions and background behavior:
  *   - Page visibility changes (tab switch, minimize)
  *   - Audio element interruptions (headphone unplug, Bluetooth disconnect)
+ *   - Auto-resume on audio reconnection
  *   - Media Session play/pause from OS notifications/lock screen
  *   - Prevents duplicate audio instances
- *   - Battery optimization (pauses progress tracking when hidden)
- *
- * Browser-specific notes:
- *   - Chrome: Full background audio support. Media Session API fully supported.
- *   - Safari iOS: Audio pauses on tab switch unless playing via Media Session.
- *               Use `navigator.mediaSession` to keep audio alive.
- *   - Firefox: Background audio supported. Media Session partially supported.
- *   - Edge: Same as Chrome (Chromium-based).
  */
 
 type InterruptionType = 'bluetooth-disconnect' | 'headphone-unplug' | 'audio-route-change' | 'system';
 type BackgroundCallback = (isBackground: boolean) => void;
 type InterruptionCallback = (type: InterruptionType) => void;
+type ReconnectCallback = () => void;
 
 class BackgroundPlaybackService {
   private isBackground = false;
+  private wasInterrupted = false;
   private backgroundCallbacks: BackgroundCallback[] = [];
   private interruptionCallbacks: InterruptionCallback[] = [];
+  private reconnectCallbacks: ReconnectCallback[] = [];
   private audioElements: Map<HTMLAudioElement, Array<() => void>> = new Map();
   private visibilityHandler: (() => void) | null = null;
   private freezeHandler: (() => void) | null = null;
   private resumeHandler: (() => void) | null = null;
 
-  /** Initialize all listeners */
   init(): void {
-    // Page visibility
     this.visibilityHandler = () => {
       const hidden = document.hidden;
       if (hidden && !this.isBackground) {
@@ -44,9 +38,7 @@ class BackgroundPlaybackService {
     };
     document.addEventListener('visibilitychange', this.visibilityHandler);
 
-    // Page freeze/resume (BFCache - Firefox, Safari)
     this.freezeHandler = () => {
-      // Page is being frozen – save state immediately
       this.backgroundCallbacks.forEach((cb) => cb(true));
     };
     this.resumeHandler = () => {
@@ -55,37 +47,54 @@ class BackgroundPlaybackService {
     document.addEventListener('freeze', this.freezeHandler);
     document.addEventListener('resume', this.resumeHandler);
 
-    // Save state before page unload
     window.addEventListener('beforeunload', this.handleBeforeUnload);
+
+    this.setupAudioReconnection();
   }
 
-  /** Register an audio element for interruption monitoring */
+  private setupAudioReconnection(): void {
+    if (typeof MediaSession === 'undefined') return;
+    
+    try {
+      if ('mediaSession' in navigator) {
+        navigator.mediaSession.setActionHandler('play', null);
+      }
+    } catch {}
+  }
+
   registerAudioElement(audio: HTMLAudioElement): void {
     const abortHandler = () => {
+      this.wasInterrupted = true;
       this.notifyInterruption('audio-route-change');
     };
     const emptiedHandler = () => {
       if (this.audioElements.has(audio)) {
+        this.wasInterrupted = true;
         this.notifyInterruption('audio-route-change');
+      }
+    };
+    const stalledHandler = () => {
+      if (this.audioElements.has(audio)) {
+        this.notifyInterruption('system');
       }
     };
 
     audio.addEventListener('abort', abortHandler);
     audio.addEventListener('emptied', emptiedHandler);
-    this.audioElements.set(audio, [abortHandler, emptiedHandler]);
+    audio.addEventListener('stalled', stalledHandler);
+    this.audioElements.set(audio, [abortHandler, emptiedHandler, stalledHandler]);
   }
 
-  /** Unregister an audio element */
   unregisterAudioElement(audio: HTMLAudioElement): void {
     const handlers = this.audioElements.get(audio);
     if (handlers) {
       audio.removeEventListener('abort', handlers[0]);
       audio.removeEventListener('emptied', handlers[1]);
+      if (handlers[2]) audio.removeEventListener('stalled', handlers[2]);
       this.audioElements.delete(audio);
     }
   }
 
-  /** Subscribe to background/foreground transitions */
   onBackgroundChange(callback: BackgroundCallback): () => void {
     this.backgroundCallbacks.push(callback);
     return () => {
@@ -93,7 +102,6 @@ class BackgroundPlaybackService {
     };
   }
 
-  /** Subscribe to audio interruptions */
   onInterruption(callback: InterruptionCallback): () => void {
     this.interruptionCallbacks.push(callback);
     return () => {
@@ -101,12 +109,25 @@ class BackgroundPlaybackService {
     };
   }
 
-  /** Check if the app is currently in the background */
+  onReconnect(callback: ReconnectCallback): () => void {
+    this.reconnectCallbacks.push(callback);
+    return () => {
+      this.reconnectCallbacks = this.reconnectCallbacks.filter((cb) => cb !== callback);
+    };
+  }
+
   getIsBackground(): boolean {
     return this.isBackground;
   }
 
-  /** Destroy all listeners */
+  getWasInterrupted(): boolean {
+    return this.wasInterrupted;
+  }
+
+  clearInterruption(): void {
+    this.wasInterrupted = false;
+  }
+
   destroy(): void {
     if (this.visibilityHandler) {
       document.removeEventListener('visibilitychange', this.visibilityHandler);
@@ -121,19 +142,25 @@ class BackgroundPlaybackService {
     for (const [audio, handlers] of this.audioElements) {
       audio.removeEventListener('abort', handlers[0]);
       audio.removeEventListener('emptied', handlers[1]);
+      if (handlers[2]) audio.removeEventListener('stalled', handlers[2]);
     }
     this.audioElements.clear();
     this.backgroundCallbacks = [];
     this.interruptionCallbacks = [];
+    this.reconnectCallbacks = [];
   }
 
   private handleBeforeUnload = (): void => {
-    // Trigger immediate save via callbacks
     this.backgroundCallbacks.forEach((cb) => cb(true));
   };
 
   private notifyInterruption(type: InterruptionType): void {
     this.interruptionCallbacks.forEach((cb) => cb(type));
+  }
+
+  notifyReconnect(): void {
+    this.wasInterrupted = false;
+    this.reconnectCallbacks.forEach((cb) => cb());
   }
 }
 

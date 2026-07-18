@@ -1,8 +1,49 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, memo } from 'react';
 import { useChartsStore, ChartSong } from '../stores/chartsStore';
 import { useAudioStore } from '../stores/audioStore';
-import { motion } from 'framer-motion';
 import { TrendingUp, TrendingDown, Minus, Sparkles, Music, Loader2 } from 'lucide-react';
+
+const ChartRow = memo(({ song, index, onPlay, getTrendIcon }: {
+  song: ChartSong;
+  index: number;
+  onPlay: () => void;
+  getTrendIcon: (trend: string) => React.ReactNode;
+}) => (
+  <div
+    onClick={onPlay}
+    className="flex items-center gap-4 p-3 rounded-xl bg-white/5 hover:bg-white/10 cursor-pointer transition-colors group"
+    style={{ animationDelay: `${index * 30}ms` }}
+  >
+    <div className="w-8 text-center flex-shrink-0">
+      <span className={`text-lg font-bold ${
+        index < 3 ? 'text-violet-400' : 'text-gray-500'
+      }`}>
+        {song.rank}
+      </span>
+    </div>
+    <div className="w-5 flex-shrink-0">{getTrendIcon(song.trend)}</div>
+    <img
+      src={song.thumbnail}
+      alt={song.title}
+      loading="lazy"
+      decoding="async"
+      className="w-12 h-12 rounded-lg object-cover flex-shrink-0"
+    />
+    <div className="flex-1 min-w-0">
+      <p className="text-white font-medium truncate group-hover:text-violet-300 transition-colors text-sm">
+        {song.title}
+      </p>
+      <p className="text-xs text-gray-400 truncate">{song.artist}</p>
+    </div>
+    <div className="text-gray-500 text-sm flex-shrink-0">
+      {song.duration ? `${Math.floor(song.duration / 60)}:${(song.duration % 60).toString().padStart(2, '0')}` : '--:--'}
+    </div>
+    <div className="w-8 h-8 rounded-full bg-violet-500/20 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
+      <Music size={14} className="text-violet-400" />
+    </div>
+  </div>
+));
+ChartRow.displayName = 'ChartRow';
 
 export const ChartsPage: React.FC = () => {
   const topCharts = useChartsStore((s) => s.topCharts);
@@ -18,9 +59,9 @@ export const ChartsPage: React.FC = () => {
     fetchCharts();
   }, [fetchCharts]);
 
-  const charts = activeTab === 'top' ? topCharts : activeTab === 'global' ? globalCharts : bollywoodCharts;
+  const charts = (activeTab === 'top' ? topCharts : activeTab === 'global' ? globalCharts : bollywoodCharts) || [];
 
-  const handlePlay = (song: ChartSong, index: number) => {
+  const handlePlay = React.useCallback((song: ChartSong, index: number) => {
     const songData = {
       id: song.id,
       title: song.title,
@@ -33,7 +74,7 @@ export const ChartsPage: React.FC = () => {
       youtubeId: song.youtubeId,
       releaseYear: new Date().getFullYear(),
     };
-    loadSong(songData, charts.map(c => ({
+    loadSong(songData, (charts || []).map(c => ({
       id: c.id,
       title: c.title,
       artist: c.artist,
@@ -45,7 +86,7 @@ export const ChartsPage: React.FC = () => {
       youtubeId: c.youtubeId,
       releaseYear: new Date().getFullYear(),
     })), index);
-  };
+  }, [charts, loadSong]);
 
   const getTrendIcon = (trend: string) => {
     switch (trend) {
@@ -76,7 +117,6 @@ export const ChartsPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Tabs */}
       <div className="flex gap-2">
         {(['top', 'global', 'bollywood'] as const).map((tab) => (
           <button
@@ -93,50 +133,30 @@ export const ChartsPage: React.FC = () => {
         ))}
       </div>
 
-      {/* Chart List */}
       <div className="space-y-2">
-        {charts.map((song, index) => (
-          <motion.div
+        {(charts || []).map((song, index) => (
+          <ChartRow
             key={song.id}
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: index * 0.02 }}
-            onClick={() => handlePlay(song, index)}
-            className="flex items-center gap-4 p-3 rounded-xl bg-white/5 hover:bg-white/10 cursor-pointer transition-all group"
-          >
-            <div className="w-8 text-center">
-              <span className={`text-lg font-bold ${
-                index < 3 ? 'text-violet-400' : 'text-gray-500'
-              }`}>
-                {song.rank}
-              </span>
-            </div>
-            <div className="w-5">{getTrendIcon(song.trend)}</div>
-            <img
-              src={song.thumbnail}
-              alt={song.title}
-              loading="lazy"
-              className="w-12 h-12 rounded-lg object-cover"
-            />
-            <div className="flex-1 min-w-0">
-              <p className="text-white font-medium truncate group-hover:text-violet-300 transition-colors">
-                {song.title}
-              </p>
-              <p className="text-sm text-gray-400 truncate">{song.artist}</p>
-            </div>
-            <div className="text-gray-500 text-sm">
-              {song.duration ? `${Math.floor(song.duration / 60)}:${(song.duration % 60).toString().padStart(2, '0')}` : '--:--'}
-            </div>
-            <div className="w-8 h-8 rounded-full bg-violet-500/20 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
-              <Music size={14} className="text-violet-400" />
-            </div>
-          </motion.div>
+            song={song}
+            index={index}
+            onPlay={() => handlePlay(song, index)}
+            getTrendIcon={getTrendIcon}
+          />
         ))}
       </div>
 
-      {error && (
+      {error && !charts.length && (
         <div className="text-center text-red-400 py-8">
           <p>{error}</p>
+          <button onClick={fetchCharts} className="mt-2 text-sm text-violet-400 hover:underline">
+            Try again
+          </button>
+        </div>
+      )}
+
+      {!loading && !error && charts.length === 0 && (
+        <div className="text-center text-gray-500 py-12">
+          <p>No chart data available</p>
           <button onClick={fetchCharts} className="mt-2 text-sm text-violet-400 hover:underline">
             Try again
           </button>

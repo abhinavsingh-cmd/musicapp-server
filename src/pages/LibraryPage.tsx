@@ -24,7 +24,7 @@ export const LibraryPage: React.FC = () => {
   const [songs, setSongs] = useState<Song[]>([]);
   const [loading, setLoading] = useState(true);
   const loadSong = useAudioStore((s) => s.loadSong);
-  const { playlists: userPlaylists } = usePlaylistStore();
+  const userPlaylists = usePlaylistStore((s) => s.playlists);
   const navigate = useNavigate();
 
   useEffect(() => {

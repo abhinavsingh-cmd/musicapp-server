@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { PlayerControls } from './controls/PlayerControls';
 import { ProgressBar } from './controls/ProgressBar';
 import { SongInfo } from './controls/SongInfo';
@@ -17,44 +17,7 @@ export const Player: React.FC<PlayerProps> = ({ className }) => {
   const [showLyrics, setShowLyrics] = useState(false);
   const [showEqualizer, setShowEqualizer] = useState(false);
   const [showQueue, setShowQueue] = useState(false);
-  const [mousePosition, setMousePosition] = useState({ x: 0, y: 0 });
   const [isExpanded, setIsExpanded] = useState(false);
-  const playerRef = useRef<HTMLDivElement>(null);
-  const rafRef = useRef<number>(0);
-
-  useEffect(() => {
-    if (!playerRef.current) return;
-
-    const handleMouseMove = (e: MouseEvent) => {
-      if (rafRef.current) return;
-      rafRef.current = requestAnimationFrame(() => {
-        if (!playerRef.current) { rafRef.current = 0; return; }
-        const rect = playerRef.current.getBoundingClientRect();
-        if (e.clientX >= rect.left && e.clientX <= rect.right && 
-            e.clientY >= rect.top && e.clientY <= rect.bottom) {
-          const centerX = rect.left + rect.width / 2;
-          const centerY = rect.top + rect.height / 2;
-          setMousePosition({
-            x: ((e.clientX - centerX) / rect.width) * 100,
-            y: ((e.clientY - centerY) / rect.height) * 100,
-          });
-        }
-        rafRef.current = 0;
-      });
-    };
-
-    const handleMouseLeave = () => {
-      setMousePosition({ x: 0, y: 0 });
-    };
-
-    window.addEventListener('mousemove', handleMouseMove);
-    playerRef.current.addEventListener('mouseleave', handleMouseLeave);
-    return () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      playerRef.current?.removeEventListener('mouseleave', handleMouseLeave);
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    };
-  }, []);
 
   const togglePanel = useCallback((panel: 'lyrics' | 'equalizer' | 'queue') => {
     if (panel === 'lyrics') {
@@ -196,7 +159,6 @@ export const Player: React.FC<PlayerProps> = ({ className }) => {
       </AnimatePresence>
 
       <div
-        ref={playerRef}
         className={cn(
           "fixed bottom-0 left-0 right-0 z-50",
           "liquid-glass",
@@ -204,14 +166,6 @@ export const Player: React.FC<PlayerProps> = ({ className }) => {
           className
         )}
       >
-        <div
-          className="absolute inset-0 pointer-events-none opacity-30"
-          style={{
-            background: `radial-gradient(600px circle at ${mousePosition.x + 50}% ${mousePosition.y + 50}%, rgba(139, 92, 246, 0.15), transparent 40%)`,
-            willChange: 'background',
-          }}
-        />
-
         <ProgressBar />
 
         <div className="flex items-center px-4 gap-4 relative z-10" style={{ height: '64px' }}>

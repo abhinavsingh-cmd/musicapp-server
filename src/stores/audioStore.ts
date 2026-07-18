@@ -74,10 +74,19 @@ function persistPlaybackState() {
 }
 
 let audioServiceUnsub: (() => void) | null = null;
-let currentSongIdRef: string | null = null;
 let lastMediaUpdate = 0;
-let consecutivePlayFailures = 0;
+let lastProgressUpdate = 0;
+const PROGRESS_THROTTLE_MS = 250;
 const MAX_CONSECUTIVE_FAILURES = 5;
+let consecutivePlayFailures = 0;
+let nextSongRetryTimeout: ReturnType<typeof setTimeout> | null = null;
+
+function clearNextSongRetry() {
+  if (nextSongRetryTimeout) {
+    clearTimeout(nextSongRetryTimeout);
+    nextSongRetryTimeout = null;
+  }
+}
 
 function initAudioServiceHandler() {
   if (audioServiceUnsub) return;
@@ -87,8 +96,8 @@ function initAudioServiceHandler() {
 
     switch (event) {
       case 'play': {
+        clearNextSongRetry();
         if (data?.song) {
-          currentSongIdRef = data.song.id;
           consecutivePlayFailures = 0;
         }
         const current = state.currentSong;
@@ -108,6 +117,8 @@ function initAudioServiceHandler() {
         break;
       }
       case 'playing': {
+        clearNextSongRetry();
+        consecutivePlayFailures = 0;
         useAudioStore.setState({ isPlaying: true, isLoading: false });
         break;
       }
@@ -115,21 +126,39 @@ function initAudioServiceHandler() {
         useAudioStore.setState({ isPlaying: false });
         mediaSessionService.updatePlaybackState(false, audioService.getCurrentTime(), audioService.getDuration());
         break;
-      case 'ended':
-        useAudioStore.getState().nextSong();
-        break;
-      case 'progress':
-      case 'timeupdate': {
-        if (currentSongIdRef && state.currentSong?.id !== currentSongIdRef) return;
-        useAudioStore.setState({ progress: data });
-        const now = Date.now();
-        if (now - lastMediaUpdate > 1000) {
-          lastMediaUpdate = now;
-          mediaSessionService.updatePlaybackState(useAudioStore.getState().isPlaying, data, audioService.getDuration());
+      case 'ended': {
+        const repeatMode = useQueueStore.getState().repeatMode;
+        if (repeatMode === 'one') {
+          const currentSong = useAudioStore.getState().currentSong;
+          if (currentSong) {
+            const queue = useQueueStore.getState().queue;
+            const idx = useQueueStore.getState().currentIndex;
+            audioService.play(currentSong, queue, idx).catch((err) => {
+              console.error('[AudioStore] repeat-one play() failed:', err);
+            });
+          }
+        } else {
+          useAudioStore.getState().nextSong();
         }
         break;
       }
-      case 'loaded':
+      case 'progress':
+      case 'timeupdate': {
+        const now = Date.now();
+        if (now - lastProgressUpdate < PROGRESS_THROTTLE_MS) return;
+        lastProgressUpdate = now;
+        useAudioStore.setState({ progress: data });
+        if (now - lastMediaUpdate > 1000) {
+          lastMediaUpdate = now;
+          mediaSessionService.updatePlaybackState(
+            useAudioStore.getState().isPlaying,
+            data,
+            audioService.getDuration(),
+          );
+        }
+        break;
+      }
+      case 'loaded': {
         const current = state.currentSong;
         if (data?.song && current && current.id !== data.song.id) return;
         useAudioStore.setState({
@@ -142,9 +171,13 @@ function initAudioServiceHandler() {
           mediaSessionService.updateMetadata(data.song);
         }
         break;
+      }
       case 'error':
         console.error('[AudioStore] Playback error:', data);
-        useAudioStore.setState({ error: typeof data === 'string' ? data : 'Playback error', isLoading: false });
+        useAudioStore.setState({
+          error: typeof data === 'string' ? data : 'Playback error',
+          isLoading: false,
+        });
         break;
       case 'waiting':
         useAudioStore.setState({ isLoading: true });
@@ -162,12 +195,10 @@ mediaSessionService.init({
   onNext: () => useAudioStore.getState().nextSong(),
   onPrevious: () => useAudioStore.getState().previousSong(),
   onSeekForward: () => {
-    const state = useAudioStore.getState();
-    state.seek(Math.min(audioService.getCurrentTime() + 10, audioService.getDuration()));
+    useAudioStore.getState().seek(Math.min(audioService.getCurrentTime() + 10, audioService.getDuration()));
   },
   onSeekBackward: () => {
-    const state = useAudioStore.getState();
-    state.seek(Math.max(audioService.getCurrentTime() - 10, 0));
+    useAudioStore.getState().seek(Math.max(audioService.getCurrentTime() - 10, 0));
   },
   onStop: () => useAudioStore.getState().pause(),
 });
@@ -175,9 +206,18 @@ mediaSessionService.init({
 backgroundPlaybackService.init();
 
 backgroundPlaybackService.onInterruption((type) => {
-  console.log('Audio interruption:', type);
+  console.log('[AudioStore] Audio interruption:', type);
   if (type === 'headphone-unplug' || type === 'bluetooth-disconnect') {
     useAudioStore.getState().pause();
+  }
+});
+
+backgroundPlaybackService.onReconnect(() => {
+  console.log('[AudioStore] Audio reconnected, resuming if paused');
+  const state = useAudioStore.getState();
+  if (state.currentSong && !state.isPlaying) {
+    audioService.resume();
+    useAudioStore.setState({ isPlaying: true });
   }
 });
 
@@ -196,7 +236,7 @@ function startPersistenceInterval() {
     if (state.isPlaying && state.currentSong) {
       persistPlaybackState();
     }
-  }, 10000);
+  }, 30000);
 }
 
 initAudioServiceHandler();
@@ -205,13 +245,39 @@ startPersistenceInterval();
 useQueueStore.subscribe((state) => {
   mediaSessionService.updateActions(
     state.currentIndex < state.queue.length - 1,
-    state.currentIndex > 0
+    state.currentIndex > 0,
   );
 });
 
 window.addEventListener('beforeunload', () => {
   persistPlaybackState();
 });
+
+function autoSkipNextSong() {
+  clearNextSongRetry();
+  const state = useAudioStore.getState();
+  if (!state.currentSong) return;
+  
+  consecutivePlayFailures++;
+  console.log(`[AudioStore] Auto-skip failure ${consecutivePlayFailures}/${MAX_CONSECUTIVE_FAILURES}`);
+  
+  if (consecutivePlayFailures >= MAX_CONSECUTIVE_FAILURES) {
+    console.error('[AudioStore] Too many consecutive failures, stopping auto-skip');
+    useAudioStore.setState({
+      error: 'Multiple songs failed to play. Check your connection.',
+      isLoading: false,
+      isPlaying: false,
+    });
+    return;
+  }
+  
+  const backoff = Math.min(1000 * Math.pow(2, consecutivePlayFailures - 1), 5000);
+  console.log(`[AudioStore] Retrying next song in ${backoff}ms`);
+  nextSongRetryTimeout = setTimeout(() => {
+    nextSongRetryTimeout = null;
+    useAudioStore.getState().nextSong();
+  }, backoff);
+}
 
 export const useAudioStore = create<AudioStore>((set, get) => ({
   currentSong: null,
@@ -226,10 +292,9 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
   favorites: loadFavorites(),
 
   loadSong: (song: Song, playlist: Song[], index: number) => {
+    clearNextSongRetry();
     const { currentSong } = get();
     if (currentSong?.id === song.id) return;
-
-    console.log('[AudioStore] loadSong:', song.title, 'index:', index, 'playlist size:', playlist.length);
 
     const qs = useQueueStore.getState();
     qs.setQueue(playlist, index);
@@ -248,26 +313,18 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
     audioService.play(song, playlist, index).catch(err => {
       console.error('[AudioStore] loadSong play() failed:', err);
       set({ error: err.message, isLoading: false, isPlaying: false });
-      // Auto-skip to next song on failure
-      consecutivePlayFailures++;
-      if (consecutivePlayFailures < MAX_CONSECUTIVE_FAILURES) {
-        console.log(`[AudioStore] Auto-skipping to next song (failure ${consecutivePlayFailures}/${MAX_CONSECUTIVE_FAILURES})`);
-        setTimeout(() => get().nextSong(), 500);
-      } else {
-        console.error('[AudioStore] Too many consecutive failures, stopping auto-skip');
-      }
+      autoSkipNextSong();
     });
   },
 
   play: () => {
     const { currentSong } = get();
-    console.log('[AudioStore] play() called, currentSong:', currentSong?.title);
+    if (!currentSong) return;
     audioService.resume();
     set({ isPlaying: true });
   },
 
   pause: () => {
-    console.log('[AudioStore] pause() called');
     audioService.pause();
     set({ isPlaying: false });
   },
@@ -275,7 +332,6 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
   togglePlayPause: () => {
     const { isPlaying, currentSong } = get();
     if (!currentSong) return;
-    console.log('[AudioStore] togglePlayPause, isPlaying:', isPlaying);
     if (isPlaying) {
       audioService.pause();
       set({ isPlaying: false });
@@ -286,9 +342,9 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
   },
 
   nextSong: async () => {
+    clearNextSongRetry();
     const song = await useQueueStore.getState().nextSong();
     if (song) {
-      console.log('[AudioStore] nextSong:', song.title);
       set({
         currentSong: song,
         isPlaying: true,
@@ -299,24 +355,19 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
       });
       audioService.play(song, useQueueStore.getState().queue, useQueueStore.getState().currentIndex).catch(err => {
         console.error('[AudioStore] nextSong play() failed:', err);
-        consecutivePlayFailures++;
-        if (consecutivePlayFailures < MAX_CONSECUTIVE_FAILURES) {
-          console.log(`[AudioStore] Auto-skipping after nextSong failure (${consecutivePlayFailures}/${MAX_CONSECUTIVE_FAILURES})`);
-          setTimeout(() => get().nextSong(), 500);
-        } else {
-          set({ error: err.message, isLoading: false, isPlaying: false });
-          console.error('[AudioStore] Too many consecutive failures, stopping');
-        }
+        set({ error: err.message, isLoading: false, isPlaying: false });
+        autoSkipNextSong();
       });
     } else {
+      clearNextSongRetry();
       set({ isPlaying: false, progress: 0 });
     }
   },
 
   previousSong: async () => {
+    clearNextSongRetry();
     const song = await useQueueStore.getState().previousSong();
     if (song) {
-      console.log('[AudioStore] previousSong:', song.title);
       set({
         currentSong: song,
         isPlaying: true,
@@ -327,12 +378,8 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
       });
       audioService.play(song, useQueueStore.getState().queue, useQueueStore.getState().currentIndex).catch(err => {
         console.error('[AudioStore] previousSong play() failed:', err);
-        consecutivePlayFailures++;
-        if (consecutivePlayFailures < MAX_CONSECUTIVE_FAILURES) {
-          setTimeout(() => get().nextSong(), 500);
-        } else {
-          set({ error: err.message, isLoading: false, isPlaying: false });
-        }
+        set({ error: err.message, isLoading: false, isPlaying: false });
+        autoSkipNextSong();
       });
     }
   },
@@ -373,6 +420,8 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
     const saved = playbackPersistenceService.load();
     if (!saved || !saved.currentSong) return;
 
+    console.log('[AudioStore] Restoring from persistence:', saved.currentSong.title);
+
     const vol = saved.volume ?? 0.7;
     audioService.setVolume(vol);
 
@@ -381,12 +430,8 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
       qs.setQueue(saved.queue, saved.currentIndex || 0);
       if (saved.isShuffled !== qs.isShuffled) qs.toggleShuffle();
       if (saved.repeatMode !== qs.repeatMode) {
-        const modes: Array<'off' | 'all' | 'one'> = ['off', 'all', 'one'];
-        const targetIdx = modes.indexOf(saved.repeatMode);
-        if (targetIdx >= 0) {
-          while (useQueueStore.getState().repeatMode !== saved.repeatMode) {
-            qs.cycleRepeat();
-          }
+        while (useQueueStore.getState().repeatMode !== saved.repeatMode) {
+          qs.cycleRepeat();
         }
       }
     }
@@ -398,13 +443,14 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
       repeatMode: saved.repeatMode,
       duration: saved.duration,
       progress: 0,
+      isPlaying: false,
     });
 
-    setTimeout(() => {
-      if (saved.progress > 0 && saved.progress < saved.duration) {
+    if (saved.progress > 0 && saved.progress < saved.duration) {
+      setTimeout(() => {
         audioService.seek(saved.progress);
         set({ progress: saved.progress });
-      }
-    }, 500);
+      }, 500);
+    }
   },
 }));

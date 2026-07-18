@@ -1056,6 +1056,21 @@ app.get("/api", (req, res) => {
   res.json({ status: "ok", songs: songs.length, version: "1.0.0" });
 });
 
+// Catch-all 404 — always return JSON, never HTML
+app.use((req, res) => {
+  if (!res.headersSent) {
+    res.status(404).json({ error: "Not found", path: req.originalUrl });
+  }
+});
+
+// Global error handler — always return JSON, never HTML
+app.use((err, _req, res, _next) => {
+  console.error("[Server] Unhandled error:", err.message || err);
+  if (!res.headersSent) {
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, "0.0.0.0", () => {
   console.log("Server: " + songs.length + " songs on http://localhost:" + PORT);

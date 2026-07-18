@@ -70,18 +70,29 @@ export const SearchPage: React.FC = () => {
   const [showSuggestions, setShowSuggestions] = useState(true);
   const debouncedQuery = useDebounce(query, 300);
 
-  const {
-    filter, sort, durationFilter, genreFilter,
-    libraryResults, ytResults, suggestions,
-    loading, ytLoading, hasMore, error,
-    setFilter, setSort, setDurationFilter, setGenreFilter,
-    search, loadMore, clear,
-  } = useSearchStore();
+  const filter = useSearchStore((s) => s.filter);
+  const sort = useSearchStore((s) => s.sort);
+  const durationFilter = useSearchStore((s) => s.durationFilter);
+  const genreFilter = useSearchStore((s) => s.genreFilter);
+  const loading = useSearchStore((s) => s.loading);
+  const ytLoading = useSearchStore((s) => s.ytLoading);
+  const hasMore = useSearchStore((s) => s.hasMore);
+  const error = useSearchStore((s) => s.error);
+  const suggestions = useSearchStore((s) => s.suggestions);
+  const setFilter = useSearchStore((s) => s.setFilter);
+  const setSort = useSearchStore((s) => s.setSort);
+  const setDurationFilter = useSearchStore((s) => s.setDurationFilter);
+  const setGenreFilter = useSearchStore((s) => s.setGenreFilter);
+  const search = useSearchStore((s) => s.search);
+  const loadMore = useSearchStore((s) => s.loadMore);
+  const clear = useSearchStore((s) => s.clear);
 
   const filteredLibrary = useSearchStore(selectFilteredLibrary);
   const uniqueArtists = useSearchStore(selectUniqueArtists);
   const uniqueAlbums = useSearchStore(selectUniqueAlbums);
   const uniqueGenres = useSearchStore(selectUniqueGenres);
+  const libraryResults = useSearchStore((s) => s.libraryResults);
+  const ytResults = useSearchStore((s) => s.ytResults);
 
   const loadSong = useAudioStore((s) => s.loadSong);
   const downloadSong = useDownloadsStore((s) => s.downloadSong);

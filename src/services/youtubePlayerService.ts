@@ -14,6 +14,10 @@ function log(...args: any[]) {
   console.log('[YouTubePlayer]', ...args);
 }
 
+function logWarn(...args: any[]) {
+  console.warn('[YouTubePlayer]', ...args);
+}
+
 function logError(...args: any[]) {
   console.error('[YouTubePlayer]', ...args);
 }
@@ -24,12 +28,14 @@ class YouTubePlayerService {
   private listeners = new Set<YTPlayerEventHandler>();
   private readyPromise: Promise<void>;
   private readyResolver: (() => void) | null = null;
-  private progressInterval: number | null = null;
+  private progressInterval: ReturnType<typeof setInterval> | null = null;
   private currentSongId: string | null = null;
   private volume = 0.7;
   private retryCount = 0;
   private maxRetries = 1;
   private currentLoadSong: Song | null = null;
+  private isReady = false;
+  private loadTimedOut = false;
 
   constructor() {
     this.readyPromise = new Promise((resolve) => {
@@ -40,19 +46,46 @@ class YouTubePlayerService {
 
   private loadAPI(): void {
     if (window.YT && window.YT.Player) {
+      this.isReady = true;
       this.readyResolver?.();
       return;
     }
 
     const tag = document.createElement('script');
     tag.src = 'https://www.youtube.com/iframe_api';
+    tag.onerror = () => {
+      logError('Failed to load YouTube IFrame API script');
+      this.loadTimedOut = true;
+      this.readyResolver?.();
+    };
+    
+    const timeout = setTimeout(() => {
+      if (!this.isReady) {
+        logWarn('YouTube IFrame API load timed out after 10s');
+        this.loadTimedOut = true;
+        this.readyResolver?.();
+      }
+    }, 10000);
+    
     tag.onload = () => {
       const check = setInterval(() => {
         if (window.YT && window.YT.Player) {
           clearInterval(check);
+          clearTimeout(timeout);
+          this.isReady = true;
+          log('YouTube IFrame API ready');
           this.readyResolver?.();
         }
       }, 100);
+      
+      setTimeout(() => {
+        clearInterval(check);
+        if (!this.isReady) {
+          logWarn('YouTube IFrame API initialization timed out');
+          this.loadTimedOut = true;
+          this.readyResolver?.();
+        }
+      }, 10000);
     };
     document.head.appendChild(tag);
   }
@@ -69,7 +102,12 @@ class YouTubePlayerService {
 
   async initialize(): Promise<void> {
     if (this.player) return;
+    
     await this.readyPromise;
+    
+    if (this.loadTimedOut || !window.YT || !window.YT.Player) {
+      throw new Error('YouTube IFrame API failed to load');
+    }
 
     const container = this.ensureContainer();
 
@@ -88,11 +126,13 @@ class YouTubePlayerService {
         origin: window.location.origin,
       },
       events: {
-        onReady: () => { log('YouTube player ready'); },
+        onReady: () => { log('YouTube player instance ready'); },
         onStateChange: (e: any) => this.handleStateChange(e),
         onError: (e: any) => this.handleError(e),
       },
     });
+    
+    log('YouTube player initialized');
   }
 
   private handleStateChange(e: any): void {
@@ -122,34 +162,30 @@ class YouTubePlayerService {
     const errorCode = e.data;
     logError('Error code:', errorCode);
     
-    // YouTube error codes:
-    // 2 = invalid parameter
-    // 5 = HTML5 player error
-    // 100 = video not found (private, removed)
-    // 101/150 = not embeddable
-    // 150 = same as 101
-    
     if (errorCode === 2 || errorCode === 5) {
-      // Retryable errors - try reloading the video
       if (this.retryCount < this.maxRetries && this.currentLoadSong) {
         this.retryCount++;
         log('Retryable error, retrying... attempt', this.retryCount);
         setTimeout(() => {
           if (this.currentLoadSong && this.player && this.player.loadVideoById) {
-            this.player.loadVideoById(this.currentLoadSong.youtubeId);
+            try {
+              this.player.loadVideoById(this.currentLoadSong.youtubeId);
+            } catch (err) {
+              logError('Retry loadVideoById failed:', err);
+              this.emit('error', errorCode);
+            }
           }
         }, 1000);
         return;
       }
     }
     
-    // Fatal errors (100, 150) or max retries exceeded - emit error for auto-skip
     this.emit('error', errorCode);
   }
 
   private startProgressTracking(): void {
     this.stopProgressTracking();
-    this.progressInterval = window.setInterval(() => {
+    this.progressInterval = setInterval(() => {
       if (this.player && this.player.getCurrentTime) {
         const time = this.player.getCurrentTime() || 0;
         this.emit('progress', time);
@@ -186,8 +222,15 @@ class YouTubePlayerService {
     this.currentLoadSong = song;
     this.retryCount = 0;
 
-    if (this.player.loadVideoById) {
-      this.player.loadVideoById(song.youtubeId);
+    if (this.player && this.player.loadVideoById) {
+      try {
+        this.player.loadVideoById(song.youtubeId);
+      } catch (err) {
+        logError('loadVideoById failed:', err);
+        throw new Error('Failed to load YouTube video');
+      }
+    } else {
+      throw new Error('YouTube player not initialized');
     }
 
     this.player.setVolume(this.volume * 100);
@@ -209,33 +252,49 @@ class YouTubePlayerService {
 
   pause(): void {
     if (this.player && this.player.pauseVideo) {
-      this.player.pauseVideo();
+      try {
+        this.player.pauseVideo();
+      } catch (e) {
+        logError('Pause error:', e);
+      }
     }
   }
 
   seek(seconds: number): void {
     if (this.player && this.player.seekTo) {
-      this.player.seekTo(seconds, true);
+      try {
+        this.player.seekTo(seconds, true);
+      } catch (e) {
+        logError('Seek error:', e);
+      }
     }
   }
 
   setVolume(vol: number): void {
     this.volume = vol;
     if (this.player && this.player.setVolume) {
-      this.player.setVolume(vol * 100);
+      try {
+        this.player.setVolume(vol * 100);
+      } catch (e) {
+        logError('setVolume error:', e);
+      }
     }
   }
 
   getCurrentTime(): number {
     if (this.player && this.player.getCurrentTime) {
-      return this.player.getCurrentTime() || 0;
+      try {
+        return this.player.getCurrentTime() || 0;
+      } catch { return 0; }
     }
     return 0;
   }
 
   getDuration(): number {
     if (this.player && this.player.getDuration) {
-      return this.player.getDuration() || 0;
+      try {
+        return this.player.getDuration() || 0;
+      } catch { return 0; }
     }
     return 0;
   }
@@ -250,7 +309,11 @@ class YouTubePlayerService {
   stop(): void {
     this.stopProgressTracking();
     if (this.player && this.player.stopVideo) {
-      this.player.stopVideo();
+      try {
+        this.player.stopVideo();
+      } catch (e) {
+        logError('Stop error:', e);
+      }
     }
     this.currentSongId = null;
     this.currentLoadSong = null;
