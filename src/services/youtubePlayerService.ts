@@ -10,18 +10,26 @@ declare global {
   }
 }
 
+function log(...args: any[]) {
+  console.log('[YouTubePlayer]', ...args);
+}
+
+function logError(...args: any[]) {
+  console.error('[YouTubePlayer]', ...args);
+}
+
 class YouTubePlayerService {
   private player: any = null;
   private containerEl: HTMLDivElement | null = null;
   private listeners = new Set<YTPlayerEventHandler>();
-  private ready = false;
   private readyPromise: Promise<void>;
   private readyResolver: (() => void) | null = null;
   private progressInterval: number | null = null;
   private currentSongId: string | null = null;
   private volume = 0.7;
-  private hasInteracted = false;
-  private muted = true;
+  private retryCount = 0;
+  private maxRetries = 1;
+  private currentLoadSong: Song | null = null;
 
   constructor() {
     this.readyPromise = new Promise((resolve) => {
@@ -32,7 +40,6 @@ class YouTubePlayerService {
 
   private loadAPI(): void {
     if (window.YT && window.YT.Player) {
-      this.ready = true;
       this.readyResolver?.();
       return;
     }
@@ -43,7 +50,6 @@ class YouTubePlayerService {
       const check = setInterval(() => {
         if (window.YT && window.YT.Player) {
           clearInterval(check);
-          this.ready = true;
           this.readyResolver?.();
         }
       }, 100);
@@ -82,7 +88,7 @@ class YouTubePlayerService {
         origin: window.location.origin,
       },
       events: {
-        onReady: () => {},
+        onReady: () => { log('YouTube player ready'); },
         onStateChange: (e: any) => this.handleStateChange(e),
         onError: (e: any) => this.handleError(e),
       },
@@ -95,7 +101,6 @@ class YouTubePlayerService {
 
     switch (e.data) {
       case YT.PlayerState.PLAYING:
-        this.muted = false;
         this.startProgressTracking();
         this.emit('play');
         break;
@@ -114,8 +119,32 @@ class YouTubePlayerService {
   }
 
   private handleError(e: any): void {
-    console.error('[YouTubePlayer] Error:', e.data);
-    this.emit('error', `YouTube player error: ${e.data}`);
+    const errorCode = e.data;
+    logError('Error code:', errorCode);
+    
+    // YouTube error codes:
+    // 2 = invalid parameter
+    // 5 = HTML5 player error
+    // 100 = video not found (private, removed)
+    // 101/150 = not embeddable
+    // 150 = same as 101
+    
+    if (errorCode === 2 || errorCode === 5) {
+      // Retryable errors - try reloading the video
+      if (this.retryCount < this.maxRetries && this.currentLoadSong) {
+        this.retryCount++;
+        log('Retryable error, retrying... attempt', this.retryCount);
+        setTimeout(() => {
+          if (this.currentLoadSong && this.player && this.player.loadVideoById) {
+            this.player.loadVideoById(this.currentLoadSong.youtubeId);
+          }
+        }, 1000);
+        return;
+      }
+    }
+    
+    // Fatal errors (100, 150) or max retries exceeded - emit error for auto-skip
+    this.emit('error', errorCode);
   }
 
   private startProgressTracking(): void {
@@ -143,7 +172,7 @@ class YouTubePlayerService {
 
   private emit(event: YTPlayerEventType, data?: any): void {
     this.listeners.forEach(cb => {
-      try { cb(event, data); } catch (e) { console.error('[YouTubePlayer] Listener error:', e); }
+      try { cb(event, data); } catch (e) { logError('Listener error:', e); }
     });
   }
 
@@ -152,7 +181,10 @@ class YouTubePlayerService {
 
     if (!song.youtubeId) throw new Error('No YouTube ID');
 
+    log('Loading video:', song.youtubeId, song.title);
     this.currentSongId = song.id;
+    this.currentLoadSong = song;
+    this.retryCount = 0;
 
     if (this.player.loadVideoById) {
       this.player.loadVideoById(song.youtubeId);
@@ -170,7 +202,7 @@ class YouTubePlayerService {
       try {
         this.player.playVideo();
       } catch (e) {
-        console.error('[YouTubePlayer] Play error:', e);
+        logError('Play error:', e);
       }
     }
   }
@@ -221,6 +253,7 @@ class YouTubePlayerService {
       this.player.stopVideo();
     }
     this.currentSongId = null;
+    this.currentLoadSong = null;
   }
 
   destroy(): void {

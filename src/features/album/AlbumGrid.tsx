@@ -41,13 +41,19 @@ export const AlbumGrid: React.FC<AlbumGridProps> = ({
           onClick={() => onPlayAlbum?.(album)}
         >
           <div className="relative mb-4">
-            <motion.img
-              src={album.coverArt}
-              alt={album.title}
-              className="w-full aspect-square rounded-xl object-cover shadow-lg"
-              whileHover={{ rotate: 2 }}
-              transition={{ type: 'spring', stiffness: 300 }}
-            />
+            {album.coverArt ? (
+              <motion.img
+                src={album.coverArt}
+                alt={album.title}
+                className="w-full aspect-square rounded-xl object-cover shadow-lg"
+                whileHover={{ rotate: 2 }}
+                transition={{ type: 'spring', stiffness: 300 }}
+              />
+            ) : (
+              <div className="w-full aspect-square rounded-xl bg-gradient-to-br from-violet-500/20 to-pink-500/20 flex items-center justify-center">
+                <Music size={48} className="text-violet-400" />
+              </div>
+            )}
             <motion.div
               className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent rounded-xl"
               initial={{ opacity: 0 }}

@@ -1,6 +1,6 @@
 import { Song } from '../types/music';
 import { sampleSongs } from '../data/sampleSongs';
-import { api } from '../config/api';
+import { api, apiFetch } from '../config/api';
 
 interface ApiSong {
   id: string;
@@ -17,12 +17,12 @@ interface ApiSong {
 function mapSong(s: ApiSong): Song {
   return {
     id: String(s.id),
-    title: s.title,
-    artist: s.artist,
-    album: s.album || s.artist,
-    duration: s.duration,
+    title: s.title || 'Unknown',
+    artist: s.artist || 'Unknown',
+    album: s.album || s.artist || 'Unknown',
+    duration: s.duration || 0,
     genre: s.genre || 'Pop',
-    coverArt: s.coverArt,
+    coverArt: s.coverArt || '',
     audioUrl: s.youtubeId ? '' : (s.audioUrl || ''),
     youtubeId: s.youtubeId,
     releaseYear: 2024,
@@ -34,7 +34,7 @@ function mapSong(s: ApiSong): Song {
 function dedupe(songs: Song[]): Song[] {
   const seen = new Set<string>();
   return songs.filter(s => {
-    const key = `${s.title.toLowerCase()}|${s.artist.toLowerCase()}`;
+    const key = `${(s.title || '').toLowerCase()}|${(s.artist || '').toLowerCase()}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -46,8 +46,7 @@ let cachedSongs: Song[] | null = null;
 export async function fetchSongs(): Promise<Song[]> {
   if (cachedSongs) return cachedSongs;
   try {
-    const res = await fetch(api('/songs'));
-    if (!res.ok) throw new Error('Server unavailable');
+    const res = await apiFetch(api('/songs'));
     const data = await res.json();
     const serverSongs = (data.songs || []).map(mapSong);
     cachedSongs = dedupe([...sampleSongs, ...serverSongs]);
@@ -64,25 +63,24 @@ export async function searchSongs(query: string): Promise<Song[]> {
   const allSongs = await fetchSongs();
   return allSongs.filter(
     (s) =>
-      s.title.toLowerCase().includes(q) ||
-      s.artist.toLowerCase().includes(q) ||
-      s.genre.toLowerCase().includes(q)
+      (s.title || '').toLowerCase().includes(q) ||
+      (s.artist || '').toLowerCase().includes(q) ||
+      (s.genre || '').toLowerCase().includes(q)
   );
 }
 
 export async function fetchYouTubeTrending(): Promise<Song[]> {
   try {
-    const res = await fetch(api('/youtube/trending'));
-    if (!res.ok) throw new Error('Failed to fetch trending');
+    const res = await apiFetch(api('/youtube/trending'), { timeout: 20_000 });
     const data = await res.json();
     return (data.results || []).map((r: any) => ({
       id: 'trending-' + r.id,
       youtubeId: r.id,
-      title: r.title,
-      artist: r.artist,
+      title: r.title || 'Unknown',
+      artist: r.artist || 'Unknown',
       genre: 'Trending',
-      duration: r.duration,
-      coverArt: r.thumbnail,
+      duration: r.duration || 0,
+      coverArt: r.thumbnail || '',
       album: '',
       audioUrl: '',
       releaseYear: 0,

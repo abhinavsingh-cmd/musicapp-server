@@ -12,7 +12,7 @@
  *   - Thumbnail prefetch alongside song download
  */
 
-import { api } from '../config/api';
+import { api, apiFetch } from '../config/api';
 
 const DB_NAME = 'music-app-offline';
 const DB_VERSION = 2;
@@ -149,10 +149,8 @@ export async function downloadSongWithProgress(
   },
   onProgress?: (p: DownloadProgress) => void,
 ): Promise<DownloadedSong> {
-  // Use direct audio URL if available, otherwise fall back to server endpoint
   const downloadUrl = song.audioUrl || api(`/download/${song.youtubeId}?title=${encodeURIComponent(song.title)}`);
-  const res = await fetch(downloadUrl);
-  if (!res.ok) throw new Error('Download failed');
+  const res = await apiFetch(downloadUrl, { timeout: 60_000, retries: 1 });
 
   const contentLength = Number(res.headers.get('content-length')) || 0;
   const reader = res.body?.getReader();
@@ -205,7 +203,10 @@ export async function cacheThumbnail(url: string): Promise<string> {
   if (existing?.blobUrl) { db.close(); return existing.blobUrl; }
 
   try {
-    const res = await fetch(url);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(timer);
     if (!res.ok) { db.close(); return url; }
     const blob = await res.blob();
     const blobUrl = URL.createObjectURL(blob);

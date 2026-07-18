@@ -1,13 +1,13 @@
 import { create } from 'zustand';
 import { Song } from '../types/music';
 import { sampleSongs } from '../data/sampleSongs';
-import { api } from '../config/api';
+import { api, apiFetch } from '../config/api';
 
 // ---- Types ----
 
 export type FilterType = 'all' | 'songs' | 'artists' | 'albums' | 'playlists' | 'genres';
 export type SortMode = 'relevance' | 'newest' | 'popular' | 'alpha';
-export type DurationFilter = 'any' | 'short' | 'medium' | 'long'; // <3m, 3-6m, >6m
+export type DurationFilter = 'any' | 'short' | 'medium' | 'long';
 
 interface SearchState {
   query: string;
@@ -23,10 +23,10 @@ interface SearchState {
   suggestions: Song[];
   loading: boolean;
   ytLoading: boolean;
-  page: number;          // for infinite scroll (YouTube pages)
+  page: number;
   hasMore: boolean;
+  error: string | null;
 
-  // actions
   setQuery: (q: string) => void;
   setFilter: (f: FilterType) => void;
   setSort: (s: SortMode) => void;
@@ -59,7 +59,8 @@ const SKIP_WORDS = [
 ];
 
 function isMusicResult(r: YTSong): boolean {
-  const lower = (r.title + ' ' + r.artist).toLowerCase();
+  if (!r || !r.id || !r.title) return false;
+  const lower = (r.title + ' ' + (r.artist || '')).toLowerCase();
   if (r.duration > 0 && (r.duration < 30 || r.duration > 900)) return false;
   for (const w of SKIP_WORDS) { if (lower.includes(w)) return false; }
   return true;
@@ -102,20 +103,19 @@ function extractUnique(songs: Song[], key: keyof Song): string[] {
 async function fetchLibrarySearch(query: string): Promise<Song[]> {
   const q = query.toLowerCase();
   try {
-    const res = await fetch(api(`/search?q=${encodeURIComponent(query)}`));
-    if (!res.ok) throw new Error('Server unavailable');
+    const res = await apiFetch(api(`/search?q=${encodeURIComponent(query)}`));
     const data = await res.json();
     const serverSongs = (data.songs || []).map((s: any) => ({
-      id: String(s.id),
-      title: s.title,
-      artist: s.artist,
-      album: s.album || s.artist,
-      duration: s.duration,
-      genre: s.genre || 'Pop',
-      coverArt: s.coverArt,
-      audioUrl: s.youtubeId ? '' : (s.audioUrl || ''),
-      youtubeId: s.youtubeId,
-      releaseYear: s.releaseYear || 2024,
+      id: String(s.id || ''),
+      title: String(s.title || 'Unknown'),
+      artist: String(s.artist || 'Unknown'),
+      album: String(s.album || s.artist || ''),
+      duration: Number(s.duration) || 0,
+      genre: String(s.genre || 'Pop'),
+      coverArt: String(s.coverArt || ''),
+      audioUrl: s.youtubeId ? '' : String(s.audioUrl || ''),
+      youtubeId: String(s.youtubeId || ''),
+      releaseYear: Number(s.releaseYear) || 2024,
       isFavorite: false,
       playCount: Math.floor(Math.random() * 50000),
     }));
@@ -125,6 +125,7 @@ async function fetchLibrarySearch(query: string): Promise<Song[]> {
     const seen = new Set<string>();
     const merged: Song[] = [];
     for (const s of [...localSongs, ...serverSongs]) {
+      if (!s || !s.title) continue;
       const key = `${s.title.toLowerCase()}|${s.artist.toLowerCase()}`;
       if (!seen.has(key)) { seen.add(key); merged.push(s); }
     }
@@ -138,9 +139,21 @@ async function fetchLibrarySearch(query: string): Promise<Song[]> {
 
 async function fetchYouTubeSearch(query: string): Promise<YTSong[]> {
   try {
-    const res = await fetch(api(`/youtube/search?q=${encodeURIComponent(query)}`));
+    const res = await apiFetch(api(`/youtube/search?q=${encodeURIComponent(query)}`), { timeout: 20_000 });
+    if (!res.ok) return [];
     const data = await res.json();
-    return (data.results || []).filter(isMusicResult);
+    const results = Array.isArray(data.results) ? data.results : [];
+    return results
+      .filter((r: any) => r && r.id)
+      .map((r: any) => ({
+        id: String(r.id),
+        title: String(r.title || 'Unknown'),
+        artist: String(r.artist || r.channel || 'Unknown'),
+        duration: Number(r.duration) || 0,
+        thumbnail: String(r.thumbnail || ''),
+        viewCount: Number(r.viewCount || r.view_count) || 0,
+      }))
+      .filter(isMusicResult);
   } catch {
     return [];
   }
@@ -164,6 +177,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
   ytLoading: false,
   page: 1,
   hasMore: true,
+  error: null,
 
   setQuery: (q) => set({ query: q }),
   setFilter: (f) => set({ filter: f }),
@@ -173,17 +187,17 @@ export const useSearchStore = create<SearchState>((set, get) => ({
   setSuggestions: (s) => set({ suggestions: s }),
 
   search: async (query: string) => {
-    if (!query.trim()) {
-      set({ libraryResults: [], ytResults: [], suggestions: [], loading: false, ytLoading: false, debouncedQuery: '' });
+    if (!query || !query.trim()) {
+      set({ libraryResults: [], ytResults: [], suggestions: [], loading: false, ytLoading: false, debouncedQuery: '', error: null });
       return;
     }
 
-    set({ debouncedQuery: query, loading: true, ytLoading: true, page: 1, hasMore: true });
+    const trimmed = query.trim();
+    set({ debouncedQuery: trimmed, loading: true, ytLoading: true, page: 1, hasMore: true, error: null });
 
-    // Parallel: library + YouTube
     const [libResults, ytResults] = await Promise.all([
-      fetchLibrarySearch(query),
-      fetchYouTubeSearch(query),
+      fetchLibrarySearch(trimmed),
+      fetchYouTubeSearch(trimmed),
     ]);
 
     set({
@@ -196,7 +210,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
   },
 
   searchYouTube: async (query: string, page = 1) => {
-    set({ ytLoading: true });
+    set({ ytLoading: true, error: null });
     const results = await fetchYouTubeSearch(query);
     const sliced = results.slice(0, page * 15);
     set({
@@ -210,7 +224,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
   loadMore: async () => {
     const { debouncedQuery, page, hasMore } = get();
     if (!hasMore || !debouncedQuery) return;
-    set({ ytLoading: true });
+    set({ ytLoading: true, error: null });
     const results = await fetchYouTubeSearch(debouncedQuery);
     const nextPage = page + 1;
     const sliced = results.slice(0, nextPage * 15);
@@ -236,6 +250,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
     sort: 'relevance',
     durationFilter: 'any',
     genreFilter: '',
+    error: null,
   }),
 }));
 
@@ -245,21 +260,11 @@ export function selectFilteredLibrary(state: SearchState): Song[] {
   let songs = state.libraryResults;
   const { filter, sort, durationFilter, genreFilter } = state;
 
-  // Filter by type
-  if (filter === 'songs') {
-    // all songs (no extra filter)
-  } else if (filter === 'artists') {
-    // handled at UI level (show artist grid)
-  } else if (filter === 'albums') {
-    // handled at UI level
-  } else if (filter === 'genres' && genreFilter) {
+  if (filter === 'genres' && genreFilter) {
     songs = songs.filter((s) => s.genre === genreFilter);
   }
 
-  // Duration filter
   songs = filterDuration(songs, durationFilter);
-
-  // Sort
   songs = sortSongs(songs, sort);
 
   return songs;

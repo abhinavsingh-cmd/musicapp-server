@@ -1,4 +1,4 @@
-import React, { memo, useCallback, useRef, useState, useEffect } from 'react';
+import React, { memo, useCallback, useRef, useState, useEffect, useMemo } from 'react';
 import { useAudioStore } from '../../stores/audioStore';
 import { useDownloadsStore } from '../../stores/downloadsStore';
 import { Song } from '../../types/music';
@@ -13,20 +13,22 @@ interface SongTableProps {
 const ROW_HEIGHT = 56;
 const BUFFER = 10;
 
-const Equalizer: React.FC = () => (
+const Equalizer: React.FC = memo(() => (
   <div className="playing-indicator text-violet-400 flex items-end gap-[2px] h-4">
     {[1, 2, 3, 4].map((i) => (
       <span key={i} className="eq-bar" style={{ display: 'block', width: 3, background: 'currentColor', borderRadius: 2, animationDelay: `${i * 0.1}s` }} />
     ))}
   </div>
-);
+));
+Equalizer.displayName = 'Equalizer';
+
+const fmt = (s: number) => Math.floor(s / 60) + ':' + Math.floor(s % 60).toString().padStart(2, '0');
 
 const SongRow = memo(({ song, index, isActive, isCurrentlyPlaying, onClick, onFavToggle, isFav, isDownloaded, isDownloading, onDownload }: {
   song: Song; index: number; isActive: boolean; isCurrentlyPlaying: boolean;
   onClick: () => void; onFavToggle: () => void; isFav: boolean;
   isDownloaded: boolean; isDownloading: boolean; onDownload: () => void;
 }) => {
-  const fmt = (s: number) => Math.floor(s / 60) + ':' + Math.floor(s % 60).toString().padStart(2, '0');
   return (
     <div
       className={cn("grid grid-cols-12 gap-4 px-6 py-2 text-sm cursor-pointer song-row", isActive && "bg-violet-500/10", "group transition-colors duration-100")}
@@ -42,7 +44,7 @@ const SongRow = memo(({ song, index, isActive, isCurrentlyPlaying, onClick, onFa
         )}
       </div>
       <div className="col-span-5 flex items-center space-x-3 min-w-0">
-        <img src={song.coverArt} alt={song.title} loading="lazy" className={cn("w-10 h-10 rounded-lg object-cover flex-shrink-0 transition-all duration-200", isCurrentlyPlaying && "ring-2 ring-violet-500 ring-offset-1 ring-offset-[var(--color-bg)] shadow-md shadow-violet-500/20")} />
+        <img src={song.coverArt} alt="" loading="lazy" className={cn("w-10 h-10 rounded-lg object-cover flex-shrink-0 transition-all duration-200", isCurrentlyPlaying && "ring-2 ring-violet-500 ring-offset-1 ring-offset-[var(--color-bg)] shadow-md shadow-violet-500/20")} />
         <div className="min-w-0">
           <div className={cn("font-medium truncate transition-colors", isActive ? "text-violet-400" : "text-white")}>{song.title}</div>
           <div className="text-sm text-gray-400 truncate">{song.artist}</div>
@@ -65,23 +67,51 @@ const SongRow = memo(({ song, index, isActive, isCurrentlyPlaying, onClick, onFa
       </div>
     </div>
   );
+}, (prev, next) => {
+  return prev.song.id === next.song.id
+    && prev.index === next.index
+    && prev.isActive === next.isActive
+    && prev.isCurrentlyPlaying === next.isCurrentlyPlaying
+    && prev.isFav === next.isFav
+    && prev.isDownloaded === next.isDownloaded
+    && prev.isDownloading === next.isDownloading;
 });
 SongRow.displayName = 'SongRow';
 
-export const SongTable: React.FC<SongTableProps> = ({ songs, className }) => {
-  const currentSong = useAudioStore((s) => s.currentSong);
+export const SongTable: React.FC<SongTableProps> = memo(({ songs, className }) => {
+  const currentSongId = useAudioStore((s) => s.currentSong?.id ?? null);
   const isPlaying = useAudioStore((s) => s.isPlaying);
   const loadSong = useAudioStore((s) => s.loadSong);
   const togglePlayPause = useAudioStore((s) => s.togglePlayPause);
   const toggleFavorite = useAudioStore((s) => s.toggleFavorite);
   const favorites = useAudioStore((s) => s.favorites);
   const downloadSong = useDownloadsStore((s) => s.downloadSong);
-  const isDownloaded = useDownloadsStore((s) => s.isDownloaded);
-  const isDownloading = useDownloadsStore((s) => s.isDownloading);
   const downloads = useDownloadsStore((s) => s.downloads);
   const containerRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const rafRef = useRef<number>(0);
+
+  const favSet = useMemo(() => new Set(favorites), [favorites]);
+
+  const downloadsMap = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const d of downloads) {
+      if (d.youtubeId) m.set(d.youtubeId, d.audioUrl);
+    }
+    return m;
+  }, [downloads]);
+
+  const downloadingSet = useDownloadsStore((s) => {
+    const ids = new Set<string>();
+    for (const id of s.downloadingIds) ids.add(id);
+    return ids;
+  });
+
+  const downloadedSet = useDownloadsStore((s) => {
+    const ids = new Set<string>();
+    for (const d of s.downloads) ids.add(d.youtubeId);
+    return ids;
+  });
 
   const handleScroll = useCallback(() => {
     if (rafRef.current) return;
@@ -108,11 +138,17 @@ export const SongTable: React.FC<SongTableProps> = ({ songs, className }) => {
   const visibleSongs = songs.slice(startIndex, startIndex + visibleCount);
 
   const handleRowClick = useCallback((song: Song, index: number) => {
-    const dl = downloads.find(d => d.youtubeId === song.youtubeId);
-    const songToPlay = dl ? { ...song, audioUrl: dl.audioUrl } : song;
-    if (currentSong?.id === song.id) { togglePlayPause(); }
-    else { const playlist = songs.map(s => { const d = downloads.find(dd => dd.youtubeId === s.youtubeId); return d ? { ...s, audioUrl: d.audioUrl } : s; }); loadSong(songToPlay, playlist, index); }
-  }, [currentSong, loadSong, togglePlayPause, songs, downloads]);
+    if (currentSongId === song.id) { togglePlayPause(); }
+    else {
+      const dl = downloadsMap.get(song.youtubeId ?? '');
+      const songToPlay = dl ? { ...song, audioUrl: dl } : song;
+      const playlist = songs.map(s => {
+        const audio = downloadsMap.get(s.youtubeId ?? '');
+        return audio ? { ...s, audioUrl: audio } : s;
+      });
+      loadSong(songToPlay, playlist, index);
+    }
+  }, [currentSongId, loadSong, togglePlayPause, songs, downloadsMap]);
 
   return (
     <div className={cn("w-full", className)}>
@@ -128,11 +164,11 @@ export const SongTable: React.FC<SongTableProps> = ({ songs, className }) => {
           <div style={{ transform: `translateY(${startIndex * ROW_HEIGHT}px)` }}>
             {visibleSongs.map((song, i) => {
               const actualIndex = startIndex + i;
-              const isActive = currentSong?.id === song.id;
+              const isActive = currentSongId === song.id;
               return (
                 <SongRow key={song.id} song={song} index={actualIndex} isActive={isActive} isCurrentlyPlaying={isActive && isPlaying}
-                  onClick={() => handleRowClick(song, actualIndex)} onFavToggle={() => toggleFavorite(song.id)} isFav={favorites.includes(song.id)}
-                  isDownloaded={song.youtubeId ? isDownloaded(song.youtubeId) : false} isDownloading={song.youtubeId ? isDownloading(song.youtubeId) : false}
+                  onClick={() => handleRowClick(song, actualIndex)} onFavToggle={() => toggleFavorite(song.id)} isFav={favSet.has(song.id)}
+                  isDownloaded={song.youtubeId ? downloadedSet.has(song.youtubeId) : false} isDownloading={song.youtubeId ? downloadingSet.has(song.youtubeId) : false}
                   onDownload={() => downloadSong(song)} />
               );
             })}
@@ -141,4 +177,5 @@ export const SongTable: React.FC<SongTableProps> = ({ songs, className }) => {
       </div>
     </div>
   );
-};
+});
+SongTable.displayName = 'SongTable';

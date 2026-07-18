@@ -45,8 +45,13 @@ const demoUsers: User[] = [
 
 export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(() => {
-    const savedUser = localStorage.getItem('musicAppUser');
-    return savedUser ? JSON.parse(savedUser) : null;
+    try {
+      const savedUser = localStorage.getItem('musicAppUser');
+      return savedUser ? JSON.parse(savedUser) : null;
+    } catch {
+      localStorage.removeItem('musicAppUser');
+      return null;
+    }
   });
 
   const isAuthenticated = !!user;

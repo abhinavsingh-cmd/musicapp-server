@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Search, X, Play, Music, Globe, Loader2, Download, Check,
   SlidersHorizontal, Clock, ArrowDownAZ, TrendingUp, Sparkles,
+  AlertCircle, SearchX,
 } from 'lucide-react';
 import { SongTable } from '../features/library/SongTable';
 import { Song } from '../types/music';
@@ -48,6 +49,17 @@ const DURATION_FILTERS: { value: DurationFilter; label: string }[] = [
 
 const GENRES = ['Pop', 'Rock', 'Hip Hop', 'Indian', 'K-Pop', 'Latin', 'R&B', 'Electronic', 'Indie', 'Afrobeats'];
 
+// ---- Helpers ----
+
+function safeStr(v: unknown, fallback = ''): string {
+  return typeof v === 'string' ? v : fallback;
+}
+
+function safeNum(v: unknown, fallback = 0): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 // ---- Component ----
 
 export const SearchPage: React.FC = () => {
@@ -61,7 +73,7 @@ export const SearchPage: React.FC = () => {
   const {
     filter, sort, durationFilter, genreFilter,
     libraryResults, ytResults, suggestions,
-    loading, ytLoading, hasMore,
+    loading, ytLoading, hasMore, error,
     setFilter, setSort, setDurationFilter, setGenreFilter,
     search, loadMore, clear,
   } = useSearchStore();
@@ -71,8 +83,10 @@ export const SearchPage: React.FC = () => {
   const uniqueAlbums = useSearchStore(selectUniqueAlbums);
   const uniqueGenres = useSearchStore(selectUniqueGenres);
 
-  const { loadSong } = useAudioStore();
-  const { downloadSong, isDownloaded, isDownloading } = useDownloadsStore();
+  const loadSong = useAudioStore((s) => s.loadSong);
+  const downloadSong = useDownloadsStore((s) => s.downloadSong);
+  const isDownloaded = useDownloadsStore((s) => s.isDownloaded);
+  const isDownloading = useDownloadsStore((s) => s.isDownloading);
 
   // ---- Debounced search ----
   useEffect(() => {
@@ -93,31 +107,67 @@ export const SearchPage: React.FC = () => {
 
   // ---- Play YouTube result ----
   const handlePlayYT = useCallback((r: YTSong) => {
-    const songs: Song[] = ytResults.map((item) => ({
-      id: 'yt-' + item.id, youtubeId: item.id, title: item.title, artist: item.artist,
-      genre: 'YouTube', duration: item.duration, coverArt: item.thumbnail,
-      album: '', audioUrl: '', releaseYear: 0,
-    }));
+    if (!r || !r.id) return;
+    const songs: Song[] = (ytResults || [])
+      .filter((item) => item && item.id)
+      .map((item) => ({
+        id: 'yt-' + item.id,
+        youtubeId: item.id,
+        title: safeStr(item.title, 'Unknown'),
+        artist: safeStr(item.artist, 'Unknown'),
+        genre: 'YouTube',
+        duration: safeNum(item.duration),
+        coverArt: safeStr(item.thumbnail),
+        album: '',
+        audioUrl: '',
+        releaseYear: 0,
+      }));
+    if (songs.length === 0) return;
     const idx = songs.findIndex((s) => s.youtubeId === r.id);
-    loadSong(songs[idx], songs, idx >= 0 ? idx : 0);
+    const safeIdx = idx >= 0 ? idx : 0;
+    if (!songs[safeIdx]) return;
+    loadSong(songs[safeIdx], songs, safeIdx);
   }, [loadSong, ytResults]);
 
   const handleDownloadYT = useCallback((r: YTSong) => {
+    if (!r || !r.id) return;
     downloadSong({
-      id: 'yt-' + r.id, youtubeId: r.id, title: r.title, artist: r.artist,
-      genre: 'YouTube', duration: r.duration, coverArt: r.thumbnail,
-      album: '', audioUrl: '', releaseYear: 0,
+      id: 'yt-' + r.id,
+      youtubeId: r.id,
+      title: safeStr(r.title, 'Unknown'),
+      artist: safeStr(r.artist, 'Unknown'),
+      genre: 'YouTube',
+      duration: safeNum(r.duration),
+      coverArt: safeStr(r.thumbnail),
+      album: '',
+      audioUrl: '',
+      releaseYear: 0,
     });
   }, [downloadSong]);
 
-  const fmt = (s: number) => Math.floor(s / 60) + ':' + Math.floor(s % 60).toString().padStart(2, '0');
-  const fmtViews = (n: number) =>
-    n >= 1e9 ? (n / 1e9).toFixed(1) + 'B' : n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : n.toString();
+  const fmt = (s: number) => {
+    const sec = safeNum(s);
+    if (sec <= 0) return '0:00';
+    return Math.floor(sec / 60) + ':' + Math.floor(sec % 60).toString().padStart(2, '0');
+  };
+
+  const fmtViews = (n: number) => {
+    const num = safeNum(n);
+    if (num >= 1e9) return (num / 1e9).toFixed(1) + 'B';
+    if (num >= 1e6) return (num / 1e6).toFixed(1) + 'M';
+    if (num >= 1e3) return (num / 1e3).toFixed(1) + 'K';
+    return num.toString();
+  };
 
   const handleSuggestionClick = (song: Song) => {
+    if (!song || !song.title) return;
     setQuery(song.title);
     setShowSuggestions(false);
   };
+
+  const hasResults = filteredLibrary.length > 0 || ytResults.length > 0;
+  const isIdle = !query && !loading;
+  const isNoResults = query && !loading && !ytLoading && !hasResults;
 
   return (
     <div className="p-4 sm:p-6 space-y-5">
@@ -154,16 +204,16 @@ export const SearchPage: React.FC = () => {
       {query && showSuggestions && suggestions.length > 0 && !loading && (
         <div className="max-w-xl relative z-20">
           <div className="rounded-2xl bg-[#1a1a2e] border border-white/5 overflow-hidden shadow-xl">
-            {suggestions.map((s) => (
+            {suggestions.slice(0, 5).map((s) => (
               <button
-                key={s.id}
+                key={s.id || s.title}
                 onClick={() => handleSuggestionClick(s)}
                 className="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-white/5 transition-colors text-left"
               >
                 <Search size={14} className="text-gray-600 flex-shrink-0" />
                 <div className="flex-1 min-w-0">
-                  <span className="text-sm text-white truncate">{s.title}</span>
-                  <span className="text-xs text-gray-500 ml-2">· {s.artist}</span>
+                  <span className="text-sm text-white truncate">{safeStr(s.title, 'Unknown')}</span>
+                  <span className="text-xs text-gray-500 ml-2">&middot; {safeStr(s.artist, 'Unknown')}</span>
                 </div>
               </button>
             ))}
@@ -174,7 +224,6 @@ export const SearchPage: React.FC = () => {
       {/* ---- Filter & Sort bar ---- */}
       {showFilters && (
         <div className="space-y-3 max-w-xl">
-          {/* Type filters */}
           <div className="flex flex-wrap gap-2">
             {FILTERS.map((f) => (
               <button
@@ -192,7 +241,6 @@ export const SearchPage: React.FC = () => {
             ))}
           </div>
 
-          {/* Sort */}
           <div className="flex items-center gap-2">
             <span className="text-[10px] font-semibold text-gray-600 uppercase tracking-wider">Sort</span>
             <div className="flex gap-1">
@@ -202,9 +250,7 @@ export const SearchPage: React.FC = () => {
                   onClick={() => setSort(s.value)}
                   className={cn(
                     "flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium transition-all",
-                    sort === s.value
-                      ? "bg-white/10 text-white"
-                      : "text-gray-500 hover:text-gray-300",
+                    sort === s.value ? "bg-white/10 text-white" : "text-gray-500 hover:text-gray-300",
                   )}
                 >
                   {s.icon}{s.label}
@@ -213,7 +259,6 @@ export const SearchPage: React.FC = () => {
             </div>
           </div>
 
-          {/* Duration */}
           <div className="flex items-center gap-2">
             <span className="text-[10px] font-semibold text-gray-600 uppercase tracking-wider">Duration</span>
             <div className="flex gap-1">
@@ -223,9 +268,7 @@ export const SearchPage: React.FC = () => {
                   onClick={() => setDurationFilter(d.value)}
                   className={cn(
                     "px-2.5 py-1 rounded-lg text-xs font-medium transition-all",
-                    durationFilter === d.value
-                      ? "bg-white/10 text-white"
-                      : "text-gray-500 hover:text-gray-300",
+                    durationFilter === d.value ? "bg-white/10 text-white" : "text-gray-500 hover:text-gray-300",
                   )}
                 >
                   {d.label}
@@ -234,7 +277,6 @@ export const SearchPage: React.FC = () => {
             </div>
           </div>
 
-          {/* Genre filter */}
           {filter === 'genres' && (
             <div className="flex flex-wrap gap-1.5">
               <button
@@ -264,7 +306,7 @@ export const SearchPage: React.FC = () => {
       )}
 
       {/* ---- Genre browse (no query) ---- */}
-      {!query && (
+      {isIdle && (
         <div>
           <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
             <Music size={20} className="text-violet-400" />Browse by Genre
@@ -283,7 +325,18 @@ export const SearchPage: React.FC = () => {
         </div>
       )}
 
-      {/* ---- Loading ---- */}
+      {/* ---- Error state ---- */}
+      {error && (
+        <div className="flex items-center gap-3 text-red-400 py-4 px-4 rounded-xl bg-red-500/10 border border-red-500/20">
+          <AlertCircle size={18} />
+          <span className="text-sm">{error}</span>
+          <button onClick={() => search(query)} className="ml-auto text-xs text-red-300 hover:text-white underline">
+            Retry
+          </button>
+        </div>
+      )}
+
+      {/* ---- Loading state ---- */}
       {loading && (
         <div className="flex items-center gap-3 text-gray-400 py-8">
           <Loader2 size={20} className="animate-spin text-violet-400" />
@@ -298,25 +351,23 @@ export const SearchPage: React.FC = () => {
             <Music size={14} />Your Library ({filteredLibrary.length})
           </h3>
 
-          {/* Artists grid */}
           {filter === 'artists' && (
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3 mb-4">
               {uniqueArtists.map((artist) => (
                 <button
                   key={artist}
-                  onClick={() => { setFilter('songs'); /* could filter by artist */ }}
+                  onClick={() => setFilter('songs')}
                   className="p-4 rounded-xl bg-white/5 hover:bg-white/10 transition-all text-center group"
                 >
                   <div className="w-12 h-12 rounded-full bg-gradient-to-br from-violet-500 to-fuchsia-500 mx-auto mb-2 flex items-center justify-center text-white font-bold text-lg">
-                    {artist[0]}
+                    {(artist || '?')[0]}
                   </div>
-                  <span className="text-sm font-medium text-white truncate block">{artist}</span>
+                  <span className="text-sm font-medium text-white truncate block">{artist || 'Unknown'}</span>
                 </button>
               ))}
             </div>
           )}
 
-          {/* Albums grid */}
           {filter === 'albums' && (
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3 mb-4">
               {uniqueAlbums.map((album) => {
@@ -324,20 +375,19 @@ export const SearchPage: React.FC = () => {
                 return (
                   <button
                     key={album}
-                    onClick={() => { setFilter('songs'); }}
+                    onClick={() => setFilter('songs')}
                     className="p-3 rounded-xl bg-white/5 hover:bg-white/10 transition-all text-center group"
                   >
                     <div className="w-full aspect-square rounded-lg overflow-hidden bg-white/5 mb-2">
                       {song?.coverArt && <img src={song.coverArt} alt={album} className="w-full h-full object-cover" loading="lazy" />}
                     </div>
-                    <span className="text-sm font-medium text-white truncate block">{album}</span>
+                    <span className="text-sm font-medium text-white truncate block">{album || 'Unknown'}</span>
                   </button>
                 );
               })}
             </div>
           )}
 
-          {/* Songs table */}
           {filter !== 'artists' && filter !== 'albums' && (
             <div className="claymorphism rounded-2xl p-1">
               <SongTable songs={filteredLibrary} />
@@ -358,10 +408,14 @@ export const SearchPage: React.FC = () => {
             </div>
           ) : (
             <div className="space-y-2">
-              {ytResults.map((r) => (
+              {ytResults.filter((r) => r && r.id).map((r) => (
                 <div key={r.id} onClick={() => handlePlayYT(r)} className="flex items-center gap-3 p-2 rounded-xl hover:bg-white/5 transition-colors group cursor-pointer">
                   <div className="relative w-16 h-12 rounded-lg overflow-hidden flex-shrink-0 bg-[#1a1a2e]">
-                    <img src={r.thumbnail} alt={r.title} className="w-full h-full object-cover" loading="lazy" />
+                    {r.thumbnail ? (
+                      <img src={r.thumbnail} alt={r.title || ''} className="w-full h-full object-cover" loading="lazy" />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center"><Music size={16} className="text-gray-600" /></div>
+                    )}
                     <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity">
                       <Play size={16} fill="white" className="text-white" />
                     </div>
@@ -370,8 +424,8 @@ export const SearchPage: React.FC = () => {
                     </span>
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium text-white truncate">{r.title}</div>
-                    <div className="text-xs text-gray-400 truncate">{r.artist}</div>
+                    <div className="text-sm font-medium text-white truncate">{safeStr(r.title, 'Unknown')}</div>
+                    <div className="text-xs text-gray-400 truncate">{safeStr(r.artist, 'Unknown')}</div>
                     {r.viewCount > 0 && <div className="text-[10px] text-gray-500">{fmtViews(r.viewCount)} views</div>}
                   </div>
                   <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -394,7 +448,6 @@ export const SearchPage: React.FC = () => {
                 </div>
               ))}
 
-              {/* Infinite scroll sentinel */}
               <div ref={sentinelRef} className="h-4" />
               {ytLoading && ytResults.length > 0 && (
                 <div className="flex justify-center py-4">
@@ -406,9 +459,13 @@ export const SearchPage: React.FC = () => {
         </div>
       )}
 
-      {/* ---- No results ---- */}
-      {query && !loading && !ytLoading && filteredLibrary.length === 0 && ytResults.length === 0 && (
-        <div className="text-center text-gray-500 py-12">No results found for &ldquo;{query}&rdquo;</div>
+      {/* ---- Empty state ---- */}
+      {isNoResults && (
+        <div className="text-center py-16">
+          <SearchX size={48} className="mx-auto text-gray-600 mb-4" />
+          <p className="text-gray-400 text-lg font-medium">No results found</p>
+          <p className="text-gray-600 text-sm mt-1">Try a different search term or adjust your filters</p>
+        </div>
       )}
     </div>
   );

@@ -158,8 +158,20 @@ interface PlaylistDetailProps {
 }
 
 export const PlaylistDetail: React.FC<PlaylistDetailProps> = ({ playlist, onClose }) => {
-  const { updatePlaylist, deletePlaylist, duplicatePlaylist, toggleFavorite, togglePublic, toggleCollaborative, generateShareLink, exportPlaylist, reorderSong, removeSong } = usePlaylistStore();
-  const { loadSong, currentSong, isPlaying, togglePlayPause } = useAudioStore();
+  const updatePlaylist = usePlaylistStore((s) => s.updatePlaylist);
+  const deletePlaylist = usePlaylistStore((s) => s.deletePlaylist);
+  const duplicatePlaylist = usePlaylistStore((s) => s.duplicatePlaylist);
+  const toggleFavorite = usePlaylistStore((s) => s.toggleFavorite);
+  const togglePublic = usePlaylistStore((s) => s.togglePublic);
+  const toggleCollaborative = usePlaylistStore((s) => s.toggleCollaborative);
+  const generateShareLink = usePlaylistStore((s) => s.generateShareLink);
+  const exportPlaylist = usePlaylistStore((s) => s.exportPlaylist);
+  const reorderSong = usePlaylistStore((s) => s.reorderSong);
+  const removeSong = usePlaylistStore((s) => s.removeSong);
+  const loadSong = useAudioStore((s) => s.loadSong);
+  const currentSong = useAudioStore((s) => s.currentSong);
+  const isPlaying = useAudioStore((s) => s.isPlaying);
+  const togglePlayPause = useAudioStore((s) => s.togglePlayPause);
   const [library, setLibrary] = useState<Song[]>([]);
 
   useEffect(() => {

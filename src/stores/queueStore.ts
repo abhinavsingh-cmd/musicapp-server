@@ -23,16 +23,22 @@ function loadQueue(): { queue: Song[]; currentIndex: number; repeatMode: RepeatM
   }
 }
 
-function persistQueue(state: QueueState): void {
-  try {
-    localStorage.setItem(QUEUE_KEY, JSON.stringify({
-      queue: state.queue,
-      currentIndex: state.currentIndex,
-      repeatMode: state.repeatMode,
-      isShuffled: state.isShuffled,
-      autoplayEnabled: state.autoplayEnabled,
-    }));
-  } catch { }
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
+
+function schedulePersist(state: QueueState): void {
+  if (persistTimer) clearTimeout(persistTimer);
+  persistTimer = setTimeout(() => {
+    try {
+      localStorage.setItem(QUEUE_KEY, JSON.stringify({
+        queue: state.queue,
+        currentIndex: state.currentIndex,
+        repeatMode: state.repeatMode,
+        isShuffled: state.isShuffled,
+        autoplayEnabled: state.autoplayEnabled,
+      }));
+    } catch { }
+    persistTimer = null;
+  }, 500);
 }
 
 function loadRecent(): Song[] {
@@ -98,15 +104,16 @@ export const useQueueStore = create<QueueState>((set, get) => ({
 
   setQueue: (songs, startIndex = 0) => {
     if (songs.length === 0) return;
-    const song = songs[startIndex];
+    const safeIndex = Math.max(0, Math.min(startIndex, songs.length - 1));
+    const song = songs[safeIndex];
     set({
       queue: songs,
-      currentIndex: startIndex,
+      currentIndex: safeIndex,
       isShuffled: false,
       originalQueue: [],
     });
-    persistQueue(get());
-    get().addRecent(song);
+    schedulePersist(get());
+    if (song) get().addRecent(song);
   },
 
   playAtIndex: (index) => {
@@ -114,7 +121,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
     if (index < 0 || index >= queue.length) return;
     const song = queue[index];
     set({ currentIndex: index });
-    persistQueue(get());
+    schedulePersist(get());
     get().addRecent(song);
   },
 
@@ -153,7 +160,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
 
     const song = queue[nextIndex];
     set({ currentIndex: nextIndex });
-    persistQueue(get());
+    schedulePersist(get());
     get().addRecent(song);
     
     if (autoplayEnabled && nextIndex >= queue.length - 3) {
@@ -180,14 +187,14 @@ export const useQueueStore = create<QueueState>((set, get) => ({
 
     const song = queue[prevIndex];
     set({ currentIndex: prevIndex });
-    persistQueue(get());
+    schedulePersist(get());
     get().addRecent(song);
     return song;
   },
 
   addToQueue: (song) => {
     set((s) => ({ queue: [...s.queue, song] }));
-    persistQueue(get());
+    schedulePersist(get());
   },
 
   addNext: (song) => {
@@ -197,7 +204,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
       newQueue.splice(insertAt, 0, song);
       return { queue: newQueue };
     });
-    persistQueue(get());
+    schedulePersist(get());
   },
 
   removeFromQueue: (index) => {
@@ -211,7 +218,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
       newIndex = Math.min(currentIndex, newQueue.length - 1);
     }
     set({ queue: newQueue, currentIndex: Math.max(0, newIndex) });
-    persistQueue(get());
+    schedulePersist(get());
   },
 
   reorderQueue: (fromIndex, toIndex) => {
@@ -229,12 +236,12 @@ export const useQueueStore = create<QueueState>((set, get) => ({
       }
       return { queue: q, currentIndex: newCurrent };
     });
-    persistQueue(get());
+    schedulePersist(get());
   },
 
   clearQueue: () => {
     set({ queue: [], currentIndex: 0, isShuffled: false, originalQueue: [] });
-    persistQueue(get());
+    schedulePersist(get());
   },
 
   shuffleQueue: () => {
@@ -252,7 +259,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
       currentIndex: 0,
       isShuffled: true,
     });
-    persistQueue(get());
+    schedulePersist(get());
   },
 
   unshuffleQueue: () => {
@@ -266,7 +273,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
       isShuffled: false,
       originalQueue: [],
     });
-    persistQueue(get());
+    schedulePersist(get());
   },
 
   toggleShuffle: () => {
@@ -284,15 +291,16 @@ export const useQueueStore = create<QueueState>((set, get) => ({
       const next = modes[(modes.indexOf(s.repeatMode) + 1) % modes.length];
       return { repeatMode: next };
     });
-    persistQueue(get());
+    schedulePersist(get());
   },
 
   toggleAutoplay: () => {
     set((s) => ({ autoplayEnabled: !s.autoplayEnabled }));
-    persistQueue(get());
+    schedulePersist(get());
   },
 
   addRecent: (song) => {
+    if (!song || !song.id) return;
     set((s) => {
       const filtered = s.recentlyPlayed.filter((r) => r.id !== song.id);
       const updated = [song, ...filtered].slice(0, MAX_RECENT);
@@ -351,7 +359,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
     
     if (newSongs.length > 0) {
       set((s) => ({ queue: [...s.queue, ...newSongs] }));
-      persistQueue(get());
+      schedulePersist(get());
       preloadSongs(newSongs.slice(0, 3), 3);
     }
   },

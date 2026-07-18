@@ -75,6 +75,9 @@ function persistPlaybackState() {
 
 let audioServiceUnsub: (() => void) | null = null;
 let currentSongIdRef: string | null = null;
+let lastMediaUpdate = 0;
+let consecutivePlayFailures = 0;
+const MAX_CONSECUTIVE_FAILURES = 5;
 
 function initAudioServiceHandler() {
   if (audioServiceUnsub) return;
@@ -86,6 +89,7 @@ function initAudioServiceHandler() {
       case 'play': {
         if (data?.song) {
           currentSongIdRef = data.song.id;
+          consecutivePlayFailures = 0;
         }
         const current = state.currentSong;
         if (data?.song && current && current.id !== data.song.id) return;
@@ -115,11 +119,16 @@ function initAudioServiceHandler() {
         useAudioStore.getState().nextSong();
         break;
       case 'progress':
-      case 'timeupdate':
+      case 'timeupdate': {
         if (currentSongIdRef && state.currentSong?.id !== currentSongIdRef) return;
         useAudioStore.setState({ progress: data });
-        mediaSessionService.updatePlaybackState(useAudioStore.getState().isPlaying, data, audioService.getDuration());
+        const now = Date.now();
+        if (now - lastMediaUpdate > 1000) {
+          lastMediaUpdate = now;
+          mediaSessionService.updatePlaybackState(useAudioStore.getState().isPlaying, data, audioService.getDuration());
+        }
         break;
+      }
       case 'loaded':
         const current = state.currentSong;
         if (data?.song && current && current.id !== data.song.id) return;
@@ -134,6 +143,7 @@ function initAudioServiceHandler() {
         }
         break;
       case 'error':
+        console.error('[AudioStore] Playback error:', data);
         useAudioStore.setState({ error: typeof data === 'string' ? data : 'Playback error', isLoading: false });
         break;
       case 'waiting':
@@ -219,6 +229,8 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
     const { currentSong } = get();
     if (currentSong?.id === song.id) return;
 
+    console.log('[AudioStore] loadSong:', song.title, 'index:', index, 'playlist size:', playlist.length);
+
     const qs = useQueueStore.getState();
     qs.setQueue(playlist, index);
 
@@ -234,16 +246,28 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
     });
     
     audioService.play(song, playlist, index).catch(err => {
+      console.error('[AudioStore] loadSong play() failed:', err);
       set({ error: err.message, isLoading: false, isPlaying: false });
+      // Auto-skip to next song on failure
+      consecutivePlayFailures++;
+      if (consecutivePlayFailures < MAX_CONSECUTIVE_FAILURES) {
+        console.log(`[AudioStore] Auto-skipping to next song (failure ${consecutivePlayFailures}/${MAX_CONSECUTIVE_FAILURES})`);
+        setTimeout(() => get().nextSong(), 500);
+      } else {
+        console.error('[AudioStore] Too many consecutive failures, stopping auto-skip');
+      }
     });
   },
 
   play: () => {
+    const { currentSong } = get();
+    console.log('[AudioStore] play() called, currentSong:', currentSong?.title);
     audioService.resume();
     set({ isPlaying: true });
   },
 
   pause: () => {
+    console.log('[AudioStore] pause() called');
     audioService.pause();
     set({ isPlaying: false });
   },
@@ -251,6 +275,7 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
   togglePlayPause: () => {
     const { isPlaying, currentSong } = get();
     if (!currentSong) return;
+    console.log('[AudioStore] togglePlayPause, isPlaying:', isPlaying);
     if (isPlaying) {
       audioService.pause();
       set({ isPlaying: false });
@@ -263,15 +288,25 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
   nextSong: async () => {
     const song = await useQueueStore.getState().nextSong();
     if (song) {
+      console.log('[AudioStore] nextSong:', song.title);
       set({
         currentSong: song,
         isPlaying: true,
         progress: 0,
         isLoading: true,
         duration: song.duration,
+        error: null,
       });
       audioService.play(song, useQueueStore.getState().queue, useQueueStore.getState().currentIndex).catch(err => {
-        set({ error: err.message, isLoading: false, isPlaying: false });
+        console.error('[AudioStore] nextSong play() failed:', err);
+        consecutivePlayFailures++;
+        if (consecutivePlayFailures < MAX_CONSECUTIVE_FAILURES) {
+          console.log(`[AudioStore] Auto-skipping after nextSong failure (${consecutivePlayFailures}/${MAX_CONSECUTIVE_FAILURES})`);
+          setTimeout(() => get().nextSong(), 500);
+        } else {
+          set({ error: err.message, isLoading: false, isPlaying: false });
+          console.error('[AudioStore] Too many consecutive failures, stopping');
+        }
       });
     } else {
       set({ isPlaying: false, progress: 0 });
@@ -281,15 +316,23 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
   previousSong: async () => {
     const song = await useQueueStore.getState().previousSong();
     if (song) {
+      console.log('[AudioStore] previousSong:', song.title);
       set({
         currentSong: song,
         isPlaying: true,
         progress: 0,
         isLoading: true,
         duration: song.duration,
+        error: null,
       });
       audioService.play(song, useQueueStore.getState().queue, useQueueStore.getState().currentIndex).catch(err => {
-        set({ error: err.message, isLoading: false, isPlaying: false });
+        console.error('[AudioStore] previousSong play() failed:', err);
+        consecutivePlayFailures++;
+        if (consecutivePlayFailures < MAX_CONSECUTIVE_FAILURES) {
+          setTimeout(() => get().nextSong(), 500);
+        } else {
+          set({ error: err.message, isLoading: false, isPlaying: false });
+        }
       });
     }
   },

@@ -219,12 +219,11 @@ export async function preloadSongs(songs: Song[], count: number = PRELOAD_COUNT)
   const toPreload = songs.slice(0, count);
   await Promise.all(
     toPreload.map(async (song) => {
-      if (song.audioUrl && song.audioUrl.startsWith('blob:')) return;
-      if (song.youtubeId) {
+      if (song.audioUrl && (song.audioUrl.startsWith('blob:') || song.audioUrl.startsWith('http'))) {
         try {
           const audio = new Audio();
           audio.preload = 'metadata';
-          audio.src = `https://www.youtube.com/watch?v=${song.youtubeId}`;
+          audio.src = song.audioUrl;
           await new Promise<void>((resolve) => {
             audio.onloadedmetadata = () => resolve();
             audio.onerror = () => resolve();

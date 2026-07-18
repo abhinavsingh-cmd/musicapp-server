@@ -23,18 +23,18 @@ export const LibraryPage: React.FC = () => {
   const [viewMode, setViewMode] = useState<'list' | 'grid'>('list');
   const [songs, setSongs] = useState<Song[]>([]);
   const [loading, setLoading] = useState(true);
-  const { loadSong } = useAudioStore();
+  const loadSong = useAudioStore((s) => s.loadSong);
   const { playlists: userPlaylists } = usePlaylistStore();
   const navigate = useNavigate();
 
   useEffect(() => {
-    fetchSongs().then(s => { setSongs(s); setLoading(false); });
+    fetchSongs().then(s => { setSongs(s); setLoading(false); }).catch(() => setLoading(false));
   }, []);
 
   const filteredSongs = useMemo(() => songs.filter(song =>
-    song.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    song.artist.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    song.genre.toLowerCase().includes(searchQuery.toLowerCase())
+    (song.title || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+    (song.artist || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+    (song.genre || '').toLowerCase().includes(searchQuery.toLowerCase())
   ), [songs, searchQuery]);
 
   const albums = useMemo(() => {

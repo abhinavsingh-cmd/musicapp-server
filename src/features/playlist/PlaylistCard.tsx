@@ -43,13 +43,19 @@ export const PlaylistCard: React.FC<PlaylistCardProps> = ({
       onClick={() => onPlayPlaylist?.(playlist)}
     >
       <div className="relative mb-4">
-        <motion.img
-          src={playlist.coverArt}
-          alt={playlist.name}
-          className="w-full aspect-square rounded-xl object-cover shadow-lg"
-          whileHover={{ scale: 1.05, rotate: 1 }}
-          transition={{ type: 'spring', stiffness: 300 }}
-        />
+        {playlist.coverArt ? (
+          <motion.img
+            src={playlist.coverArt}
+            alt={playlist.name}
+            className="w-full aspect-square rounded-xl object-cover shadow-lg"
+            whileHover={{ scale: 1.05, rotate: 1 }}
+            transition={{ type: 'spring', stiffness: 300 }}
+          />
+        ) : (
+          <div className="w-full aspect-square rounded-xl bg-gradient-to-br from-violet-500/20 to-pink-500/20 flex items-center justify-center">
+            <Music size={48} className="text-violet-400" />
+          </div>
+        )}
         <motion.div
           className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent rounded-xl"
           initial={{ opacity: 0 }}

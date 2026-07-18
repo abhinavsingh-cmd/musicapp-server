@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo, useCallback, memo } from 'react';
 import { useQueueStore } from '../../stores/queueStore';
 import { useAudioStore } from '../../stores/audioStore';
 import { cn } from '../../utils/cn';
@@ -31,7 +31,11 @@ import {
   Pause,
 } from 'lucide-react';
 
-// ---- Sortable song row ----
+const formatDuration = (sec: number) => {
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${s.toString().padStart(2, '0')}`;
+};
 
 interface SortableSongRowProps {
   song: import('../../types/music').Song;
@@ -41,7 +45,7 @@ interface SortableSongRowProps {
   section: 'current' | 'upcoming' | 'recent';
 }
 
-const SortableSongRow: React.FC<SortableSongRowProps> = ({ song, index, isCurrent, isPlaying, section }) => {
+const SortableSongRow = memo(({ song, index, isCurrent, isPlaying, section }: SortableSongRowProps) => {
   const playAtIndex = useQueueStore((s) => s.playAtIndex);
   const removeFromQueue = useQueueStore((s) => s.removeFromQueue);
 
@@ -52,12 +56,6 @@ const SortableSongRow: React.FC<SortableSongRowProps> = ({ song, index, isCurren
     transition,
     zIndex: isDragging ? 50 : undefined,
     opacity: isDragging ? 0.8 : 1,
-  };
-
-  const formatDuration = (sec: number) => {
-    const m = Math.floor(sec / 60);
-    const s = Math.floor(sec % 60);
-    return `${m}:${s.toString().padStart(2, '0')}`;
   };
 
   return (
@@ -71,8 +69,7 @@ const SortableSongRow: React.FC<SortableSongRowProps> = ({ song, index, isCurren
         isDragging && "shadow-lg shadow-violet-500/20"
       )}
     >
-      {/* Drag handle */}
-      {section !== 'recent' && (
+      {section !== 'recent' ? (
         <button
           {...attributes}
           {...listeners}
@@ -80,10 +77,10 @@ const SortableSongRow: React.FC<SortableSongRowProps> = ({ song, index, isCurren
         >
           <GripVertical size={14} />
         </button>
+      ) : (
+        <div className="w-[14px]" />
       )}
-      {section === 'recent' && <div className="w-[14px]" />}
 
-      {/* Index / play indicator */}
       <div className="w-6 text-center flex-shrink-0">
         {isCurrent ? (
           <div className="flex items-center justify-center gap-0.5">
@@ -102,7 +99,6 @@ const SortableSongRow: React.FC<SortableSongRowProps> = ({ song, index, isCurren
         )}
       </div>
 
-      {/* Cover art */}
       <div className="w-9 h-9 rounded-lg overflow-hidden bg-white/5 flex-shrink-0">
         {song.coverArt ? (
           <img src={song.coverArt} alt="" loading="lazy" className="w-full h-full object-cover" />
@@ -113,7 +109,6 @@ const SortableSongRow: React.FC<SortableSongRowProps> = ({ song, index, isCurren
         )}
       </div>
 
-      {/* Song info */}
       <button
         onClick={() => section !== 'recent' ? playAtIndex(index) : undefined}
         className="flex-1 min-w-0 text-left"
@@ -128,10 +123,8 @@ const SortableSongRow: React.FC<SortableSongRowProps> = ({ song, index, isCurren
         <p className="text-xs text-gray-500 truncate">{song.artist}</p>
       </button>
 
-      {/* Duration */}
       <span className="text-xs text-gray-600 flex-shrink-0">{formatDuration(song.duration)}</span>
 
-      {/* Remove button */}
       {section !== 'recent' && (
         <button
           onClick={() => removeFromQueue(index)}
@@ -142,16 +135,28 @@ const SortableSongRow: React.FC<SortableSongRowProps> = ({ song, index, isCurren
       )}
     </div>
   );
-};
+}, (prev, next) => {
+  return prev.song.id === next.song.id
+    && prev.index === next.index
+    && prev.isCurrent === next.isCurrent
+    && prev.isPlaying === next.isPlaying
+    && prev.section === next.section;
+});
+SortableSongRow.displayName = 'SortableSongRow';
 
-// ---- Queue Panel ----
-
-export const QueuePanel: React.FC = () => {
-  const {
-    queue, currentIndex, recentlyPlayed, repeatMode, isShuffled,
-    reorderQueue, clearQueue, toggleShuffle, cycleRepeat, clearRecent,
-  } = useQueueStore();
-  const { currentSong, isPlaying } = useAudioStore();
+export const QueuePanel: React.FC = memo(() => {
+  const queue = useQueueStore((s) => s.queue);
+  const currentIndex = useQueueStore((s) => s.currentIndex);
+  const recentlyPlayed = useQueueStore((s) => s.recentlyPlayed);
+  const repeatMode = useQueueStore((s) => s.repeatMode);
+  const isShuffled = useQueueStore((s) => s.isShuffled);
+  const reorderQueue = useQueueStore((s) => s.reorderQueue);
+  const clearQueue = useQueueStore((s) => s.clearQueue);
+  const toggleShuffle = useQueueStore((s) => s.toggleShuffle);
+  const cycleRepeat = useQueueStore((s) => s.cycleRepeat);
+  const clearRecent = useQueueStore((s) => s.clearRecent);
+  const currentSongId = useAudioStore((s) => s.currentSong?.id ?? null);
+  const isPlaying = useAudioStore((s) => s.isPlaying);
   const [tab, setTab] = useState<'queue' | 'recent'>('queue');
 
   const sensors = useSensors(
@@ -159,7 +164,7 @@ export const QueuePanel: React.FC = () => {
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
   );
 
-  const handleDragEnd = (event: DragEndEvent) => {
+  const handleDragEnd = useCallback((event: DragEndEvent) => {
     const { active, over } = event;
     if (!over || active.id === over.id) return;
     const oldIndex = queue.findIndex((s, i) => (s.id + '-' + i) === String(active.id));
@@ -167,16 +172,15 @@ export const QueuePanel: React.FC = () => {
     if (oldIndex !== -1 && newIndex !== -1) {
       reorderQueue(oldIndex, newIndex);
     }
-  };
+  }, [queue, reorderQueue]);
 
-  const upcoming = queue.slice(currentIndex + 1);
-  const currentInQueue = currentIndex >= 0 && currentIndex < queue.length ? queue[currentIndex] : null;
+  const upcoming = useMemo(() => queue.slice(currentIndex + 1), [queue, currentIndex]);
+  const currentInQueue = useMemo(() => currentIndex >= 0 && currentIndex < queue.length ? queue[currentIndex] : null, [queue, currentIndex]);
 
   const RepeatIcon = repeatMode === 'one' ? Repeat1 : Repeat;
 
   return (
     <div className="flex flex-col h-full">
-      {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-white/5">
         <div className="flex items-center gap-1">
           <button
@@ -199,7 +203,6 @@ export const QueuePanel: React.FC = () => {
           </button>
         </div>
 
-        {/* Queue controls */}
         {tab === 'queue' && (
           <div className="flex items-center gap-1">
             <button
@@ -246,7 +249,6 @@ export const QueuePanel: React.FC = () => {
         )}
       </div>
 
-      {/* Content */}
       <div className="flex-1 overflow-y-auto px-2 py-2">
         {tab === 'queue' ? (
           queue.length === 0 ? (
@@ -257,7 +259,6 @@ export const QueuePanel: React.FC = () => {
             </div>
           ) : (
             <div className="space-y-1">
-              {/* Now Playing */}
               {currentInQueue && (
                 <div className="mb-3">
                   <p className="text-[10px] font-semibold text-gray-600 uppercase tracking-wider px-3 mb-1.5">Now Playing</p>
@@ -271,7 +272,6 @@ export const QueuePanel: React.FC = () => {
                 </div>
               )}
 
-              {/* Up Next */}
               {upcoming.length > 0 && (
                 <div>
                   <p className="text-[10px] font-semibold text-gray-600 uppercase tracking-wider px-3 mb-1.5">
@@ -297,7 +297,6 @@ export const QueuePanel: React.FC = () => {
             </div>
           )
         ) : (
-          /* Recently Played tab */
           recentlyPlayed.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-gray-500">
               <Clock size={32} className="mb-3 text-gray-700" />
@@ -310,11 +309,11 @@ export const QueuePanel: React.FC = () => {
                   key={song.id + '-' + i}
                   className={cn(
                     "flex items-center gap-3 px-3 py-2 rounded-xl hover:bg-white/5 transition-all group",
-                    currentSong?.id === song.id && "bg-violet-500/10"
+                    currentSongId === song.id && "bg-violet-500/10"
                   )}
                 >
                   <div className="w-6 text-center flex-shrink-0">
-                    {currentSong?.id === song.id ? (
+                    {currentSongId === song.id ? (
                       <Play size={12} className="text-violet-400 mx-auto" />
                     ) : (
                       <span className="text-xs text-gray-600">{i + 1}</span>
@@ -330,7 +329,7 @@ export const QueuePanel: React.FC = () => {
                     )}
                   </div>
                   <div className="flex-1 min-w-0">
-                    <p className={cn("text-sm font-medium truncate", currentSong?.id === song.id ? "text-violet-300" : "text-white")}>
+                    <p className={cn("text-sm font-medium truncate", currentSongId === song.id ? "text-violet-300" : "text-white")}>
                       {song.title}
                     </p>
                     <p className="text-xs text-gray-500 truncate">{song.artist}</p>
@@ -343,4 +342,5 @@ export const QueuePanel: React.FC = () => {
       </div>
     </div>
   );
-};
+});
+QueuePanel.displayName = 'QueuePanel';

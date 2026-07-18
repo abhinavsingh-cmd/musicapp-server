@@ -5,8 +5,10 @@ import { motion } from 'framer-motion';
 import { Clock, Trash2, Music, Play } from 'lucide-react';
 
 export const HistoryPage: React.FC = () => {
-  const { history, clearHistory, removeSong } = useHistoryStore();
-  const { loadSong } = useAudioStore();
+  const history = useHistoryStore((s) => s.history);
+  const clearHistory = useHistoryStore((s) => s.clearHistory);
+  const removeSong = useHistoryStore((s) => s.removeSong);
+  const loadSong = useAudioStore((s) => s.loadSong);
 
   const formatTime = (timestamp: number) => {
     const diff = Date.now() - timestamp;
@@ -21,9 +23,12 @@ export const HistoryPage: React.FC = () => {
   };
 
   const handlePlay = (entry: any, index: number) => {
-    const songs = history.map(e => e.song);
+    const validEntries = history.filter(e => e.song);
+    const songs = validEntries.map(e => e.song);
     loadSong(entry.song, songs, index);
   };
+
+  const validHistory = history.filter(e => e && e.song);
 
   return (
     <div className="p-6 space-y-6">
@@ -34,7 +39,7 @@ export const HistoryPage: React.FC = () => {
           </div>
           <div>
             <h1 className="text-2xl font-bold text-white">Listening History</h1>
-            <p className="text-sm text-gray-400">{history.length} songs played</p>
+            <p className="text-sm text-gray-400">{validHistory.length} songs played</p>
           </div>
         </div>
         {history.length > 0 && (
@@ -50,7 +55,7 @@ export const HistoryPage: React.FC = () => {
         )}
       </div>
 
-      {history.length === 0 ? (
+      {validHistory.length === 0 ? (
         <div className="flex flex-col items-center justify-center h-64 text-gray-400">
           <Music className="w-16 h-16 text-gray-600 mb-4" />
           <p className="text-lg">No listening history</p>
@@ -58,7 +63,7 @@ export const HistoryPage: React.FC = () => {
         </div>
       ) : (
         <div className="space-y-2">
-          {history.map((entry, index) => (
+          {validHistory.map((entry, index) => (
             <motion.div
               key={`${entry.song.id}-${entry.playedAt}`}
               initial={{ opacity: 0, y: 20 }}

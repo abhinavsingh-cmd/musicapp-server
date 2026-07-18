@@ -9,7 +9,7 @@ export const DiscoverPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [selectedGenre, setSelectedGenre] = useState<string | null>(null);
 
-  useEffect(() => { fetchSongs().then(s => { setSongs(s); setLoading(false); }); }, []);
+  useEffect(() => { fetchSongs().then(s => { setSongs(s); setLoading(false); }).catch(() => setLoading(false)); }, []);
 
   const genres = useMemo(() => {
     const map = new Map<string, number>();

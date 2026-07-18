@@ -8,9 +8,9 @@ import { Heart } from 'lucide-react';
 export const FavoritesPage: React.FC = () => {
   const [songs, setSongs] = useState<Song[]>([]);
   const [loading, setLoading] = useState(true);
-  const { favorites } = useAudioStore();
+  const favorites = useAudioStore((s) => s.favorites);
 
-  useEffect(() => { fetchSongs().then(s => { setSongs(s); setLoading(false); }); }, []);
+  useEffect(() => { fetchSongs().then(s => { setSongs(s); setLoading(false); }).catch(() => setLoading(false)); }, []);
 
   const favSongs = useMemo(() => songs.filter(s => favorites.includes(s.id)), [songs, favorites]);
 

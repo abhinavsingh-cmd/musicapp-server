@@ -24,12 +24,12 @@ export const CreateAlbumPage: React.FC = () => {
   const genres = ['Pop', 'Rock', 'Hip Hop', 'R&B', 'Electronic', 'Indie', 'Jazz', 'Classical', 'Country', 'Folk', 'Metal', 'Punk', 'Reggae', 'Blues', 'Soul', 'Funk', 'Disco', 'House', 'Techno', 'Trance', 'Ambient', 'Soundtrack', 'Other'];
 
   useEffect(() => {
-    fetchSongs().then(s => { setAllSongs(s); setLoading(false); });
+    fetchSongs().then(s => { setAllSongs(s); setLoading(false); }).catch(() => setLoading(false));
   }, []);
 
   const filteredSongs = useMemo(() => allSongs.filter(s =>
-    s.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    s.artist.toLowerCase().includes(searchQuery.toLowerCase())
+    (s.title || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+    (s.artist || '').toLowerCase().includes(searchQuery.toLowerCase())
   ), [allSongs, searchQuery]);
 
   const handleCoverChange = (e: React.ChangeEvent<HTMLInputElement>) => {

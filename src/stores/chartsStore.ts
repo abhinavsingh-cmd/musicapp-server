@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { api } from '../config/api';
+import { api, apiFetch } from '../config/api';
 
 export interface ChartSong {
   id: string;
@@ -33,12 +33,10 @@ export const useChartsStore = create<ChartsStore>((set) => ({
   fetchCharts: async () => {
     set({ loading: true, error: null });
     try {
-      // Use YouTube trending for charts
-      const res = await fetch(api('/youtube/trending'));
-      if (!res.ok) throw new Error('Failed to fetch charts');
+      const res = await apiFetch(api('/youtube/trending'), { timeout: 20_000 });
       const data = await res.json();
 
-      const charts: ChartSong[] = data.results.map((r: any, i: number) => ({
+      const charts: ChartSong[] = (data.results || []).map((r: any, i: number) => ({
         id: r.id,
         title: r.title,
         artist: r.artist,

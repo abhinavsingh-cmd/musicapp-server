@@ -71,9 +71,22 @@ export class LyricsService {
     return s.replace(/\s*\(.*?\)\s*/g, '').replace(/\s*\[.*?\]\s*/g, '').trim();
   }
 
+  private async fetchWithTimeout(url: string, timeoutMs = 8000): Promise<Response> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+      clearTimeout(timer);
+      return res;
+    } catch (err) {
+      clearTimeout(timer);
+      throw err;
+    }
+  }
+
   private async tryLRCLib(title: string, artist: string): Promise<LyricLine[] | null> {
     try {
-      const res = await fetch(
+      const res = await this.fetchWithTimeout(
         `https://lrclib.net/api/get?artist_name=${encodeURIComponent(this.clean(artist))}&track_name=${encodeURIComponent(this.clean(title))}`
       );
       if (!res.ok) return null;
@@ -88,7 +101,7 @@ export class LyricsService {
 
   private async tryLyricsOVH(title: string, artist: string): Promise<LyricLine[] | null> {
     try {
-      const res = await fetch(
+      const res = await this.fetchWithTimeout(
         `https://lrclib.net/api/search?q=${encodeURIComponent(this.clean(artist) + ' ' + this.clean(title))}`
       );
       if (!res.ok) return null;
@@ -105,14 +118,14 @@ export class LyricsService {
 
   private async tryLyricsFallback(title: string, artist: string): Promise<LyricLine[] | null> {
     try {
-      const res = await fetch(
+      const res = await this.fetchWithTimeout(
         `https://api.lyrics.ovh/suggest/${encodeURIComponent(artist + ' ' + title + ' lyrics')}`
       );
       if (!res.ok) return null;
       const data = await res.json();
       if (data.data?.length > 0) {
         const first = data.data[0];
-        const lr = await fetch(
+        const lr = await this.fetchWithTimeout(
           `https://api.lyrics.ovh/v1/${encodeURIComponent(first.artist.name)}/${encodeURIComponent(first.title)}`
         );
         if (lr.ok) {

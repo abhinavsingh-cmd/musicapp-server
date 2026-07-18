@@ -22,12 +22,12 @@ export const CreatePlaylistPage: React.FC = () => {
   const { createPlaylist } = usePlaylistStore();
 
   useEffect(() => {
-    fetchSongs().then(s => { setAllSongs(s); setLoading(false); });
+    fetchSongs().then(s => { setAllSongs(s); setLoading(false); }).catch(() => setLoading(false));
   }, []);
 
   const filteredSongs = useMemo(() => allSongs.filter(s =>
-    s.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    s.artist.toLowerCase().includes(searchQuery.toLowerCase())
+    (s.title || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+    (s.artist || '').toLowerCase().includes(searchQuery.toLowerCase())
   ), [allSongs, searchQuery]);
 
   const handleFile = (file: File) => {

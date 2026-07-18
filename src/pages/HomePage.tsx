@@ -1,8 +1,8 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, memo } from 'react';
 import { useAudioStore } from '../stores/audioStore';
 import { SongTable } from '../features/library/SongTable';
 import { PlaylistDetail } from '../features/playlist/PlaylistDetail';
-import { Song } from '../types/music';
+import { Song, Playlist } from '../types/music';
 import { fetchSongs, fetchYouTubeTrending } from '../services/musicApi';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Disc3, TrendingUp, Play, Music, Sparkles, Headphones, Radio, Zap, Globe, Loader2 } from 'lucide-react';
@@ -29,17 +29,125 @@ const item = {
   show: { opacity: 1, y: 0, transition: { type: 'spring' as const, stiffness: 300, damping: 24 } },
 };
 
+const HeroSection = memo(({ songCount, onPlayAll, onPlayTrending }: { songCount: number; onPlayAll: () => void; onPlayTrending: () => void }) => {
+  const [heroIdx, setHeroIdx] = useState(0);
+
+  useEffect(() => {
+    const timer = setInterval(() => setHeroIdx(i => (i + 1) % HERO_GRADIENTS.length), 5000);
+    return () => clearInterval(timer);
+  }, []);
+
+  return (
+    <div className="relative overflow-hidden">
+      <AnimatePresence mode="wait">
+        <motion.div
+          key={heroIdx}
+          initial={{ opacity: 0, scale: 1.1 }}
+          animate={{ opacity: 1, scale: 1 }}
+          exit={{ opacity: 0, scale: 0.9 }}
+          transition={{ duration: 1, ease: 'easeInOut' }}
+          className={`absolute inset-0 bg-gradient-to-br ${HERO_GRADIENTS[heroIdx]}`}
+        />
+      </AnimatePresence>
+      
+      <div className="absolute inset-0 bg-gradient-to-b from-black/20 via-transparent to-black/40" />
+      
+      <div className="absolute inset-0 overflow-hidden">
+        <motion.div 
+          animate={{ x: [0, 30, -20, 0], y: [0, -20, 30, 0], scale: [1, 1.1, 0.9, 1] }}
+          transition={{ duration: 20, repeat: Infinity, ease: 'easeInOut' }}
+          className="absolute top-10 left-10 w-40 h-40 rounded-full bg-white/10 blur-2xl"
+        />
+        <motion.div 
+          animate={{ x: [0, -40, 20, 0], y: [0, 30, -30, 0], scale: [1, 0.9, 1.2, 1] }}
+          transition={{ duration: 25, repeat: Infinity, ease: 'easeInOut' }}
+          className="absolute bottom-10 right-20 w-56 h-56 rounded-full bg-white/5 blur-3xl"
+        />
+        <motion.div 
+          animate={{ x: [0, 20, -30, 0], y: [0, -40, 20, 0] }}
+          transition={{ duration: 18, repeat: Infinity, ease: 'easeInOut' }}
+          className="absolute top-1/2 left-1/2 w-32 h-32 rounded-full bg-violet-500/20 blur-2xl"
+        />
+      </div>
+      
+      <motion.div 
+        initial={{ opacity: 0, y: 30 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.8, delay: 0.2 }}
+        className="relative z-10 px-4 sm:px-8 py-12 sm:py-16 max-w-2xl"
+      >
+        <motion.div 
+          initial={{ opacity: 0, scale: 0.9 }}
+          animate={{ opacity: 1, scale: 1 }}
+          transition={{ delay: 0.3 }}
+          className="inline-flex items-center gap-2 px-4 py-2 rounded-full liquid-glass text-white/90 text-sm font-medium mb-4 sm:mb-6"
+        >
+          <Sparkles size={14} className="text-violet-300" />
+          <span>{songCount} songs + live YouTube trending</span>
+        </motion.div>
+        
+        <motion.h1 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.4 }}
+          className="text-3xl sm:text-5xl font-black text-white mb-3 sm:mb-4 leading-tight"
+        >
+          Your Music,<br />
+          <span className="text-gradient-aurora">Your Mood</span>
+        </motion.h1>
+        
+        <motion.p 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.5 }}
+          className="text-white/70 text-sm sm:text-lg mb-6 sm:mb-8 max-w-md"
+        >
+          Stream trending hits from YouTube, discover new artists, create playlists.
+        </motion.p>
+        
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.6 }}
+          className="flex gap-3"
+        >
+          <motion.button
+            whileHover={{ scale: 1.05, boxShadow: '0 20px 40px rgba(255, 255, 255, 0.2)' }}
+            whileTap={{ scale: 0.95 }}
+            onClick={onPlayAll}
+            className="flex items-center gap-2 px-6 sm:px-8 py-3 sm:py-3.5 rounded-full bg-white text-gray-900 font-bold text-sm sm:text-base transition-all duration-300"
+          >
+            <Play size={18} fill="currentColor" />
+            Play All
+          </motion.button>
+          
+          <motion.button
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
+            onClick={onPlayTrending}
+            className="flex items-center gap-2 px-6 sm:px-8 py-3 sm:py-3.5 rounded-full liquid-glass text-white font-bold text-sm sm:text-base transition-all duration-300"
+          >
+            <Zap size={18} />
+            Trending
+          </motion.button>
+        </motion.div>
+      </motion.div>
+    </div>
+  );
+});
+HeroSection.displayName = 'HeroSection';
+
 export const HomePage: React.FC = () => {
   const [songs, setSongs] = useState<Song[]>([]);
   const [trending, setTrending] = useState<Song[]>([]);
   const [loading, setLoading] = useState(true);
   const [trendingLoading, setTrendingLoading] = useState(true);
-  const [heroIdx, setHeroIdx] = useState(0);
-  const [selectedPlaylist, setSelectedPlaylist] = useState<any>(null);
+  const [selectedPlaylist, setSelectedPlaylist] = useState<Playlist | null>(null);
   const [selectedArtist, setSelectedArtist] = useState<string | null>(null);
+  const loadSong = useAudioStore((s) => s.loadSong);
 
   useEffect(() => {
-    fetchSongs().then(s => { setSongs(s); setLoading(false); });
+    fetchSongs().then(s => { setSongs(s); setLoading(false); }).catch(() => setLoading(false));
   }, []);
 
   useEffect(() => {
@@ -52,26 +160,25 @@ export const HomePage: React.FC = () => {
       .catch(() => setTrendingLoading(false));
   }, []);
 
-  useEffect(() => {
-    const timer = setInterval(() => setHeroIdx(i => (i + 1) % HERO_GRADIENTS.length), 5000);
-    return () => clearInterval(timer);
-  }, []);
-
   const playlists = useMemo(() => {
     if (songs.length === 0) return [];
     const genres = [...new Set(songs.map(s => s.genre))];
     return genres.slice(0, 8).map((genre, i) => {
-      const gSongs = songs.filter(s => s.genre === genre);
+      const gSongs = songs.filter(s => s.genre === genre).slice(0, 50);
       const emoji = ['🎵', '🎸', '🎤', '🎧', '🎶', '🎙️', '🎹', '🎷'][i % 8];
       return {
         id: `pl-${i}`,
         name: `${genre} Hits`,
         description: `Best ${genre} songs`,
         coverArt: gSongs[0]?.coverArt || '',
-        songs: gSongs.slice(0, 50),
+        songIds: gSongs.map(s => s.id),
+        trackCount: gSongs.length,
+        duration: gSongs.reduce((sum, s) => sum + (s.duration || 0), 0),
+        createdAt: new Date().toISOString(),
+        isPublic: false,
         emoji,
         gradient: HERO_GRADIENTS[i % HERO_GRADIENTS.length],
-      };
+      } as Playlist & { emoji: string; gradient: string };
     });
   }, [songs]);
 
@@ -95,21 +202,28 @@ export const HomePage: React.FC = () => {
     return songs.filter(s => s.artist === selectedArtist);
   }, [songs, selectedArtist]);
 
-  const handlePlayArtist = (artist: string, e: React.MouseEvent) => {
+  const handlePlayAll = useCallback(() => {
+    const allSongs = [...songs].sort(() => 0.5 - Math.random()).slice(0, 50);
+    if (allSongs.length > 0) loadSong(allSongs[0], allSongs, 0);
+  }, [songs, loadSong]);
+
+  const handlePlayTrending = useCallback(() => {
+    if (trending.length > 0) loadSong(trending[0], trending, 0);
+  }, [trending, loadSong]);
+
+  const handlePlayArtist = useCallback((artist: string, e: React.MouseEvent) => {
     e.stopPropagation();
     const artistSongs = songs.filter(s => s.artist === artist);
-    if (artistSongs.length > 0) {
-      useAudioStore.getState().loadSong(artistSongs[0], artistSongs, 0);
-    }
-  };
+    if (artistSongs.length > 0) loadSong(artistSongs[0], artistSongs, 0);
+  }, [songs, loadSong]);
 
-  const handleArtistClick = (artist: string) => {
-    setSelectedArtist(selectedArtist === artist ? null : artist);
-  };
+  const handleArtistClick = useCallback((artist: string) => {
+    setSelectedArtist(prev => prev === artist ? null : artist);
+  }, []);
 
-  const handlePlayPlaylist = (playlist: any) => {
+  const handlePlayPlaylist = useCallback((playlist: any) => {
     setSelectedPlaylist(playlist);
-  };
+  }, []);
 
   if (loading) {
     return (
@@ -149,133 +263,14 @@ export const HomePage: React.FC = () => {
 
   return (
     <div className="pb-8">
-      {/* Hero Section - iOS 26 Liquid Glass */}
-      <div className="relative overflow-hidden">
-        {/* Animated Gradient Background */}
-        <AnimatePresence mode="wait">
-          <motion.div
-            key={heroIdx}
-            initial={{ opacity: 0, scale: 1.1 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.9 }}
-            transition={{ duration: 1, ease: 'easeInOut' }}
-            className={`absolute inset-0 bg-gradient-to-br ${HERO_GRADIENTS[heroIdx]}`}
-          />
-        </AnimatePresence>
-        
-        {/* Liquid Glass Overlay */}
-        <div className="absolute inset-0 bg-gradient-to-b from-black/20 via-transparent to-black/40" />
-        
-        {/* Floating Orbs - iOS 26 Style */}
-        <div className="absolute inset-0 overflow-hidden">
-          <motion.div 
-            animate={{ 
-              x: [0, 30, -20, 0],
-              y: [0, -20, 30, 0],
-              scale: [1, 1.1, 0.9, 1]
-            }}
-            transition={{ duration: 20, repeat: Infinity, ease: 'easeInOut' }}
-            className="absolute top-10 left-10 w-40 h-40 rounded-full bg-white/10 blur-2xl"
-          />
-          <motion.div 
-            animate={{ 
-              x: [0, -40, 20, 0],
-              y: [0, 30, -30, 0],
-              scale: [1, 0.9, 1.2, 1]
-            }}
-            transition={{ duration: 25, repeat: Infinity, ease: 'easeInOut' }}
-            className="absolute bottom-10 right-20 w-56 h-56 rounded-full bg-white/5 blur-3xl"
-          />
-          <motion.div 
-            animate={{ 
-              x: [0, 20, -30, 0],
-              y: [0, -40, 20, 0],
-            }}
-            transition={{ duration: 18, repeat: Infinity, ease: 'easeInOut' }}
-            className="absolute top-1/2 left-1/2 w-32 h-32 rounded-full bg-violet-500/20 blur-2xl"
-          />
-        </div>
-        
-        {/* Hero Content */}
-        <motion.div 
-          initial={{ opacity: 0, y: 30 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.8, delay: 0.2 }}
-          className="relative z-10 px-4 sm:px-8 py-12 sm:py-16 max-w-2xl"
-        >
-          <motion.div 
-            initial={{ opacity: 0, scale: 0.9 }}
-            animate={{ opacity: 1, scale: 1 }}
-            transition={{ delay: 0.3 }}
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-full liquid-glass text-white/90 text-sm font-medium mb-4 sm:mb-6"
-          >
-            <Sparkles size={14} className="text-violet-300" />
-            <span>{songs.length} songs + live YouTube trending</span>
-          </motion.div>
-          
-          <motion.h1 
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.4 }}
-            className="text-3xl sm:text-5xl font-black text-white mb-3 sm:mb-4 leading-tight"
-          >
-            Your Music,<br />
-            <span className="text-gradient-aurora">Your Mood</span>
-          </motion.h1>
-          
-          <motion.p 
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.5 }}
-            className="text-white/70 text-sm sm:text-lg mb-6 sm:mb-8 max-w-md"
-          >
-            Stream trending hits from YouTube, discover new artists, create playlists.
-          </motion.p>
-          
-          <motion.div 
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.6 }}
-            className="flex gap-3"
-          >
-            <motion.button
-              whileHover={{ scale: 1.05, boxShadow: '0 20px 40px rgba(255, 255, 255, 0.2)' }}
-              whileTap={{ scale: 0.95 }}
-              onClick={() => {
-                const allSongs = [...songs].sort(() => 0.5 - Math.random()).slice(0, 50);
-                if (allSongs.length > 0) useAudioStore.getState().loadSong(allSongs[0], allSongs, 0);
-              }}
-              className="flex items-center gap-2 px-6 sm:px-8 py-3 sm:py-3.5 rounded-full bg-white text-gray-900 font-bold text-sm sm:text-base transition-all duration-300"
-            >
-              <Play size={18} fill="currentColor" />
-              Play All
-            </motion.button>
-            
-            <motion.button
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
-              onClick={() => {
-                if (trending.length > 0) {
-                  useAudioStore.getState().loadSong(trending[0], trending, 0);
-                }
-              }}
-              className="flex items-center gap-2 px-6 sm:px-8 py-3 sm:py-3.5 rounded-full liquid-glass text-white font-bold text-sm sm:text-base transition-all duration-300"
-            >
-              <Zap size={18} />
-              Trending
-            </motion.button>
-          </motion.div>
-        </motion.div>
-      </div>
+      <HeroSection songCount={songs.length} onPlayAll={handlePlayAll} onPlayTrending={handlePlayTrending} />
 
-      {/* Main Content */}
       <motion.div 
         variants={container}
         initial="hidden"
         animate="show"
         className="px-4 sm:px-6 space-y-8 sm:space-y-10 mt-6 sm:mt-8"
       >
-        {/* Trending Now */}
         <motion.section variants={item}>
           <div className="flex items-center justify-between mb-4 sm:mb-6">
             <h2 className="text-xl sm:text-2xl font-bold text-white flex items-center gap-2 sm:gap-3">
@@ -305,7 +300,6 @@ export const HomePage: React.FC = () => {
           )}
         </motion.section>
 
-        {/* Playlists by Genre */}
         <motion.section variants={item}>
           <div className="flex items-center justify-between mb-4 sm:mb-6">
             <h2 className="text-xl sm:text-2xl font-bold text-white flex items-center gap-2 sm:gap-3">
@@ -343,13 +337,12 @@ export const HomePage: React.FC = () => {
                   </div>
                 </div>
                 <h3 className="font-bold text-white text-xs sm:text-sm truncate">{pl.name}</h3>
-                <p className="text-[10px] sm:text-xs text-gray-400 mt-0.5">{pl.songs.length} songs</p>
+                <p className="text-[10px] sm:text-xs text-gray-400 mt-0.5">{pl.trackCount} songs</p>
               </motion.div>
             ))}
           </div>
         </motion.section>
 
-        {/* Top Artists */}
         {topArtists.length > 0 && (
           <motion.section variants={item}>
             <div className="flex items-center justify-between mb-4 sm:mb-6">
@@ -384,7 +377,7 @@ export const HomePage: React.FC = () => {
                       />
                     </div>
                     <button
-                      onClick={(e) => { e.stopPropagation(); handlePlayArtist(a.artist, e); }}
+                      onClick={(e) => handlePlayArtist(a.artist, e)}
                       className="absolute bottom-0 right-0 w-6 h-6 sm:w-7 sm:h-7 rounded-full bg-violet-500 flex items-center justify-center shadow-lg opacity-0 group-hover:opacity-100 transition-all duration-200 translate-y-1 group-hover:translate-y-0"
                       title={`Play ${a.artist}`}
                     >
@@ -399,7 +392,6 @@ export const HomePage: React.FC = () => {
           </motion.section>
         )}
 
-        {/* All Songs / Filtered by Artist */}
         <motion.section variants={item}>
           <div className="flex items-center justify-between mb-4 sm:mb-6">
             <h2 className="text-xl sm:text-2xl font-bold text-white flex items-center gap-2 sm:gap-3">
@@ -416,7 +408,6 @@ export const HomePage: React.FC = () => {
         </motion.section>
       </motion.div>
 
-      {/* Playlist Detail Modal */}
       <AnimatePresence>
         {selectedPlaylist && (
           <PlaylistDetail

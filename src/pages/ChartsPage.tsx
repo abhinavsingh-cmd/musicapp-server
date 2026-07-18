@@ -5,8 +5,13 @@ import { motion } from 'framer-motion';
 import { TrendingUp, TrendingDown, Minus, Sparkles, Music, Loader2 } from 'lucide-react';
 
 export const ChartsPage: React.FC = () => {
-  const { topCharts, globalCharts, bollywoodCharts, loading, error, fetchCharts } = useChartsStore();
-  const { loadSong } = useAudioStore();
+  const topCharts = useChartsStore((s) => s.topCharts);
+  const globalCharts = useChartsStore((s) => s.globalCharts);
+  const bollywoodCharts = useChartsStore((s) => s.bollywoodCharts);
+  const loading = useChartsStore((s) => s.loading);
+  const error = useChartsStore((s) => s.error);
+  const fetchCharts = useChartsStore((s) => s.fetchCharts);
+  const loadSong = useAudioStore((s) => s.loadSong);
   const [activeTab, setActiveTab] = React.useState<'top' | 'global' | 'bollywood'>('top');
 
   useEffect(() => {

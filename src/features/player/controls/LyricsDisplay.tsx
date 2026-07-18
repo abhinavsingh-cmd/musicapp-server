@@ -1,13 +1,34 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useMemo, memo } from 'react';
 import { useLyricsStore } from '../../../stores/lyricsStore';
 import { useAudioStore } from '../../../stores/audioStore';
 import { Music, Loader2 } from 'lucide-react';
 
-export const LyricsDisplay: React.FC = () => {
-  const { lyrics, currentLine, loading, fetchLyrics } = useLyricsStore();
-  const { currentSong, progress } = useAudioStore();
+const LyricsLine = memo(({ text, isActive, isPast, onClick }: { text: string; isActive: boolean; isPast: boolean; onClick: () => void }) => (
+  <div
+    className={`py-2 px-3 my-1 rounded-lg transition-all duration-300 cursor-pointer hover:bg-white/5 ${
+      isActive
+        ? 'text-white text-xl font-bold scale-105 bg-gradient-to-r from-violet-500/20 to-fuchsia-500/10'
+        : isPast
+        ? 'text-gray-500 text-base'
+        : 'text-gray-400 text-base'
+    }`}
+    onClick={onClick}
+  >
+    {text}
+  </div>
+));
+LyricsLine.displayName = 'LyricsLine';
+
+export const LyricsDisplay: React.FC = memo(() => {
+  const lyrics = useLyricsStore((s) => s.lyrics);
+  const currentLine = useLyricsStore((s) => s.currentLine);
+  const loading = useLyricsStore((s) => s.loading);
+  const fetchLyrics = useLyricsStore((s) => s.fetchLyrics);
+  const currentSong = useAudioStore((s) => s.currentSong);
+  const progress = useAudioStore((s) => s.progress);
   const containerRef = useRef<HTMLDivElement>(null);
   const lineRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+  const lastUpdateRef = useRef(0);
 
   useEffect(() => {
     if (currentSong) {
@@ -16,6 +37,9 @@ export const LyricsDisplay: React.FC = () => {
   }, [currentSong, fetchLyrics]);
 
   useEffect(() => {
+    const now = Date.now();
+    if (now - lastUpdateRef.current < 500) return;
+    lastUpdateRef.current = now;
     useLyricsStore.getState().updateCurrentLine(progress);
   }, [progress]);
 
@@ -27,6 +51,10 @@ export const LyricsDisplay: React.FC = () => {
       });
     }
   }, [currentLine]);
+
+  const seekToLine = useMemo(() => {
+    return (time: number) => useAudioStore.getState().seek(time);
+  }, []);
 
   if (loading) {
     return (
@@ -57,19 +85,17 @@ export const LyricsDisplay: React.FC = () => {
           <div
             key={i}
             ref={(el) => { if (el) lineRefs.current.set(i, el); }}
-            className={`py-2 px-3 my-1 rounded-lg transition-all duration-300 cursor-pointer hover:bg-white/5 ${
-              i === currentLine
-                ? 'text-white text-xl font-bold scale-105 bg-gradient-to-r from-violet-500/20 to-fuchsia-500/10'
-                : i < currentLine
-                ? 'text-gray-500 text-base'
-                : 'text-gray-400 text-base'
-            }`}
-            onClick={() => useAudioStore.getState().seek(line.time)}
           >
-            {line.text}
+            <LyricsLine
+              text={line.text}
+              isActive={i === currentLine}
+              isPast={i < currentLine}
+              onClick={() => seekToLine(line.time)}
+            />
           </div>
         ))}
       </div>
     </div>
   );
-};
+});
+LyricsDisplay.displayName = 'LyricsDisplay';

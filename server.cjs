@@ -668,14 +668,22 @@ const seen2 = new Set();
 let songs = SONGS.filter(s => { if (seen2.has(s[0])) return false; seen2.add(s[0]); return true; })
   .map((s, i) => ({ id: "yt-" + i, youtubeId: s[0], title: s[1], artist: s[2], genre: s[3], duration: s[4], coverArt: "https://img.youtube.com/vi/" + s[0] + "/mqdefault.jpg" }));
 
-app.get("/api/songs", (_req, res) => res.json({ songs, total: songs.length }));
+app.get("/api/songs", (_req, res) => {
+  console.log("[API] GET /api/songs - returning", songs.length, "songs");
+  res.json({ songs, total: songs.length });
+});
 app.get("/api/search", (req, res) => {
   const q = (req.query.q || "").toLowerCase();
   if (!q) return res.json({ songs });
-  res.json({ songs: songs.filter(s => s.title.toLowerCase().includes(q) || s.artist.toLowerCase().includes(q) || s.genre.toLowerCase().includes(q)) });
+  const results = songs.filter(s => s.title.toLowerCase().includes(q) || s.artist.toLowerCase().includes(q) || s.genre.toLowerCase().includes(q));
+  console.log("[API] GET /api/search?q=" + q, "- found", results.length, "results");
+  res.json({ songs: results });
 });
 app.get("/api/genre/:genre", (req, res) => {
-  res.json({ songs: songs.filter(s => s.genre.toLowerCase() === req.params.genre.toLowerCase()) });
+  const genre = req.params.genre;
+  const results = songs.filter(s => s.genre.toLowerCase() === genre.toLowerCase());
+  console.log("[API] GET /api/genre/" + genre, "- found", results.length, "songs");
+  res.json({ songs: results });
 });
 
 // YouTube Search endpoint
@@ -692,6 +700,8 @@ app.get("/api/youtube/search", (req, res) => {
   const q = req.query.q || "";
   if (!q) return res.json({ results: [] });
 
+  console.log("[YT Search] Searching for:", q);
+
   const args = [
     "ytsearch10:" + q,
     "--flat-playlist",
@@ -707,17 +717,27 @@ app.get("/api/youtube/search", (req, res) => {
     }
     try {
       const lines = stdout.trim().split("\n").filter(Boolean);
-      const results = lines.map(line => {
-        const data = JSON.parse(line);
-        return {
-          id: data.id || data.url,
-          title: data.title || "Unknown",
-          artist: data.channel || data.uploader || "Unknown",
-          duration: data.duration || 0,
-          thumbnail: data.thumbnails?.[data.thumbnails.length - 1]?.url || "https://img.youtube.com/vi/" + (data.id || "") + "/mqdefault.jpg",
-          viewCount: data.view_count || 0
-        };
-      }).filter(r => r.id && isMusicResult(r));
+      const results = [];
+      for (const line of lines) {
+        try {
+          const data = JSON.parse(line);
+          const entry = {
+            id: data.id || data.url,
+            title: data.title || "Unknown",
+            artist: data.channel || data.uploader || "Unknown",
+            duration: data.duration || 0,
+            thumbnail: data.thumbnails?.[data.thumbnails.length - 1]?.url || "https://img.youtube.com/vi/" + (data.id || "") + "/mqdefault.jpg",
+            viewCount: data.view_count || 0
+          };
+          if (entry.id && isMusicResult(entry)) {
+            results.push(entry);
+          }
+        } catch (parseErr) {
+          // Skip malformed lines instead of killing entire response
+          console.warn("[YT Search] Skipping malformed line:", parseErr.message);
+        }
+      }
+      console.log("[YT Search] Found", results.length, "results for:", q);
       res.json({ results });
     } catch (e) {
       console.error("[YT Search] Parse error:", e.message);
@@ -732,8 +752,8 @@ let trendingCacheTime = 0;
 
 app.get("/api/youtube/trending", (req, res) => {
   const now = Date.now();
-  // Cache for 10 minutes
-  if (trendingCache && (now - trendingCacheTime) < 600000) {
+  // Cache for 10 minutes, but NOT if cache is empty
+  if (trendingCache && trendingCache.length > 0 && (now - trendingCacheTime) < 600000) {
     return res.json({ results: trendingCache });
   }
 
@@ -747,6 +767,30 @@ app.get("/api/youtube/trending", (req, res) => {
 
   const allResults = [];
   let done = 0;
+  let responded = false;
+
+  const respond = () => {
+    if (responded) return;
+    responded = true;
+    if (allResults.length > 0) {
+      trendingCache = allResults.slice(0, 30);
+      trendingCacheTime = Date.now();
+      console.log("[Trending] Cached", trendingCache.length, "results");
+    } else {
+      console.log("[Trending] No results from YouTube, returning built-in trending");
+      // Fallback: return top built-in songs as "trending"
+      const fallback = songs.slice(0, 20).map(s => ({
+        id: s.youtubeId,
+        title: s.title,
+        artist: s.artist,
+        duration: s.duration,
+        thumbnail: s.coverArt,
+        viewCount: 0
+      }));
+      return res.json({ results: fallback });
+    }
+    res.json({ results: trendingCache });
+  };
 
   for (const q of queries) {
     execFile("yt-dlp", [
@@ -760,34 +804,47 @@ app.get("/api/youtube/trending", (req, res) => {
         try {
           const lines = stdout.trim().split("\n").filter(Boolean);
           for (const line of lines) {
-            const data = JSON.parse(line);
-            if (data.id && !allResults.find(r => r.id === data.id)) {
-              const entry = {
-                id: data.id,
-                title: data.title || "Unknown",
-                artist: data.channel || data.uploader || "Unknown",
-                duration: data.duration || 0,
-                thumbnail: data.thumbnails?.[data.thumbnails.length - 1]?.url || "https://img.youtube.com/vi/" + data.id + "/mqdefault.jpg",
-                viewCount: data.view_count || 0
-              };
-              if (isMusicResult(entry)) allResults.push(entry);
+            try {
+              const data = JSON.parse(line);
+              if (data.id && !allResults.find(r => r.id === data.id)) {
+                const entry = {
+                  id: data.id,
+                  title: data.title || "Unknown",
+                  artist: data.channel || data.uploader || "Unknown",
+                  duration: data.duration || 0,
+                  thumbnail: data.thumbnails?.[data.thumbnails.length - 1]?.url || "https://img.youtube.com/vi/" + data.id + "/mqdefault.jpg",
+                  viewCount: data.view_count || 0
+                };
+                if (isMusicResult(entry)) allResults.push(entry);
+              }
+            } catch (lineErr) {
+              // Skip malformed lines instead of killing entire response
             }
           }
         } catch (e) {}
+      } else if (err) {
+        console.error("[Trending] yt-dlp error for query:", q, err.message);
       }
       done++;
       if (done === queries.length) {
-        trendingCache = allResults.slice(0, 30);
-        trendingCacheTime = Date.now();
-        res.json({ results: trendingCache });
+        respond();
       }
     });
   }
+
+  // Safety timeout: respond after 20s even if some queries haven't returned
+  setTimeout(() => {
+    if (!responded) {
+      console.log("[Trending] Safety timeout reached, responding with partial results");
+      respond();
+    }
+  }, 20000);
 });
 
 app.get("/api/health", (req, res) => {
+  console.log("[API] GET /api/health");
   execFile("yt-dlp", ["--version"], (err, stdout) => {
-    res.json({ status: "ok", ytDlpVersion: stdout.trim(), node: process.version });
+    res.json({ status: "ok", ytDlpVersion: stdout.trim(), node: process.version, songs: songs.length });
   });
 });
 
@@ -799,6 +856,7 @@ app.get("/api/stream/:videoId", (req, res) => {
   }
 
   const audioUrl = "https://www.youtube.com/watch?v=" + videoId;
+  console.log("[Stream] Starting stream for:", videoId);
 
   const ytArgs = [
     "-f", "bestaudio/best",
@@ -809,7 +867,6 @@ app.get("/api/stream/:videoId", (req, res) => {
     audioUrl
   ];
 
-  console.log("[Stream] Starting yt-dlp for", videoId);
   const yt = spawn("yt-dlp", ytArgs, { stdio: ["ignore", "pipe", "pipe"] });
 
   let headersSent = false;
@@ -817,29 +874,33 @@ app.get("/api/stream/:videoId", (req, res) => {
     if (!headersSent) {
       yt.kill("SIGTERM");
       if (!res.headersSent) {
+        console.error("[Stream] Timed out after 30s for:", videoId);
         res.status(504).json({ error: "Stream timed out" });
       }
     }
   }, 30000);
 
   let firstChunk = true;
+  let totalBytes = 0;
   yt.stdout.on("data", (chunk) => {
     if (firstChunk) {
       firstChunk = false;
       headersSent = true;
       clearTimeout(startupTimeout);
-      res.setHeader("Content-Type", "audio/webm");
+      res.setHeader("Content-Type", "audio/webm; charset=utf-8");
       res.setHeader("Accept-Ranges", "bytes");
       res.setHeader("Cache-Control", "no-cache");
       res.setHeader("X-Content-Type-Options", "nosniff");
+      console.log("[Stream] First chunk received for:", videoId);
     }
+    totalBytes += chunk.length;
     res.write(chunk);
   });
 
   let stderrOutput = "";
   yt.stderr.on("data", (data) => {
     const msg = data.toString().trim();
-    console.error("[Stream]", msg);
+    if (msg) console.error("[Stream]", msg);
     stderrOutput += msg + "\n";
   });
 
@@ -852,8 +913,11 @@ app.get("/api/stream/:videoId", (req, res) => {
   yt.on("close", (code) => {
     clearTimeout(startupTimeout);
     if (code && code !== 0 && !headersSent) {
-      console.error("[Stream] yt-dlp exited with code:", code);
+      console.error("[Stream] yt-dlp exited with code:", code, "for:", videoId);
       if (!res.headersSent) res.status(500).json({ error: "Stream failed", code, detail: stderrOutput.slice(0, 500) });
+    } else if (headersSent) {
+      console.log("[Stream] Completed for:", videoId, "bytes:", totalBytes);
+      res.end();
     }
   });
 
@@ -870,6 +934,8 @@ app.get("/api/download/:videoId", (req, res) => {
   if (!videoId || !/^[A-Za-z0-9_-]{11}$/.test(videoId)) {
     return res.status(400).json({ error: "Invalid video ID" });
   }
+
+  console.log("[Download] Starting download for:", videoId, "title:", title);
 
   const safeName = title.replace(/[^a-zA-Z0-9 ]/g, "").replace(/\s+/g, "_").substring(0, 80);
   const audioUrl = "https://www.youtube.com/watch?v=" + videoId;
@@ -889,18 +955,57 @@ app.get("/api/download/:videoId", (req, res) => {
     audioUrl
   ], { stdio: ["ignore", "pipe", "pipe"] });
 
+  let headersSent = false;
+  let totalBytes = 0;
+  let firstChunk = true;
+
+  // 60-second timeout for download startup
+  const startupTimeout = setTimeout(() => {
+    if (!headersSent) {
+      yt.kill("SIGTERM");
+      if (!res.headersSent) {
+        console.error("[Download] Timed out for:", videoId);
+        res.status(504).json({ error: "Download timed out" });
+      }
+    }
+  }, 60000);
+
+  yt.stdout.on("data", (chunk) => {
+    if (firstChunk) {
+      firstChunk = false;
+      headersSent = true;
+      clearTimeout(startupTimeout);
+    }
+    totalBytes += chunk.length;
+  });
+
   yt.stdout.pipe(res);
 
   yt.stderr.on("data", (data) => {
-    console.error("[Download]", data.toString().trim());
+    const msg = data.toString().trim();
+    if (msg) console.error("[Download]", msg);
   });
 
   yt.on("error", (err) => {
+    clearTimeout(startupTimeout);
     console.error("[Download] Process error:", err.message);
     if (!res.headersSent) res.status(500).json({ error: "Download error" });
   });
 
+  yt.on("close", (code) => {
+    clearTimeout(startupTimeout);
+    if (code !== 0 && code !== null) {
+      console.error("[Download] yt-dlp exited with code:", code, "for:", videoId);
+      if (!headersSent && !res.headersSent) {
+        res.status(500).json({ error: "Download failed", code });
+      }
+    } else {
+      console.log("[Download] Completed for:", videoId, "bytes:", totalBytes);
+    }
+  });
+
   req.on("close", () => {
+    clearTimeout(startupTimeout);
     yt.kill("SIGTERM");
   });
 });
@@ -912,14 +1017,19 @@ app.get("/api/audio-info/:videoId", (req, res) => {
     return res.status(400).json({ error: "Invalid video ID" });
   }
 
+  console.log("[AudioInfo] Getting info for:", videoId);
+
   execFile("yt-dlp", [
     "-f", "bestaudio[ext=m4a]/bestaudio",
     "--dump-json",
     "--no-warnings",
     "--no-check-certificates",
     "https://www.youtube.com/watch?v=" + videoId
-  ], { timeout: 10000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
-    if (err) return res.status(500).json({ error: "Failed to get info" });
+  ], { timeout: 15000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+    if (err) {
+      console.error("[AudioInfo] Error for:", videoId, err.message);
+      return res.status(500).json({ error: "Failed to get info" });
+    }
     try {
       const info = JSON.parse(stdout);
       res.json({
@@ -935,6 +1045,7 @@ app.get("/api/audio-info/:videoId", (req, res) => {
         }))
       });
     } catch (e) {
+      console.error("[AudioInfo] Parse error for:", videoId);
       res.status(500).json({ error: "Parse error" });
     }
   });
@@ -1005,4 +1116,3 @@ try {
   console.error("[Auto-Scrape] Error:", err.message || err);
 }
 }
-# Sat Jul 18 00:06:33 IST 2026

@@ -1,13 +1,8 @@
 import { Song } from '../types/music';
 import { backgroundPlaybackService } from './backgroundPlaybackService';
 import { equalizerService } from './equalizerService';
-import { api } from '../config/api';
 import { backgroundAudio } from './backgroundAudio';
 import { youtubePlayerService } from './youtubePlayerService';
-
-function isBlobUrl(url: string): boolean {
-  return url.startsWith('blob:');
-}
 
 function isNativePlatform(): boolean {
   return !!(window as any).Capacitor;
@@ -26,6 +21,14 @@ interface AudioState {
 type AudioEventType = 'play' | 'pause' | 'ended' | 'progress' | 'loaded' | 'error' | 'timeupdate' | 'waiting' | 'canplay' | 'playing';
 
 type AudioEventHandler = (event: AudioEventType, data?: any) => void;
+
+function log(...args: any[]) {
+  console.log('[AudioService]', ...args);
+}
+
+function logError(...args: any[]) {
+  console.error('[AudioService]', ...args);
+}
 
 export class AudioService {
   private htmlAudio: HTMLAudioElement | null = null;
@@ -50,6 +53,7 @@ export class AudioService {
   private maxRetries = 3;
   private abortController: AbortController | null = null;
   private isDestroyed = false;
+  private consecutiveFailures = 0;
 
   private getHtmlAudio(): HTMLAudioElement {
     if (!this.htmlAudio) {
@@ -89,6 +93,7 @@ export class AudioService {
   }
 
   private handleEnded = (): void => {
+    log('Audio ended');
     this.setState({ isPlaying: false, currentTime: 0 });
     this.stopProgressTracking();
     this.emit('ended');
@@ -108,7 +113,9 @@ export class AudioService {
 
   private handleError = (): void => {
     const error = this.htmlAudio?.error;
+    const code = error?.code;
     const message = error?.message || 'Playback error';
+    logError('HTML audio error:', { code, message, src: this.htmlAudio?.src });
     this.setState({ error: message, isLoading: false, isPlaying: false });
     this.emit('error', message);
   };
@@ -140,7 +147,11 @@ export class AudioService {
 
   private handleLoadedMetadata = (): void => {
     if (this.htmlAudio) {
-      this.state.duration = this.htmlAudio.duration || this.state.duration;
+      const dur = this.htmlAudio.duration;
+      if (dur && isFinite(dur)) {
+        this.state.duration = dur;
+      }
+      log('Metadata loaded, duration:', this.state.duration);
       this.emit('loaded', { song: this.state.currentSong });
     }
   };
@@ -152,7 +163,7 @@ export class AudioService {
   private emit(event: AudioEventType, data?: any): void {
     if (this.isDestroyed) return;
     this.listeners.forEach(cb => {
-      try { cb(event, data); } catch (e) { console.error('Audio listener error:', e); }
+      try { cb(event, data); } catch (e) { console.error('[AudioService] Listener error:', e); }
     });
   }
 
@@ -167,6 +178,8 @@ export class AudioService {
 
   async play(song: Song, playlist: Song[] = [], startIndex: number = 0): Promise<void> {
     if (this.isDestroyed) return;
+    
+    log('play() called for:', song.title, 'by', song.artist, '| youtubeId:', song.youtubeId, '| audioUrl:', song.audioUrl ? song.audioUrl.substring(0, 60) + '...' : 'none');
     
     const playbackId = ++this.currentPlaybackId;
     
@@ -199,22 +212,23 @@ export class AudioService {
       
       const audio = this.getHtmlAudio();
       
-      let streamUrl: string;
-      if (song.audioUrl && isBlobUrl(song.audioUrl)) {
-        streamUrl = song.audioUrl;
-        this.useYoutubePlayer = false;
-      } else if (song.youtubeId) {
+      // Determine playback method
+      if (song.youtubeId) {
+        // YouTube IFrame API (primary path for server songs and APK)
+        log('Using YouTube IFrame API for:', song.youtubeId);
         this.useYoutubePlayer = true;
+        await this.playWithYouTubePlayer(song, playbackId);
+      } else if (song.audioUrl) {
+        // Direct audio URL (sampleSongs, downloaded songs, blob URLs)
+        log('Using HTML audio for:', song.audioUrl.substring(0, 80));
+        this.useYoutubePlayer = false;
+        await this.playWithHtmlAudio(audio, song.audioUrl, song, playbackId);
       } else {
+        logError('No audio source for song:', song.title);
         this.setState({ error: 'No audio source for this song', isLoading: false });
         this.emit('error', 'No audio source for this song');
+        this.emit('ended');
         return;
-      }
-
-      if (this.useYoutubePlayer) {
-        await this.playWithYouTubePlayer(song, playbackId);
-      } else {
-        await this.playWithHtmlAudio(audio, streamUrl, song, playbackId);
       }
     } finally {
       this.pendingPlayPromise = null;
@@ -242,6 +256,7 @@ export class AudioService {
           case 'play':
             if (!this.state.isPlaying) {
               this.setState({ isPlaying: true, isLoading: false, error: null });
+              this.consecutiveFailures = 0;
               this.startProgressTracking();
               this.emit('play', { song });
               if (isNativePlatform()) {
@@ -272,8 +287,15 @@ export class AudioService {
             }
             break;
           case 'error':
+            logError('YouTube player error for', song.title, ':', data);
+            this.consecutiveFailures++;
             this.setState({ error: `Playback error: ${data}`, isLoading: false, isPlaying: false });
             this.emit('error', `Playback error: ${data}`);
+            // Auto-skip on fatal YouTube errors (100=not found, 150=not embeddable)
+            if (data === 100 || data === 150 || this.consecutiveFailures >= 2) {
+              log('YouTube fatal error, auto-skipping to next song');
+              this.emit('ended');
+            }
             break;
         }
       });
@@ -281,8 +303,11 @@ export class AudioService {
       await youtubePlayerService.load(song);
       this.setState({ isLoading: false, duration: song.duration });
       this.emit('loaded', { song });
+      log('YouTube video loaded:', song.youtubeId);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'YouTube player failed';
+      logError('YouTube playback failed for', song.title, ':', msg);
+      this.consecutiveFailures++;
       this.setState({ error: `Cannot play "${song.title}": ${msg}`, isLoading: false, isPlaying: false });
       this.emit('error', `Cannot play "${song.title}": ${msg}`);
       this.emit('ended');
@@ -293,6 +318,7 @@ export class AudioService {
     this.stopYouTubePlayer();
     audio.src = streamUrl;
     audio.volume = this.state.volume;
+    log('HTML audio src set:', streamUrl.substring(0, 100));
 
     await equalizerService.resume();
 
@@ -301,12 +327,15 @@ export class AudioService {
       if (this.isDestroyed || this.currentPlaybackId !== playbackId) return;
 
       try {
+        log(`HTML audio attempt ${attempt + 1}/${this.maxRetries + 1} for:`, song.title);
         audio.load();
         this.pendingPlayPromise = audio.play();
         await this.pendingPlayPromise;
 
         if (this.isDestroyed || this.currentPlaybackId !== playbackId) return;
 
+        log('HTML audio playing successfully:', song.title);
+        this.consecutiveFailures = 0;
         this.setState({ isPlaying: true, isLoading: false });
         this.emit('play', { song });
 
@@ -316,18 +345,22 @@ export class AudioService {
         return;
       } catch (err) {
         lastError = err;
-        console.error(`[AudioService] Playback attempt ${attempt + 1} failed:`, err);
+        logError(`HTML audio attempt ${attempt + 1} failed:`, err);
 
         if (err instanceof DOMException && err.name === 'AbortError') return;
 
         if (attempt < this.maxRetries) {
           audio.src = '';
-          await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+          const delay = 1000 * (attempt + 1);
+          log(`Retrying in ${delay}ms...`);
+          await new Promise(r => setTimeout(r, delay));
         }
       }
     }
 
+    this.consecutiveFailures++;
     const msg = lastError instanceof Error ? lastError.message : 'Playback failed';
+    logError('All HTML audio attempts failed for:', song.title, msg);
     this.setState({ error: `Cannot play "${song.title}": ${msg}`, isLoading: false, isPlaying: false });
     this.emit('error', `Cannot play "${song.title}": ${msg}`);
     this.emit('ended');
@@ -360,9 +393,10 @@ export class AudioService {
   }
 
   pause(): void {
+    log('pause() called');
     if (this.useYoutubePlayer) {
       youtubePlayerService.pause();
-    } else if (this.htmlAudio && this.state.isPlaying) {
+    } else if (this.htmlAudio) {
       this.htmlAudio.pause();
     }
     if (this.state.isPlaying) {
@@ -376,13 +410,20 @@ export class AudioService {
   }
 
   resume(): void {
-    if (!this.state.isPlaying || !this.state.currentSong) return;
+    log('resume() called, isPlaying:', this.state.isPlaying, 'currentSong:', this.state.currentSong?.title);
+    
+    // Guard: skip if already playing or no song loaded
+    if (this.state.isPlaying || !this.state.currentSong) return;
 
     if (this.useYoutubePlayer) {
+      log('Resuming YouTube player');
       youtubePlayerService.play();
     } else if (this.htmlAudio) {
+      log('Resuming HTML audio, src:', this.htmlAudio.src?.substring(0, 80));
       equalizerService.resume().then(() => {
-        this.htmlAudio?.play().catch(() => {});
+        this.htmlAudio?.play().catch(err => {
+          logError('HTML audio resume play() failed:', err);
+        });
       });
     }
 
@@ -395,6 +436,7 @@ export class AudioService {
   }
 
   stop(): void {
+    log('stop() called');
     this.clearAllTimers();
     this.stopCurrentPlayback();
     this.setState({ 
@@ -455,6 +497,14 @@ export class AudioService {
     return this.state.volume;
   }
 
+  getConsecutiveFailures(): number {
+    return this.consecutiveFailures;
+  }
+
+  resetConsecutiveFailures(): void {
+    this.consecutiveFailures = 0;
+  }
+
   destroy(): void {
     this.isDestroyed = true;
     this.abortController?.abort();
@@ -482,5 +532,6 @@ export class AudioService {
     };
     this.currentPlaybackId = 0;
     this.playbackTransitionLock = false;
+    this.consecutiveFailures = 0;
   }
 }
