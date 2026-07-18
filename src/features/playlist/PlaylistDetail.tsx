@@ -499,15 +499,7 @@ export const PlaylistDetail: React.FC<PlaylistDetailProps> = ({ playlist, onClos
               <div className="space-y-1">
                 {filteredSongs.map((song) => {
                   const realIndex = playlistSongs.indexOf(song);
-  if (!playlist) {
-    return (
-      <div className="min-h-screen bg-[#0a0a14] flex items-center justify-center text-gray-400">
-        Playlist not found
-      </div>
-    );
-  }
-
-  return (
+                  return (
                     <SortablePlaylistSongRow
                       key={song.id + '-' + realIndex}
                       song={song}

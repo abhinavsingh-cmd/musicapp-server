@@ -77,7 +77,10 @@ export const useChartsStore = create<ChartsStore>((set) => ({
           duration: r.duration || 0,
         }));
 
-      if (charts.length === 0) return;
+      if (charts.length === 0) {
+        set({ loading: false, error: null });
+        return;
+      }
 
       set({
         topCharts: charts.slice(0, 50),

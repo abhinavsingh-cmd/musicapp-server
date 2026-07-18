@@ -189,69 +189,66 @@ function initAudioServiceHandler() {
   });
 }
 
-mediaSessionService.init({
-  onPlay: () => useAudioStore.getState().play(),
-  onPause: () => useAudioStore.getState().pause(),
-  onNext: () => useAudioStore.getState().nextSong(),
-  onPrevious: () => useAudioStore.getState().previousSong(),
-  onSeekForward: () => {
-    useAudioStore.getState().seek(Math.min(audioService.getCurrentTime() + 10, audioService.getDuration()));
-  },
-  onSeekBackward: () => {
-    useAudioStore.getState().seek(Math.max(audioService.getCurrentTime() - 10, 0));
-  },
-  onStop: () => useAudioStore.getState().pause(),
-});
+// Guard against double-init on HMR
+if (!(globalThis as any).__audioStoreInitialized) {
+  (globalThis as any).__audioStoreInitialized = true;
 
-backgroundPlaybackService.init();
+  mediaSessionService.init({
+    onPlay: () => useAudioStore.getState().play(),
+    onPause: () => useAudioStore.getState().pause(),
+    onNext: () => useAudioStore.getState().nextSong(),
+    onPrevious: () => useAudioStore.getState().previousSong(),
+    onSeekForward: () => {
+      useAudioStore.getState().seek(Math.min(audioService.getCurrentTime() + 10, audioService.getDuration()));
+    },
+    onSeekBackward: () => {
+      useAudioStore.getState().seek(Math.max(audioService.getCurrentTime() - 10, 0));
+    },
+    onStop: () => useAudioStore.getState().pause(),
+  });
 
-backgroundPlaybackService.onInterruption((type) => {
-  console.log('[AudioStore] Audio interruption:', type);
-  if (type === 'headphone-unplug' || type === 'bluetooth-disconnect') {
-    useAudioStore.getState().pause();
-  }
-});
+  backgroundPlaybackService.init();
 
-backgroundPlaybackService.onReconnect(() => {
-  console.log('[AudioStore] Audio reconnected, resuming if paused');
-  const state = useAudioStore.getState();
-  if (state.currentSong && !state.isPlaying) {
-    audioService.resume();
-    useAudioStore.setState({ isPlaying: true });
-  }
-});
+  backgroundPlaybackService.onInterruption((type) => {
+    if (type === 'headphone-unplug' || type === 'bluetooth-disconnect') {
+      useAudioStore.getState().pause();
+    }
+  });
 
-backgroundPlaybackService.onBackgroundChange((isBackground) => {
-  if (isBackground) {
-    persistPlaybackState();
-  }
-});
+  backgroundPlaybackService.onReconnect(() => {
+    const state = useAudioStore.getState();
+    if (state.currentSong && !state.isPlaying) {
+      audioService.resume();
+      useAudioStore.setState({ isPlaying: true });
+    }
+  });
 
-let persistenceInterval: ReturnType<typeof setInterval> | null = null;
+  backgroundPlaybackService.onBackgroundChange((isBackground) => {
+    if (isBackground) {
+      persistPlaybackState();
+    }
+  });
 
-function startPersistenceInterval() {
-  if (persistenceInterval) return;
-  persistenceInterval = setInterval(() => {
+  initAudioServiceHandler();
+
+  setInterval(() => {
     const state = useAudioStore.getState();
     if (state.isPlaying && state.currentSong) {
       persistPlaybackState();
     }
   }, 30000);
+
+  useQueueStore.subscribe((state) => {
+    mediaSessionService.updateActions(
+      state.currentIndex < state.queue.length - 1,
+      state.currentIndex > 0,
+    );
+  });
+
+  window.addEventListener('beforeunload', () => {
+    persistPlaybackState();
+  });
 }
-
-initAudioServiceHandler();
-startPersistenceInterval();
-
-useQueueStore.subscribe((state) => {
-  mediaSessionService.updateActions(
-    state.currentIndex < state.queue.length - 1,
-    state.currentIndex > 0,
-  );
-});
-
-window.addEventListener('beforeunload', () => {
-  persistPlaybackState();
-});
 
 function autoSkipNextSong() {
   clearNextSongRetry();

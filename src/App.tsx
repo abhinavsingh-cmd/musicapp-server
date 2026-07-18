@@ -2,7 +2,6 @@ import React, { lazy, Suspense } from 'react';
 import { Routes, Route } from 'react-router-dom';
 import { AuthProvider } from './contexts/AuthContext';
 import { LayoutProvider } from './contexts/LayoutContext';
-import { ThemeProvider } from './contexts/ThemeContext';
 import { AppLayout } from './features/layout/AppLayout';
 import { ErrorBoundary } from './components/ErrorBoundary';
 
@@ -31,7 +30,6 @@ const App: React.FC = () => {
     <ErrorBoundary level="app">
       <AuthProvider>
         <LayoutProvider>
-          <ThemeProvider>
               <Routes>
                 <Route path="/login" element={
                   <ErrorBoundary level="page">
@@ -79,7 +77,6 @@ const App: React.FC = () => {
                   } />
                 </Route>
               </Routes>
-            </ThemeProvider>
           </LayoutProvider>
         </AuthProvider>
     </ErrorBoundary>

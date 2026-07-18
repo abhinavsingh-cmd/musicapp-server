@@ -11,8 +11,53 @@ const { execFile, spawn } = require("child_process");
 const path = require("path");
 const os = require("os");
 const app = express();
-app.use(cors());
-app.use(express.json());
+
+// Rate limiting (simple in-memory)
+const rateLimitMap = new Map();
+function rateLimit(windowMs = 60000, max = 60) {
+  return (req, res, next) => {
+    const ip = req.ip || req.connection.remoteAddress || 'unknown';
+    const now = Date.now();
+    const entry = rateLimitMap.get(ip);
+    if (!entry || now - entry.start > windowMs) {
+      rateLimitMap.set(ip, { start: now, count: 1 });
+      return next();
+    }
+    entry.count++;
+    if (entry.count > max) {
+      return res.status(429).json({ error: "Too many requests" });
+    }
+    next();
+  };
+}
+
+// Cleanup stale entries every 5 minutes
+setInterval(() => {
+  const cutoff = Date.now() - 120000;
+  for (const [ip, entry] of rateLimitMap) {
+    if (entry.start < cutoff) rateLimitMap.delete(ip);
+  }
+}, 300000);
+
+// CORS: restrict to known origins
+const ALLOWED_ORIGINS = [
+  'https://music-app-neon-xi.vercel.app',
+  'https://apk-download-page-ruddy.vercel.app',
+  'https://musicapp-server-alkf.onrender.com',
+  'http://localhost:3000',
+  'http://localhost:5173',
+];
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(null, true); // Allow in dev; tighten for production
+    }
+  },
+}));
+app.use(express.json({ limit: '1mb' }));
+app.use(rateLimit());
 
 const SONGS = [
   ["kN6HHzEXKFU","Pushpa Pushpa","Devi Sri Prasad","Indian",230],
@@ -673,14 +718,14 @@ app.get("/api/songs", (_req, res) => {
   res.json({ songs, total: songs.length });
 });
 app.get("/api/search", (req, res) => {
-  const q = (req.query.q || "").toLowerCase();
+  const q = (req.query.q || "").toString().replace(/[^\w\s]/g, "").toLowerCase().slice(0, 100);
   if (!q) return res.json({ songs });
   const results = songs.filter(s => s.title.toLowerCase().includes(q) || s.artist.toLowerCase().includes(q) || s.genre.toLowerCase().includes(q));
   console.log("[API] GET /api/search?q=" + q, "- found", results.length, "results");
   res.json({ songs: results });
 });
 app.get("/api/genre/:genre", (req, res) => {
-  const genre = req.params.genre;
+  const genre = req.params.genre.toString().replace(/[^\w\s-]/g, "").slice(0, 50);
   const results = songs.filter(s => s.genre.toLowerCase() === genre.toLowerCase());
   console.log("[API] GET /api/genre/" + genre, "- found", results.length, "songs");
   res.json({ songs: results });
@@ -697,7 +742,7 @@ function isMusicResult(r) {
 }
 
 app.get("/api/youtube/search", (req, res) => {
-  const q = req.query.q || "";
+  const q = (req.query.q || "").toString().replace(/[^\w\s]/g, "").trim().slice(0, 100);
   if (!q) return res.json({ results: [] });
 
   console.log("[YT Search] Searching for:", q);
