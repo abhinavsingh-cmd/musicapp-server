@@ -1,0 +1,5 @@
+{
+  "buildCommand": "VITE_API_URL=https://musicapp-server-alkf.onrender.com npx vite build",
+  "outputDirectory": "dist",
+  "framework": "vite"
+}
