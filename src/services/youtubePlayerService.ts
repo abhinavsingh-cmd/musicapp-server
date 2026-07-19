@@ -123,7 +123,7 @@ class YouTubePlayerService {
         modestbranding: 1,
         rel: 0,
         showinfo: 0,
-        origin: window.location.origin,
+        origin: (window as any).Capacitor ? '' : window.location.origin,
       },
       events: {
         onReady: () => { log('YouTube player instance ready'); },
