@@ -101,17 +101,19 @@ export const SongTable: React.FC<SongTableProps> = memo(({ songs, className }) =
     return m;
   }, [downloads]);
 
-  const downloadingSet = useDownloadsStore((s) => {
-    const ids = new Set<string>();
-    for (const id of s.downloadingIds) ids.add(id);
-    return ids;
-  });
+  const downloadingIds = useDownloadsStore((s) => s.downloadingIds);
 
-  const downloadedSet = useDownloadsStore((s) => {
+  const downloadingSet = useMemo(() => {
     const ids = new Set<string>();
-    for (const d of s.downloads) ids.add(d.youtubeId);
+    for (const id of downloadingIds) ids.add(id);
     return ids;
-  });
+  }, [downloadingIds]);
+
+  const downloadedSet = useMemo(() => {
+    const ids = new Set<string>();
+    for (const d of downloads) ids.add(d.youtubeId);
+    return ids;
+  }, [downloads]);
 
   const handleScroll = useCallback(() => {
     if (rafRef.current) return;

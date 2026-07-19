@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   Search, X, Play, Music, Globe, Loader2, Download, Check,
   SlidersHorizontal, Clock, ArrowDownAZ, TrendingUp, Sparkles,
@@ -87,12 +87,25 @@ export const SearchPage: React.FC = () => {
   const loadMore = useSearchStore((s) => s.loadMore);
   const clear = useSearchStore((s) => s.clear);
 
-  const filteredLibrary = useSearchStore(selectFilteredLibrary);
-  const uniqueArtists = useSearchStore(selectUniqueArtists);
-  const uniqueAlbums = useSearchStore(selectUniqueAlbums);
-  const uniqueGenres = useSearchStore(selectUniqueGenres);
   const libraryResults = useSearchStore((s) => s.libraryResults);
   const ytResults = useSearchStore((s) => s.ytResults);
+
+  const filteredLibrary = useMemo(
+    () => selectFilteredLibrary({ libraryResults, filter, sort, durationFilter, genreFilter } as any),
+    [libraryResults, filter, sort, durationFilter, genreFilter],
+  );
+  const uniqueArtists = useMemo(
+    () => selectUniqueArtists({ libraryResults } as any),
+    [libraryResults],
+  );
+  const uniqueAlbums = useMemo(
+    () => selectUniqueAlbums({ libraryResults } as any),
+    [libraryResults],
+  );
+  const uniqueGenres = useMemo(
+    () => selectUniqueGenres({ libraryResults } as any),
+    [libraryResults],
+  );
 
   const loadSong = useAudioStore((s) => s.loadSong);
   const downloadSong = useDownloadsStore((s) => s.downloadSong);
