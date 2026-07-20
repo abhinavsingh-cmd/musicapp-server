@@ -36,7 +36,7 @@ class BackgroundPlaybackService {
         this.backgroundCallbacks.forEach((cb) => cb(false));
       }
     };
-    document.addEventListener('visibilitychange', this.visibilityHandler);
+    try { document.addEventListener('visibilitychange', this.visibilityHandler); } catch {}
 
     this.freezeHandler = () => {
       this.backgroundCallbacks.forEach((cb) => cb(true));
@@ -44,10 +44,10 @@ class BackgroundPlaybackService {
     this.resumeHandler = () => {
       this.backgroundCallbacks.forEach((cb) => cb(false));
     };
-    document.addEventListener('freeze', this.freezeHandler);
-    document.addEventListener('resume', this.resumeHandler);
+    try { document.addEventListener('freeze', this.freezeHandler); } catch {}
+    try { document.addEventListener('resume', this.resumeHandler); } catch {}
 
-    window.addEventListener('beforeunload', this.handleBeforeUnload);
+    try { window.addEventListener('beforeunload', this.handleBeforeUnload); } catch {}
 
     this.setupAudioReconnection();
   }

@@ -41,13 +41,26 @@ class YouTubePlayerService {
     this.readyPromise = new Promise((resolve) => {
       this.readyResolver = resolve;
     });
-    this.loadAPI();
+    // Defer script loading — only load when YouTube is first needed
+    try {
+      this.loadAPI();
+    } catch (e) {
+      logError('YouTube API init failed:', e);
+      this.loadTimedOut = true;
+      this.readyResolver?.();
+    }
   }
 
   private loadAPI(): void {
     if (window.YT && window.YT.Player) {
       this.isReady = true;
       this.readyResolver?.();
+      return;
+    }
+
+    if (typeof document === 'undefined' || !document.head) {
+      logWarn('document not ready, deferring YouTube API load');
+      setTimeout(() => this.loadAPI(), 1000);
       return;
     }
 

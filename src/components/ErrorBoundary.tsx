@@ -36,7 +36,13 @@ export class ErrorBoundary extends Component<Props, State> {
 
   handleGoHome = () => {
     this.setState({ hasError: false, error: null, errorInfo: null });
-    window.location.href = '/';
+    // Use React Router navigation instead of full page reload to avoid infinite reload in Capacitor
+    try {
+      window.history.pushState({}, '', '/');
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    } catch {
+      window.location.href = '/';
+    }
   };
 
   render() {

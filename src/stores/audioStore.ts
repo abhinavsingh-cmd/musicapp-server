@@ -189,65 +189,92 @@ function initAudioServiceHandler() {
   });
 }
 
-// Guard against double-init on HMR
+// Guard against double-init on HMR — wrapped in try/catch so module-level failures
+// don't crash the entire app in Capacitor WebView
 if (!(globalThis as any).__audioStoreInitialized) {
   (globalThis as any).__audioStoreInitialized = true;
 
-  mediaSessionService.init({
-    onPlay: () => useAudioStore.getState().play(),
-    onPause: () => useAudioStore.getState().pause(),
-    onNext: () => useAudioStore.getState().nextSong(),
-    onPrevious: () => useAudioStore.getState().previousSong(),
-    onSeekForward: () => {
-      useAudioStore.getState().seek(Math.min(audioService.getCurrentTime() + 10, audioService.getDuration()));
-    },
-    onSeekBackward: () => {
-      useAudioStore.getState().seek(Math.max(audioService.getCurrentTime() - 10, 0));
-    },
-    onStop: () => useAudioStore.getState().pause(),
-  });
+  try {
+    mediaSessionService.init({
+      onPlay: () => useAudioStore.getState().play(),
+      onPause: () => useAudioStore.getState().pause(),
+      onNext: () => useAudioStore.getState().nextSong(),
+      onPrevious: () => useAudioStore.getState().previousSong(),
+      onSeekForward: () => {
+        useAudioStore.getState().seek(Math.min(audioService.getCurrentTime() + 10, audioService.getDuration()));
+      },
+      onSeekBackward: () => {
+        useAudioStore.getState().seek(Math.max(audioService.getCurrentTime() - 10, 0));
+      },
+      onStop: () => useAudioStore.getState().pause(),
+    });
+  } catch (e) {
+    console.warn('[AudioStore] mediaSessionService init failed:', e);
+  }
 
-  backgroundPlaybackService.init();
+  try {
+    backgroundPlaybackService.init();
+  } catch (e) {
+    console.warn('[AudioStore] backgroundPlaybackService init failed:', e);
+  }
 
-  backgroundPlaybackService.onInterruption((type) => {
-    if (type === 'headphone-unplug' || type === 'bluetooth-disconnect') {
-      useAudioStore.getState().pause();
-    }
-  });
+  try {
+    backgroundPlaybackService.onInterruption((type) => {
+      if (type === 'headphone-unplug' || type === 'bluetooth-disconnect') {
+        useAudioStore.getState().pause();
+      }
+    });
 
-  backgroundPlaybackService.onReconnect(() => {
-    const state = useAudioStore.getState();
-    if (state.currentSong && !state.isPlaying) {
-      audioService.resume();
-      useAudioStore.setState({ isPlaying: true });
-    }
-  });
+    backgroundPlaybackService.onReconnect(() => {
+      const state = useAudioStore.getState();
+      if (state.currentSong && !state.isPlaying) {
+        audioService.resume();
+        useAudioStore.setState({ isPlaying: true });
+      }
+    });
 
-  backgroundPlaybackService.onBackgroundChange((isBackground) => {
-    if (isBackground) {
+    backgroundPlaybackService.onBackgroundChange((isBackground) => {
+      if (isBackground) {
+        persistPlaybackState();
+      }
+    });
+  } catch (e) {
+    console.warn('[AudioStore] backgroundPlaybackService listeners failed:', e);
+  }
+
+  try {
+    initAudioServiceHandler();
+  } catch (e) {
+    console.warn('[AudioStore] initAudioServiceHandler failed:', e);
+  }
+
+  try {
+    setInterval(() => {
+      try {
+        const state = useAudioStore.getState();
+        if (state.isPlaying && state.currentSong) {
+          persistPlaybackState();
+        }
+      } catch {}
+    }, 30000);
+  } catch {}
+
+  try {
+    useQueueStore.subscribe((state) => {
+      try {
+        mediaSessionService.updateActions(
+          state.currentIndex < state.queue.length - 1,
+          state.currentIndex > 0,
+        );
+      } catch {}
+    });
+  } catch {}
+
+  try {
+    window.addEventListener('beforeunload', () => {
       persistPlaybackState();
-    }
-  });
-
-  initAudioServiceHandler();
-
-  setInterval(() => {
-    const state = useAudioStore.getState();
-    if (state.isPlaying && state.currentSong) {
-      persistPlaybackState();
-    }
-  }, 30000);
-
-  useQueueStore.subscribe((state) => {
-    mediaSessionService.updateActions(
-      state.currentIndex < state.queue.length - 1,
-      state.currentIndex > 0,
-    );
-  });
-
-  window.addEventListener('beforeunload', () => {
-    persistPlaybackState();
-  });
+    });
+  } catch {}
 }
 
 function autoSkipNextSong() {

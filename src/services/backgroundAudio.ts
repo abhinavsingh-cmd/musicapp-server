@@ -5,11 +5,17 @@ export interface BackgroundAudioPlugin {
   stopService(): Promise<void>;
 }
 
-const BackgroundAudio = registerPlugin<BackgroundAudioPlugin>('BackgroundAudio');
+let BackgroundAudio: BackgroundAudioPlugin | null = null;
+try {
+  BackgroundAudio = registerPlugin<BackgroundAudioPlugin>('BackgroundAudio');
+} catch {
+  // Plugin registration failed — not in Capacitor context
+}
 
 export const backgroundAudio = {
   startService: async (options: { title: string; artist: string }): Promise<{ started: boolean }> => {
     try {
+      if (!BackgroundAudio) return { started: false };
       return await BackgroundAudio.startService(options);
     } catch {
       return { started: false };
@@ -17,6 +23,7 @@ export const backgroundAudio = {
   },
   stopService: async (): Promise<void> => {
     try {
+      if (!BackgroundAudio) return;
       await BackgroundAudio.stopService();
     } catch {
       // Plugin not available on web

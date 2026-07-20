@@ -34,8 +34,12 @@ function generateAccentVariants(hex: string): { accent: string; accentHover: str
 }
 
 function resolveSystemTheme(): Theme {
-  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-  return prefersDark ? themes[0] : themes[0]; // always dark for this app
+  try {
+    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    return prefersDark ? themes[0] : themes[0]; // always dark for this app
+  } catch {
+    return themes[0];
+  }
 }
 
 function loadThemeId(): string {
@@ -162,18 +166,23 @@ export const useThemeStore = create<ThemeStore>((set, get) => {
   };
 });
 
-// Apply initial theme on load
-const initialId = loadThemeId();
-const initialAccent = loadCustomAccent();
-const initialTheme = initialId === 'system' ? resolveSystemTheme() : themes.find((t: Theme) => t.id === initialId) || themes[0];
-const initialColors = { ...initialTheme.colors };
-if (initialAccent) {
-  const accentVariants = generateAccentVariants(initialAccent);
-  Object.assign(initialColors, accentVariants);
-  initialColors.borderAccent = accentVariants.accent.replace('hsl', 'hsla').replace(')', ', 0.3)');
-}
+// Apply initial theme on load — wrapped in try/catch for Capacitor WebView
+try {
+  const initialId = loadThemeId();
+  const initialAccent = loadCustomAccent();
+  const initialTheme = initialId === 'system' ? resolveSystemTheme() : themes.find((t: Theme) => t.id === initialId) || themes[0];
+  const initialColors = { ...initialTheme.colors };
+  if (initialAccent) {
+    const accentVariants = generateAccentVariants(initialAccent);
+    Object.assign(initialColors, accentVariants);
+    initialColors.borderAccent = accentVariants.accent.replace('hsl', 'hsla').replace(')', ', 0.3)');
+  }
 
-// Wait for DOM to be ready
-if (typeof document !== 'undefined') {
-  requestAnimationFrame(() => applyTheme(initialColors));
+  if (typeof document !== 'undefined' && typeof requestAnimationFrame !== 'undefined') {
+    requestAnimationFrame(() => {
+      try { applyTheme(initialColors); } catch {}
+    });
+  }
+} catch (e) {
+  console.warn('[ThemeStore] Initial theme apply failed:', e);
 }

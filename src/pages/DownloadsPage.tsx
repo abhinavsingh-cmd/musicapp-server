@@ -6,14 +6,14 @@ import { Download, Trash2, Play, HardDrive, Loader2, WifiOff } from 'lucide-reac
 import { motion, AnimatePresence } from 'framer-motion';
 
 export const DownloadsPage: React.FC = () => {
-  const downloads = useDownloadsStore((s) => s.downloads) || [];
+  const downloads = useDownloadsStore((s) => s.downloads) ?? [];
   const loading = useDownloadsStore((s) => s.loading);
   const loadDownloads = useDownloadsStore((s) => s.loadDownloads);
   const removeSong = useDownloadsStore((s) => s.removeSong);
   const isOnline = useDownloadsStore((s) => s.isOnline);
   const cacheSize = useDownloadsStore((s) => s.cacheSize);
-  const progressMap = useDownloadsStore((s) => s.progressMap) || {};
-  const downloadingIds = useDownloadsStore((s) => s.downloadingIds) || new Set<string>();
+  const progressMap = useDownloadsStore((s) => s.progressMap) ?? {};
+  const downloadingIds = useDownloadsStore((s) => s.downloadingIds) ?? new Set<string>();
   const loadSong = useAudioStore((s) => s.loadSong);
   const currentSong = useAudioStore((s) => s.currentSong);
   const isPlaying = useAudioStore((s) => s.isPlaying);

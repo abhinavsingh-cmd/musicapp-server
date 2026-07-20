@@ -23,7 +23,11 @@ const themePreviewColors: Record<string, { bg: string; accent: string; surface: 
 };
 
 export const ThemePicker: React.FC = () => {
-  const { themeId, customAccent, setTheme, setCustomAccent, clearCustomAccent } = useThemeStore();
+  const themeId = useThemeStore((s) => s.themeId);
+  const customAccent = useThemeStore((s) => s.customAccent);
+  const setTheme = useThemeStore((s) => s.setTheme);
+  const setCustomAccent = useThemeStore((s) => s.setCustomAccent);
+  const clearCustomAccent = useThemeStore((s) => s.clearCustomAccent);
   const colorInputRef = useRef<HTMLInputElement>(null);
 
   return (

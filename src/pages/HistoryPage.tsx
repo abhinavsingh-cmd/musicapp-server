@@ -45,7 +45,7 @@ const HistoryRow = memo(({ entry, formatTime, onPlay, onRemove }: {
 HistoryRow.displayName = 'HistoryRow';
 
 export const HistoryPage: React.FC = () => {
-  const history = useHistoryStore((s) => s.history) || [];
+  const history = useHistoryStore((s) => s.history) ?? [];
   const clearHistory = useHistoryStore((s) => s.clearHistory);
   const removeSong = useHistoryStore((s) => s.removeSong);
   const loadSong = useAudioStore((s) => s.loadSong);

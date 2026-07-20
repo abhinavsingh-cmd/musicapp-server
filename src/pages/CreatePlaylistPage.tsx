@@ -19,7 +19,7 @@ export const CreatePlaylistPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const fileRef = useRef<HTMLInputElement>(null);
   const navigate = useNavigate();
-  const { createPlaylist } = usePlaylistStore();
+  const createPlaylist = usePlaylistStore((s) => s.createPlaylist);
 
   useEffect(() => {
     fetchSongs().then(s => { setAllSongs(s); setLoading(false); }).catch(() => setLoading(false));
