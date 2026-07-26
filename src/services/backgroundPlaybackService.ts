@@ -130,7 +130,6 @@ class BackgroundPlaybackService {
     for (const [audio, handlers] of this.audioElements) {
       audio.removeEventListener('abort', handlers[0]);
       audio.removeEventListener('emptied', handlers[1]);
-      if (handlers[2]) audio.removeEventListener('stalled', handlers[2]);
     }
     this.audioElements.clear();
     this.backgroundCallbacks = [];

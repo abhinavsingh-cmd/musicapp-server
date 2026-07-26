@@ -232,6 +232,8 @@ async function searchViaInstance(
   query: string,
   signal?: AbortSignal,
 ): Promise<YTSong[]> {
+  if (signal?.aborted) return [];
+
   const url = `${instance}/api/v1/search?q=${encodeURIComponent(query)}&type=music&sort_by=relevance`;
 
   const controller = new AbortController();

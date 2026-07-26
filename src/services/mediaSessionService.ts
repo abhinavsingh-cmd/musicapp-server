@@ -20,6 +20,7 @@ interface MediaSessionCallbacks {
   onPrevious: () => void;
   onSeekForward: () => void;
   onSeekBackward: () => void;
+  onSeekTo: (time: number) => void;
   onStop: () => void;
 }
 
@@ -31,13 +32,14 @@ class MediaSessionService {
     this.callbacks = callbacks;
     if (!this.supported) return;
 
-    const handlers: [string, (() => void) | null][] = [
+    const handlers: [string, (() => void) | ((action: any) => void) | null][] = [
       ['play', () => callbacks.onPlay()],
       ['pause', () => callbacks.onPause()],
       ['nexttrack', () => callbacks.onNext()],
       ['previoustrack', () => callbacks.onPrevious()],
       ['seekforward', () => callbacks.onSeekForward()],
       ['seekbackward', () => callbacks.onSeekBackward()],
+      ['seekto', (action: any) => callbacks.onSeekTo(action.seekTime)],
       ['stop', () => callbacks.onStop()],
     ];
 
@@ -92,11 +94,15 @@ class MediaSessionService {
 
     try {
       navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
-      navigator.mediaSession.setPositionState?.({
-        duration: duration || 0,
-        playbackRate: 1,
-        position: Math.max(0, Math.min(currentTime, duration || 0)),
-      });
+      const safePosition = Math.max(0, Math.min(currentTime || 0, duration || 0));
+      const safeDuration = Math.max(0, duration || 0);
+      if (safeDuration > 0 && isFinite(safePosition) && isFinite(safeDuration)) {
+        navigator.mediaSession.setPositionState?.({
+          duration: safeDuration,
+          playbackRate: 1,
+          position: safePosition,
+        });
+      }
     } catch {
       // some browsers may not support setPositionState
     }

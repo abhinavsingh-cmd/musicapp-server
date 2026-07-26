@@ -98,6 +98,8 @@ function getErrorMessage(err: unknown): string {
 
 let searchGeneration = 0;
 let searchAbortController: AbortController | null = null;
+let ytGeneration = 0;
+let ytAbortController: AbortController | null = null;
 
 async function fetchLibrarySearch(query: string): Promise<Song[]> {
   try {
@@ -238,9 +240,16 @@ export const useSearchStore = create<SearchState>((set, get) => ({
   },
 
   searchYouTube: async (query: string, page = 1) => {
+    // Cancel previous YouTube search
+    if (ytAbortController) ytAbortController.abort();
+    ytAbortController = new AbortController();
+    const { signal } = ytAbortController;
+    const gen = ++ytGeneration;
+
     set({ ytStatus: 'loading', error: null });
     try {
-      const results = await fetchYouTubeSearch(query);
+      const results = await fetchYouTubeSearch(query, signal);
+      if (gen !== ytGeneration) return;
       const sliced = (results || []).slice(0, page * 15);
       set({
         ytResults: sliced,
@@ -249,6 +258,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
         hasMore: (results || []).length > page * 15,
       });
     } catch (err) {
+      if (gen !== ytGeneration) return;
       set({ ytStatus: 'error', error: getErrorMessage(err) });
     }
   },
@@ -256,9 +266,17 @@ export const useSearchStore = create<SearchState>((set, get) => ({
   loadMore: async () => {
     const { debouncedQuery, page, hasMore } = get();
     if (!hasMore || !debouncedQuery) return;
+
+    // Cancel previous loadMore
+    if (ytAbortController) ytAbortController.abort();
+    ytAbortController = new AbortController();
+    const { signal } = ytAbortController;
+    const gen = ++ytGeneration;
+
     set({ ytStatus: 'loading', error: null });
     try {
-      const results = await fetchYouTubeSearch(debouncedQuery);
+      const results = await fetchYouTubeSearch(debouncedQuery, signal);
+      if (gen !== ytGeneration) return;
       const nextPage = page + 1;
       const sliced = (results || []).slice(0, nextPage * 15);
       set({
@@ -268,12 +286,16 @@ export const useSearchStore = create<SearchState>((set, get) => ({
         hasMore: (results || []).length > nextPage * 15,
       });
     } catch (err) {
+      if (gen !== ytGeneration) return;
       set({ ytStatus: 'error', error: getErrorMessage(err) });
     }
   },
 
   clear: () => {
     searchGeneration++;
+    ytGeneration++;
+    if (searchAbortController) searchAbortController.abort();
+    if (ytAbortController) ytAbortController.abort();
     set({
       query: '',
       debouncedQuery: '',

@@ -5,10 +5,10 @@ const QUEUE_KEY = 'playback-queue';
 const MAX_RECENT = 50;
 const MIN_QUEUE_SIZE = 10;
 
-function loadQueue(): { queue: Song[]; currentIndex: number; repeatMode: RepeatMode; isShuffled: boolean; autoplayEnabled: boolean } {
+function loadQueue(): { queue: Song[]; currentIndex: number; repeatMode: RepeatMode; isShuffled: boolean; autoplayEnabled: boolean; originalQueue: Song[] } {
   try {
     const raw = localStorage.getItem(QUEUE_KEY);
-    if (!raw) return { queue: [], currentIndex: 0, repeatMode: 'off', isShuffled: false, autoplayEnabled: true };
+    if (!raw) return { queue: [], currentIndex: 0, repeatMode: 'off', isShuffled: false, autoplayEnabled: true, originalQueue: [] };
     const parsed = JSON.parse(raw);
     return {
       queue: parsed.queue || [],
@@ -16,9 +16,10 @@ function loadQueue(): { queue: Song[]; currentIndex: number; repeatMode: RepeatM
       repeatMode: parsed.repeatMode || 'off',
       isShuffled: parsed.isShuffled || false,
       autoplayEnabled: parsed.autoplayEnabled !== false,
+      originalQueue: parsed.originalQueue || [],
     };
   } catch {
-    return { queue: [], currentIndex: 0, repeatMode: 'off', isShuffled: false, autoplayEnabled: true };
+    return { queue: [], currentIndex: 0, repeatMode: 'off', isShuffled: false, autoplayEnabled: true, originalQueue: [] };
   }
 }
 
@@ -34,6 +35,7 @@ function schedulePersist(state: QueueState): void {
         repeatMode: state.repeatMode,
         isShuffled: state.isShuffled,
         autoplayEnabled: state.autoplayEnabled,
+        originalQueue: state.originalQueue,
       }));
     } catch { }
     persistTimer = null;
@@ -97,7 +99,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
   recentlyPlayed: loadRecent(),
   repeatMode: saved.repeatMode,
   isShuffled: saved.isShuffled,
-  originalQueue: [],
+  originalQueue: saved.originalQueue,
   autoplayEnabled: saved.autoplayEnabled,
   isFetchingRecommendations: false,
 
@@ -135,9 +137,17 @@ export const useQueueStore = create<QueueState>((set, get) => ({
 
     let nextIndex: number;
     if (isShuffled) {
-      nextIndex = Math.floor(Math.random() * queue.length);
-      while (nextIndex === currentIndex && queue.length > 1) {
+      if (queue.length === 1) {
+        if (repeatMode === 'all') {
+          nextIndex = 0;
+        } else {
+          return null;
+        }
+      } else {
         nextIndex = Math.floor(Math.random() * queue.length);
+        while (nextIndex === currentIndex && queue.length > 1) {
+          nextIndex = Math.floor(Math.random() * queue.length);
+        }
       }
     } else {
       nextIndex = currentIndex + 1;
@@ -181,10 +191,8 @@ export const useQueueStore = create<QueueState>((set, get) => ({
 
     let prevIndex: number;
     if (isShuffled) {
-      prevIndex = Math.floor(Math.random() * queue.length);
-      while (prevIndex === currentIndex && queue.length > 1) {
-        prevIndex = Math.floor(Math.random() * queue.length);
-      }
+      // Go back one position in the shuffled queue
+      prevIndex = (currentIndex - 1 + queue.length) % queue.length;
     } else {
       prevIndex = (currentIndex - 1 + queue.length) % queue.length;
     }

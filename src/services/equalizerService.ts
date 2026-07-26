@@ -47,6 +47,7 @@ export class EqualizerService {
   private _preset = 'Flat';
   private _supported = typeof AudioContext !== 'undefined';
   private listeners: Array<() => void> = [];
+  private _audioElement: HTMLAudioElement | null = null;
 
   get supported(): boolean { return this._supported; }
   get audioContextState(): string {
@@ -58,10 +59,16 @@ export class EqualizerService {
   }
 
   async init(audioElement: HTMLAudioElement): Promise<void> {
-    eqLog('init() called — existing context:', this.audioContext ? this.audioContext.state : 'null', 'sourceNode:', !!this.sourceNode);
+    eqLog('init() called — existing context:', this.audioContext ? this.audioContext.state : 'null', 'sourceNode:', !!this.sourceNode, 'elementChanged:', this._audioElement !== null && this._audioElement !== audioElement);
 
-    // Already fully initialized — just ensure running
-    if (this.audioContext && this.sourceNode) {
+    // Audio element changed — destroy old source node chain and recreate
+    if (this.sourceNode && this._audioElement !== audioElement) {
+      eqLog('init() — audio element changed, destroying old source chain');
+      this.disconnectSourceChain();
+    }
+
+    // Already fully initialized with same element — just ensure running
+    if (this.audioContext && this.sourceNode && this._audioElement === audioElement) {
       await this.resume();
       return;
     }
@@ -94,6 +101,7 @@ export class EqualizerService {
       // On next init() call (from playHtmlAudio), we'll try again.
       if (this.audioContext.state === 'running' && !this.sourceNode) {
         this.sourceNode = this.audioContext.createMediaElementSource(audioElement);
+        this._audioElement = audioElement;
         eqLog('init() — MediaElementAudioSourceNode created');
 
         const frequencies = DEFAULT_BANDS.map(b => b.frequency);
@@ -150,6 +158,18 @@ export class EqualizerService {
     this.autoResumeHandler = null;
   }
 
+  private disconnectSourceChain(): void {
+    if (this.sourceNode) {
+      try { this.sourceNode.disconnect(); } catch {}
+      this.sourceNode = null;
+    }
+    for (const filter of this.filters) {
+      try { filter.disconnect(); } catch {}
+    }
+    this.filters = [];
+    this._audioElement = null;
+  }
+
   async resume(): Promise<void> {
     if (this.audioContext && this.audioContext.state === 'suspended') {
       try {
@@ -164,12 +184,11 @@ export class EqualizerService {
 
   destroy(): void {
     this.removeAutoResume();
+    this.disconnectSourceChain();
     if (this.audioContext) {
       try { this.audioContext.close(); } catch {}
       this.audioContext = null;
     }
-    this.sourceNode = null;
-    this.filters = [];
     this._enabled = false;
   }
 

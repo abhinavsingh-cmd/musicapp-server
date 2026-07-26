@@ -43,6 +43,10 @@ function dedupe(songs: Song[]): Song[] {
 
 let cachedSongs: Song[] | null = null;
 
+export function invalidateSongsCache(): void {
+  cachedSongs = null;
+}
+
 export async function fetchSongs(): Promise<Song[]> {
   if (cachedSongs) return cachedSongs;
   try {
@@ -68,8 +72,8 @@ export async function fetchSongs(): Promise<Song[]> {
 
     return cachedSongs;
   } catch {
-    cachedSongs = [];
-    return cachedSongs;
+    cachedSongs = null;
+    return [];
   }
 }
 

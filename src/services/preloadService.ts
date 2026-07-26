@@ -108,7 +108,9 @@ export async function preloadNextSongs(
  */
 export function getPreloadedElement(song: Song): HTMLAudioElement | null {
   if (song.audioUrl && preloadPool.has(song.audioUrl)) {
-    return preloadPool.get(song.audioUrl)!;
+    const el = preloadPool.get(song.audioUrl)!;
+    // Only return if the element has enough data loaded
+    if (el.readyState >= 2) return el;
   }
   return null;
 }

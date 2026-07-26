@@ -2,6 +2,7 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
 import { ToastProvider } from './contexts/ToastContext'
+import { ErrorBoundary } from './components/ErrorBoundary'
 import App from './App.tsx'
 import './index.css'
 
@@ -27,11 +28,13 @@ perf.mark('app_t0');
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <BrowserRouter>
-      <ToastProvider>
-        <App />
-      </ToastProvider>
-    </BrowserRouter>
+    <ErrorBoundary level="app">
+      <BrowserRouter>
+        <ToastProvider>
+          <App />
+        </ToastProvider>
+      </BrowserRouter>
+    </ErrorBoundary>
   </React.StrictMode>
 );
 

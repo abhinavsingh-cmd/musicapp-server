@@ -6,6 +6,7 @@ import { audioService } from '../services/audioServiceInstance';
 import { mediaSessionService } from '../services/mediaSessionService';
 import { playbackPersistenceService } from '../services/playbackPersistenceService';
 import { backgroundPlaybackService } from '../services/backgroundPlaybackService';
+import { backgroundAudio } from '../services/backgroundAudio';
 import { useHistoryStore } from './historyStore';
 import { preloadNextSongs, prewarmOnFirstInteraction } from '../services/preloadService';
 
@@ -168,6 +169,8 @@ function initAudioServiceHandler() {
         if (data?.song) {
           mediaSessionService.updateMetadata(data.song);
           mediaSessionService.updatePlaybackState(true, audioService.getCurrentTime(), audioService.getDuration());
+          backgroundAudio.updateMetadata({ title: data.song.title, artist: data.song.artist }).catch(() => {});
+          backgroundAudio.updatePlaybackState({ isPlaying: true, position: audioService.getCurrentTime() }).catch(() => {});
           useHistoryStore.getState().addSong(data.song);
           // Preload next songs in background
           const qs = useQueueStore.getState();
@@ -216,6 +219,10 @@ function initAudioServiceHandler() {
             data,
             audioService.getDuration(),
           );
+          backgroundAudio.updatePlaybackState({
+            isPlaying: useAudioStore.getState().isPlaying,
+            position: data,
+          }).catch(() => {});
         }
         break;
       }
@@ -278,6 +285,9 @@ if (!(globalThis as any).__audioStoreInitialized) {
         onSeekBackward: () => {
           useAudioStore.getState().seek(Math.max(audioService.getCurrentTime() - 10, 0));
         },
+        onSeekTo: (time: number) => {
+          useAudioStore.getState().seek(time);
+        },
         onStop: () => useAudioStore.getState().pause(),
       });
     } catch {}
@@ -314,7 +324,7 @@ if (!(globalThis as any).__audioStoreInitialized) {
     } catch {}
 
     try {
-      setInterval(() => {
+      const persistIntervalId = setInterval(() => {
         try {
           const state = useAudioStore.getState();
           if (state.isPlaying && state.currentSong) {
@@ -322,6 +332,11 @@ if (!(globalThis as any).__audioStoreInitialized) {
           }
         } catch {}
       }, 30000);
+      // Store for HMR cleanup
+      if ((globalThis as any).__audioPersistInterval) {
+        clearInterval((globalThis as any).__audioPersistInterval);
+      }
+      (globalThis as any).__audioPersistInterval = persistIntervalId;
     } catch {}
 
     try {
@@ -439,7 +454,9 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
     const song = await useQueueStore.getState().nextSong();
     if (song) {
       const resolved = resolveDownloadUrl(song);
-      const resolvedQueue = resolveQueueDownloads(useQueueStore.getState().queue);
+      // Read queue + index synchronously right after nextSong() set them
+      const qs = useQueueStore.getState();
+      const resolvedQueue = resolveQueueDownloads(qs.queue);
       set({
         currentSong: resolved,
         progress: 0,
@@ -448,7 +465,7 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
         error: null,
       });
       startLoadingTimeout();
-      audioService.play(resolved, resolvedQueue, useQueueStore.getState().currentIndex).catch(err => {
+      audioService.play(resolved, resolvedQueue, qs.currentIndex).catch(err => {
         const msg = err instanceof Error ? err.message : 'Playback failed';
         console.error('[AudioStore] nextSong play() failed:', msg);
         clearLoadingTimeout();
@@ -467,7 +484,8 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
     const song = await useQueueStore.getState().previousSong();
     if (song) {
       const resolved = resolveDownloadUrl(song);
-      const resolvedQueue = resolveQueueDownloads(useQueueStore.getState().queue);
+      const qs = useQueueStore.getState();
+      const resolvedQueue = resolveQueueDownloads(qs.queue);
       set({
         currentSong: resolved,
         progress: 0,
@@ -476,13 +494,16 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
         error: null,
       });
       startLoadingTimeout();
-      audioService.play(resolved, resolvedQueue, useQueueStore.getState().currentIndex).catch(err => {
+      audioService.play(resolved, resolvedQueue, qs.currentIndex).catch(err => {
         const msg = err instanceof Error ? err.message : 'Playback failed';
         console.error('[AudioStore] previousSong play() failed:', msg);
         clearLoadingTimeout();
         set({ error: msg, isLoading: false, isPlaying: false });
         autoSkipNextSong();
       });
+    } else {
+      clearLoadingTimeout();
+      set({ isLoading: false });
     }
   },
 

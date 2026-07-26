@@ -185,34 +185,46 @@ export async function getRecommendations(options: RecommendationOptions = {}): P
   const sources: RecommendationSource[] = [];
   
   if (seedSong) {
-    const [sameArtist, sameGenre, similarMood] = await Promise.all([
+    const [sameArtist, sameGenre, similarMood] = await Promise.allSettled([
       getSameArtistSongs(seedSong.artist, localExclude, 10),
       getSameGenreSongs(seedSong.genre, localExclude, 10),
       getSimilarMoodSongs(seedSong, localExclude, 10),
     ]);
     
-    if (sameArtist.length) sources.push({ name: 'sameArtist', weight: 50, songs: sameArtist });
-    if (sameGenre.length) sources.push({ name: 'sameGenre', weight: 30, songs: sameGenre });
-    if (similarMood.length) sources.push({ name: 'similarMood', weight: 20, songs: similarMood });
+    const artistSongs = sameArtist.status === 'fulfilled' ? sameArtist.value : [];
+    const genreSongs = sameGenre.status === 'fulfilled' ? sameGenre.value : [];
+    const moodSongs = similarMood.status === 'fulfilled' ? similarMood.value : [];
+
+    if (artistSongs.length) sources.push({ name: 'sameArtist', weight: 50, songs: artistSongs });
+    if (genreSongs.length) sources.push({ name: 'sameGenre', weight: 30, songs: genreSongs });
+    if (moodSongs.length) sources.push({ name: 'similarMood', weight: 20, songs: moodSongs });
   }
   
   if (useQueue) {
-    const queueSongs = await getQueueBasedSongs(localExclude, 15);
-    if (queueSongs.length) sources.push({ name: 'queueBased', weight: 25, songs: queueSongs });
+    try {
+      const queueSongs = await getQueueBasedSongs(localExclude, 15);
+      if (queueSongs.length) sources.push({ name: 'queueBased', weight: 25, songs: queueSongs });
+    } catch {}
   }
   
   if (useHistory) {
-    const historySongs = await getHistoryBasedSongs(localExclude, 15);
-    if (historySongs.length) sources.push({ name: 'historyBased', weight: 35, songs: historySongs });
+    try {
+      const historySongs = await getHistoryBasedSongs(localExclude, 15);
+      if (historySongs.length) sources.push({ name: 'historyBased', weight: 35, songs: historySongs });
+    } catch {}
   }
   
   if (useFavorites) {
-    const favSongs = await getFavoritesBasedSongs(localExclude, 10);
-    if (favSongs.length) sources.push({ name: 'favoritesBased', weight: 40, songs: favSongs });
+    try {
+      const favSongs = await getFavoritesBasedSongs(localExclude, 10);
+      if (favSongs.length) sources.push({ name: 'favoritesBased', weight: 40, songs: favSongs });
+    } catch {}
   }
   
-  const popularSongs = await getPopularSongs(localExclude, 10);
-  if (popularSongs.length) sources.push({ name: 'popular', weight: 10, songs: popularSongs });
+  try {
+    const popularSongs = await getPopularSongs(localExclude, 10);
+    if (popularSongs.length) sources.push({ name: 'popular', weight: 10, songs: popularSongs });
+  } catch {}
   
   return rankAndDedupe(sources, localExclude, limit);
 }

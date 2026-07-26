@@ -53,6 +53,7 @@ class YouTubePlayerService {
   // Init attempts
   private initAttempts = 0;
   private maxInitAttempts = 5;
+  private initPromise: Promise<void> | null = null;
 
   constructor() {
     // DEFERRED: Don't load YouTube API on import — only on first play.
@@ -160,6 +161,21 @@ class YouTubePlayerService {
       return;
     }
 
+    // Mutex: if a call is in progress, return the existing promise
+    if (this.initPromise) {
+      log('initialize() — init already in progress, waiting');
+      return this.initPromise;
+    }
+
+    this.initPromise = this._doInitialize();
+    try {
+      await this.initPromise;
+    } finally {
+      this.initPromise = null;
+    }
+  }
+
+  private async _doInitialize(): Promise<void> {
     this.initAttempts++;
     if (this.initAttempts > this.maxInitAttempts) {
       logError('initialize() — max init attempts exceeded');
@@ -400,7 +416,10 @@ class YouTubePlayerService {
     this._apiLoadingStarted = false;
     this.loadTimedOut = false;
     this.readyPromise = null;
+    this.readyResolver = null;
     this.playerReadyPromise = null;
+    this.playerReadyResolver = null;
+    this.initPromise = null;
   }
 
   getCurrentSongId(): string | null {

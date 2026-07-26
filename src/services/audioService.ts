@@ -126,6 +126,18 @@ export class AudioService {
     this.htmlAudio.addEventListener('loadedmetadata', this.handleLoadedMetadata);
   }
 
+  private detachHtmlAudioListeners(): void {
+    if (!this.htmlAudio) return;
+    this.htmlAudio.removeEventListener('ended', this.handleEnded);
+    this.htmlAudio.removeEventListener('timeupdate', this.handleTimeUpdate);
+    this.htmlAudio.removeEventListener('error', this.handleError);
+    this.htmlAudio.removeEventListener('waiting', this.handleWaiting);
+    this.htmlAudio.removeEventListener('canplay', this.handleCanPlay);
+    this.htmlAudio.removeEventListener('playing', this.handlePlaying);
+    this.htmlAudio.removeEventListener('pause', this.handlePause);
+    this.htmlAudio.removeEventListener('loadedmetadata', this.handleLoadedMetadata);
+  }
+
   private handleEnded = (): void => {
     log('EVENT: ended');
     this.setState({ isPlaying: false, currentTime: 0 });
@@ -165,8 +177,8 @@ export class AudioService {
       this.setState({ isPlaying: true, isLoading: false, error: null });
       this.startProgressTracking();
       this.emit('playing');
+      this.emit('play', { song: this.state.currentSong });
     }
-    this.emit('play', { song: this.state.currentSong });
   };
 
   private handlePause = (): void => {
@@ -660,12 +672,14 @@ export class AudioService {
     }
 
     if (this.htmlAudio && this.htmlAudio.src) {
+      const playbackId = this.currentPlaybackId;
       log('resume() — verifying audio state...');
 
       // Init/resume equalizer AudioContext (blocks output if suspended)
       try {
         await equalizerService.init(this.htmlAudio);
       } catch {}
+      if (this.currentPlaybackId !== playbackId) return;
 
       // Verify volume
       if (this.htmlAudio.volume === 0 || Number.isNaN(this.htmlAudio.volume)) {
@@ -687,6 +701,7 @@ export class AudioService {
         log('resume() — waiting for canplay...');
         await this.waitForCanPlay(this.htmlAudio, 3_000);
       }
+      if (this.currentPlaybackId !== playbackId) return;
 
       log('resume() — calling play()', {
         src: this.htmlAudio.src?.substring(0, 80),
@@ -698,6 +713,7 @@ export class AudioService {
 
       try {
         await this.htmlAudio.play();
+        if (this.currentPlaybackId !== playbackId) return;
         this.consecutiveFailures = 0;
         this.setState({ isPlaying: true, error: null });
         this.startProgressTracking();
@@ -718,6 +734,7 @@ export class AudioService {
   }
 
   stop(): void {
+    this.currentPlaybackId++;
     this.stopCurrentPlayback();
     this.setState({ 
       isPlaying: false, currentTime: 0, currentSong: null,
@@ -766,8 +783,11 @@ export class AudioService {
   resetConsecutiveFailures(): void { this.consecutiveFailures = 0; }
 
   destroy(): void {
+    this.currentPlaybackId++;
     this.stopCurrentPlayback();
+    equalizerService.destroy();
     if (this.htmlAudio) {
+      this.detachHtmlAudioListeners();
       backgroundPlaybackService.unregisterAudioElement(this.htmlAudio);
       this.htmlAudio = null;
     }

@@ -3,6 +3,8 @@ import { registerPlugin } from '@capacitor/core';
 export interface BackgroundAudioPlugin {
   startService(options: { title: string; artist: string }): Promise<{ started: boolean }>;
   stopService(): Promise<void>;
+  updateMetadata(options: { title: string; artist: string }): Promise<void>;
+  updatePlaybackState(options: { isPlaying: boolean; position: number }): Promise<void>;
 }
 
 let BackgroundAudio: BackgroundAudioPlugin | null = null;
@@ -28,5 +30,21 @@ export const backgroundAudio = {
     } catch {
       // Plugin not available on web
     }
-  }
+  },
+  updateMetadata: async (options: { title: string; artist: string }): Promise<void> => {
+    try {
+      if (!BackgroundAudio) return;
+      await BackgroundAudio.updateMetadata(options);
+    } catch {
+      // ignore
+    }
+  },
+  updatePlaybackState: async (options: { isPlaying: boolean; position: number }): Promise<void> => {
+    try {
+      if (!BackgroundAudio) return;
+      await BackgroundAudio.updatePlaybackState(options);
+    } catch {
+      // ignore
+    }
+  },
 };
