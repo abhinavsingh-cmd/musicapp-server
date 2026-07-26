@@ -2,7 +2,8 @@ import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { cn } from '../utils/cn';
-import { Mail, Lock, Music } from 'lucide-react';
+import { Mail, Lock, Music, ArrowLeft } from 'lucide-react';
+import { useGoBack } from '../hooks/useGoBack';
 import { motion, AnimatePresence } from 'framer-motion';
 
 export const LoginPage: React.FC = () => {
@@ -12,6 +13,7 @@ export const LoginPage: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   const { login } = useAuth();
   const navigate = useNavigate();
+  const goBack = useGoBack('/');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -55,6 +57,14 @@ export const LoginPage: React.FC = () => {
         transition={{ duration: 0.6, ease: [0.34, 1.56, 0.64, 1] }}
         className="w-full max-w-md p-8 claymorphism dark:claymorphism-dark rounded-3xl relative z-10 mx-4"
       >
+        <button
+          onClick={goBack}
+          className="absolute top-4 left-4 p-2 rounded-xl hover:bg-white/10 transition-colors text-gray-400 hover:text-white"
+          aria-label="Go back"
+        >
+          <ArrowLeft size={20} />
+        </button>
+
         <div className="text-center mb-8">
           <motion.div
             className="flex justify-center mb-4"
@@ -126,7 +136,7 @@ export const LoginPage: React.FC = () => {
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder="Enter any password"
+                placeholder="Enter your password"
                 className="w-full pl-10 pr-4 py-3 rounded-xl border-2 border-white/5 dark:border-gray-700 bg-white/80 dark:bg-gray-800/80 focus:ring-0 focus:border-purple-500 dark:focus:border-purple-400 transition-all duration-300 outline-none"
                 required
               />
@@ -180,14 +190,9 @@ export const LoginPage: React.FC = () => {
           animate={{ opacity: 1 }}
           transition={{ delay: 0.7 }}
         >
-          <p className="text-sm text-gray-600 dark:text-gray-400">
-            Demo: <span className="font-semibold text-purple-500">alex@example.com</span>,{' '}
-            <span className="font-semibold text-purple-500">maria@example.com</span>,{' '}
-            <span className="font-semibold text-purple-500">david@example.com</span>
+          <p className="text-xs text-gray-500 dark:text-gray-500">
+            Sign up with any email to get started.
           </p>
-          <p className="text-xs text-gray-500 dark:text-gray-500 mt-1">
-            Any password works. Or sign up with any email.
-           </p>
         </motion.div>
       </motion.div>
     </div>

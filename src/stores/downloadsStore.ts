@@ -11,27 +11,39 @@ import {
   DownloadProgress,
 } from '../utils/downloadManager';
 
+export type DownloadError = {
+  song: Song;
+  message: string;
+  timestamp: number;
+};
+
 export interface DownloadsState {
   downloads: DownloadedSong[];
   downloadingIds: Set<string>;
-  /** Map of youtubeId → current progress (0-100) */
   progressMap: Record<string, DownloadProgress>;
   loading: boolean;
   isOnline: boolean;
   cacheSize: number;
-  /** Cache of blob URLs keyed by download id */
   blobUrlCache: Record<string, string>;
+  failedDownloads: DownloadError[];
 
   loadDownloads: () => Promise<void>;
   downloadSong: (song: Song) => Promise<void>;
+  cancelDownload: (youtubeId: string) => void;
+  retryDownload: (song: Song) => void;
   removeSong: (id: string) => Promise<void>;
+  clearFailed: () => void;
   isDownloaded: (youtubeId: string) => boolean;
   isDownloading: (youtubeId: string) => boolean;
   getProgress: (youtubeId: string) => DownloadProgress | null;
   getBlobUrl: (youtubeId: string) => string | null;
+  resolveSongUrl: (song: Song) => Song;
   setOnline: (online: boolean) => void;
   refreshCacheSize: () => Promise<void>;
 }
+
+// Active abort controllers keyed by youtubeId
+const activeControllers = new Map<string, AbortController>();
 
 export const useDownloadsStore = create<DownloadsState>((set, get) => ({
   downloads: [],
@@ -41,8 +53,11 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
   isOnline: navigator.onLine,
   cacheSize: 0,
   blobUrlCache: {},
+  failedDownloads: [],
 
   loadDownloads: async () => {
+    const state = get();
+    if (state.downloads.length > 0 && !state.loading) return;
     set({ loading: true });
     try {
       const all = await getAllDownloads();
@@ -59,8 +74,16 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
     const state = get();
     const key = song.youtubeId || song.id;
     if (state.downloadingIds.has(key)) return;
-    const already = await isDownloaded(key);
+    let already = false;
+    try {
+      already = await isDownloaded(key);
+    } catch {
+      console.error('[DownloadsStore] isDownloaded check failed, proceeding anyway');
+    }
     if (already) return;
+
+    const controller = new AbortController();
+    activeControllers.set(key, controller);
 
     set({ downloadingIds: new Set([...state.downloadingIds, key]) });
 
@@ -77,13 +100,18 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
           audioUrl: song.audioUrl,
         },
         (progress) => {
+          if (controller.signal.aborted) return;
           set((s) => ({
             progressMap: { ...s.progressMap, [key]: progress },
           }));
         },
+        controller.signal,
       );
 
-      // Auto-evict if cache exceeds limit
+      activeControllers.delete(key);
+
+      if (controller.signal.aborted) return;
+
       evictOldCache().catch(() => {});
 
       set((s) => {
@@ -98,15 +126,48 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
         };
       });
     } catch (e) {
+      activeControllers.delete(key);
+      if (controller.signal.aborted) return;
+
       console.error('Download failed:', e);
+      const msg = e instanceof Error ? e.message : 'Download failed';
       set((s) => {
         const newIds = new Set(s.downloadingIds);
         newIds.delete(key);
         const newProgress = { ...s.progressMap };
         delete newProgress[key];
-        return { downloadingIds: newIds, progressMap: newProgress };
+        return {
+          downloadingIds: newIds,
+          progressMap: newProgress,
+          failedDownloads: [...s.failedDownloads, { song, message: msg, timestamp: Date.now() }],
+        };
       });
     }
+  },
+
+  cancelDownload: (youtubeId: string) => {
+    const controller = activeControllers.get(youtubeId);
+    if (controller) {
+      controller.abort();
+      activeControllers.delete(youtubeId);
+    }
+    set((s) => {
+      const newIds = new Set(s.downloadingIds);
+      newIds.delete(youtubeId);
+      const newProgress = { ...s.progressMap };
+      delete newProgress[youtubeId];
+      return { downloadingIds: newIds, progressMap: newProgress };
+    });
+  },
+
+  retryDownload: (song: Song) => {
+    const key = song.youtubeId || song.id;
+    set((s) => ({
+      failedDownloads: s.failedDownloads.filter(f =>
+        (f.song.youtubeId || f.song.id) !== key
+      ),
+    }));
+    get().downloadSong(song);
   },
 
   removeSong: async (id: string) => {
@@ -119,9 +180,12 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
     });
   },
 
+  clearFailed: () => set({ failedDownloads: [] }),
+
   isDownloaded: (youtubeId: string) => get().downloads.some((d) => d.youtubeId === youtubeId || d.id === youtubeId),
   isDownloading: (youtubeId: string) => get().downloadingIds.has(youtubeId),
   getProgress: (youtubeId: string) => get().progressMap[youtubeId] || null,
+
   getBlobUrl: (youtubeId: string) => {
     const state = get();
     const download = state.downloads.find((d) => d.youtubeId === youtubeId || d.id === youtubeId);
@@ -133,10 +197,30 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
     return url;
   },
 
+  resolveSongUrl: (song: Song) => {
+    const blobUrl = get().getBlobUrl(song.youtubeId || song.id);
+    if (blobUrl) return { ...song, audioUrl: blobUrl };
+    return song;
+  },
+
   setOnline: (online: boolean) => set({ isOnline: online }),
 
   refreshCacheSize: async () => {
-    const cacheSize = await getCacheSize();
-    set({ cacheSize });
+    try {
+      const cacheSize = await getCacheSize();
+      set({ cacheSize });
+    } catch {
+      console.error('[DownloadsStore] Failed to refresh cache size');
+    }
   },
 }));
+
+// Wire up online/offline event listeners (runs once at import)
+if (typeof window !== 'undefined') {
+  window.addEventListener('online', () => {
+    useDownloadsStore.getState().setOnline(true);
+  });
+  window.addEventListener('offline', () => {
+    useDownloadsStore.getState().setOnline(false);
+  });
+}

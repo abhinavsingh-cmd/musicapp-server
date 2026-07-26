@@ -132,7 +132,9 @@ export const useAlbumStore = create<AlbumStore>((set, get) => ({
         const idx = a.songIds.indexOf(songId);
         if (idx === -1) return a;
         const songIds = a.songIds.filter((id) => id !== songId);
-        return { ...a, songIds, trackCount: songIds.length };
+        const avgDuration = a.trackCount > 1 ? a.duration / a.trackCount : 0;
+        const newDuration = Math.max(0, Math.round(avgDuration * songIds.length));
+        return { ...a, songIds, trackCount: songIds.length, duration: newDuration };
       });
       saveAlbums(updated);
       return { albums: updated };

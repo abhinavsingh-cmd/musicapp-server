@@ -1,7 +1,10 @@
 import React, { useState, useMemo, useCallback, memo } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useQueueStore } from '../../stores/queueStore';
 import { useAudioStore } from '../../stores/audioStore';
+import { useSongContextMenu } from '../../components/SongContextMenu';
 import { cn } from '../../utils/cn';
+import { ErrorBoundary } from '../../components/ErrorBoundary';
 import {
   DndContext,
   closestCenter,
@@ -43,9 +46,11 @@ interface SortableSongRowProps {
   isCurrent: boolean;
   isPlaying: boolean;
   section: 'current' | 'upcoming' | 'recent';
+  onContextMenu?: (e: React.MouseEvent, song: import('../../types/music').Song) => void;
+  onTouchStart?: (e: React.TouchEvent, song: import('../../types/music').Song) => void;
 }
 
-const SortableSongRow = memo(({ song, index, isCurrent, isPlaying, section }: SortableSongRowProps) => {
+const SortableSongRow = memo(({ song, index, isCurrent, isPlaying, section, onContextMenu, onTouchStart }: SortableSongRowProps) => {
   const playAtIndex = useQueueStore((s) => s.playAtIndex);
   const removeFromQueue = useQueueStore((s) => s.removeFromQueue);
 
@@ -68,6 +73,8 @@ const SortableSongRow = memo(({ song, index, isCurrent, isPlaying, section }: So
         !isCurrent && "hover:bg-white/5",
         isDragging && "shadow-lg shadow-violet-500/20"
       )}
+      onContextMenu={(e) => onContextMenu?.(e, song)}
+      onTouchStart={(e) => onTouchStart?.(e, song)}
     >
       {section !== 'recent' ? (
         <button
@@ -145,6 +152,7 @@ const SortableSongRow = memo(({ song, index, isCurrent, isPlaying, section }: So
 SortableSongRow.displayName = 'SortableSongRow';
 
 export const QueuePanel: React.FC = memo(() => {
+  const navigate = useNavigate();
   const queue = useQueueStore((s) => s.queue);
   const currentIndex = useQueueStore((s) => s.currentIndex);
   const recentlyPlayed = useQueueStore((s) => s.recentlyPlayed);
@@ -158,6 +166,11 @@ export const QueuePanel: React.FC = memo(() => {
   const currentSongId = useAudioStore((s) => s.currentSong?.id ?? null);
   const isPlaying = useAudioStore((s) => s.isPlaying);
   const [tab, setTab] = useState<'queue' | 'recent'>('queue');
+
+  const { handleContextMenu, handleLongPress, ContextMenu } = useSongContextMenu(
+    (artist) => navigate(`/search?q=${encodeURIComponent(artist)}`),
+    (album) => navigate(`/search?q=${encodeURIComponent(album)}`),
+  );
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
@@ -268,6 +281,8 @@ export const QueuePanel: React.FC = memo(() => {
                     isCurrent={true}
                     isPlaying={isPlaying}
                     section="current"
+                    onContextMenu={handleContextMenu}
+                    onTouchStart={handleLongPress}
                   />
                 </div>
               )}
@@ -278,20 +293,24 @@ export const QueuePanel: React.FC = memo(() => {
                     Up Next
                     <span className="ml-1 text-gray-700">({upcoming.length})</span>
                   </p>
-                  <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-                    <SortableContext items={upcoming.map((s, i) => s.id + '-' + (currentIndex + 1 + i))} strategy={verticalListSortingStrategy}>
-                      {upcoming.map((song, i) => (
-                        <SortableSongRow
-                          key={song.id + '-' + (currentIndex + 1 + i)}
-                          song={song}
-                          index={currentIndex + 1 + i}
-                          isCurrent={false}
-                          isPlaying={false}
-                          section="upcoming"
-                        />
-                      ))}
-                    </SortableContext>
-                  </DndContext>
+                  <ErrorBoundary level="section">
+                    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+                      <SortableContext items={upcoming.map((s, i) => s.id + '-' + (currentIndex + 1 + i))} strategy={verticalListSortingStrategy}>
+                        {upcoming.map((song, i) => (
+                          <SortableSongRow
+                            key={song.id + '-' + (currentIndex + 1 + i)}
+                            song={song}
+                            index={currentIndex + 1 + i}
+                            isCurrent={false}
+                            isPlaying={false}
+                            section="upcoming"
+                            onContextMenu={handleContextMenu}
+                            onTouchStart={handleLongPress}
+                          />
+                        ))}
+                      </SortableContext>
+                    </DndContext>
+                  </ErrorBoundary>
                 </div>
               )}
             </div>
@@ -311,6 +330,8 @@ export const QueuePanel: React.FC = memo(() => {
                     "flex items-center gap-3 px-3 py-2 rounded-xl hover:bg-white/5 transition-all group",
                     currentSongId === song.id && "bg-violet-500/10"
                   )}
+                  onContextMenu={(e) => handleContextMenu(e, song)}
+                  onTouchStart={(e) => handleLongPress(e, song)}
                 >
                   <div className="w-6 text-center flex-shrink-0">
                     {currentSongId === song.id ? (
@@ -340,6 +361,7 @@ export const QueuePanel: React.FC = memo(() => {
           )
         )}
       </div>
+      <ContextMenu />
     </div>
   );
 });

@@ -1,9 +1,11 @@
-import React, { lazy, Suspense } from 'react';
+import React, { lazy, Suspense, useEffect } from 'react';
 import { Routes, Route } from 'react-router-dom';
 import { AuthProvider } from './contexts/AuthContext';
 import { LayoutProvider } from './contexts/LayoutContext';
 import { AppLayout } from './features/layout/AppLayout';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { useAudioStore } from './stores/audioStore';
+import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 
 const LoginPage = lazy(() => import('./pages/LoginPage'));
 const NotFoundPage = lazy(() => import('./pages/NotFoundPage'));
@@ -20,12 +22,45 @@ const HistoryPage = lazy(() => import('./pages/HistoryPage'));
 const SettingsPage = lazy(() => import('./pages/SettingsPage'));
 
 const PageSpinner = () => (
-  <div className="flex-1 flex items-center justify-center py-20">
-    <div className="w-8 h-8 border-2 border-[var(--color-accent)] border-t-transparent rounded-full animate-spin" />
+  <div className="flex-1 p-6 space-y-4">
+    <div className="flex items-center gap-3 mb-6">
+      <div className="w-10 h-10 rounded-xl bg-white/5 animate-pulse" />
+      <div className="space-y-2">
+        <div className="h-5 w-32 rounded bg-white/10 animate-pulse" />
+        <div className="h-3 w-48 rounded bg-white/5 animate-pulse" />
+      </div>
+    </div>
+    {Array.from({ length: 8 }).map((_, i) => (
+      <div key={i} className="flex items-center gap-4 py-2 animate-pulse" style={{ animationDelay: `${i * 40}ms` }}>
+        <div className="w-5 h-4 rounded bg-white/10" />
+        <div className="w-10 h-10 rounded-lg bg-white/10" />
+        <div className="flex-1 space-y-2">
+          <div className="h-4 rounded bg-white/10 w-2/3" />
+          <div className="h-3 rounded bg-white/10 w-1/3" />
+        </div>
+        <div className="w-8 h-4 rounded bg-white/10" />
+      </div>
+    ))}
   </div>
 );
 
 const App: React.FC = () => {
+  useKeyboardShortcuts();
+
+  useEffect(() => {
+    // Restore playback state in background — never blocks render
+    const defer = typeof requestIdleCallback === 'function'
+      ? requestIdleCallback
+      : (cb: IdleRequestCallback) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 } as IdleDeadline), 0);
+    defer(() => {
+      try {
+        useAudioStore.getState().restoreFromPersistence();
+      } catch (e) {
+        console.error('Failed to restore playback state:', e);
+      }
+    });
+  }, []);
+
   return (
     <ErrorBoundary level="app">
       <AuthProvider>

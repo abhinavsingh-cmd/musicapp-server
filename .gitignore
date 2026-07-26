@@ -27,3 +27,11 @@ dist-ssr
 dist
 .vercel
 dist/
+
+# Build outputs
+*.apk
+*.aab
+
+# Test scripts
+e2e-diagnostic.mjs
+e2e-prod.mjs

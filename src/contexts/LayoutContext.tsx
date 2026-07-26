@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
 
 type Breakpoint = 'mobile' | 'tablet' | 'desktop';
 
@@ -26,7 +26,10 @@ const BREAKPOINTS = {
 } as const;
 
 export const LayoutProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(() => {
+    if (typeof window === 'undefined') return true;
+    return window.innerWidth >= BREAKPOINTS.tablet;
+  });
   const [sidebarWidth, setSidebarWidth] = useState(256);
   const [breakpoint, setBreakpoint] = useState<Breakpoint>('desktop');
 
@@ -51,16 +54,18 @@ export const LayoutProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     setSidebarWidth(Math.max(200, Math.min(400, width)));
   }, []);
 
+  const value = useMemo(() => ({
+    sidebarOpen,
+    sidebarWidth,
+    breakpoint,
+    openSidebar,
+    closeSidebar,
+    toggleSidebar,
+    setSidebarWidth: handleSetSidebarWidth,
+  }), [sidebarOpen, sidebarWidth, breakpoint, openSidebar, closeSidebar, toggleSidebar, handleSetSidebarWidth]);
+
   return (
-    <LayoutContext.Provider value={{
-      sidebarOpen,
-      sidebarWidth,
-      breakpoint,
-      openSidebar,
-      closeSidebar,
-      toggleSidebar,
-      setSidebarWidth: handleSetSidebarWidth,
-    }}>
+    <LayoutContext.Provider value={value}>
       {children}
     </LayoutContext.Provider>
   );

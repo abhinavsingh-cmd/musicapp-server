@@ -46,7 +46,7 @@ export class BackupService {
       // Restore history
       if (data.history) {
         const { addSong } = useHistoryStore.getState();
-        for (const entry of data.history.reverse()) {
+        for (const entry of [...data.history].reverse()) {
           if (entry.song) {
             addSong(entry.song);
           }

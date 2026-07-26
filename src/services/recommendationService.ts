@@ -1,7 +1,4 @@
 import { Song } from '../types/music';
-import { useHistoryStore } from '../stores/historyStore';
-import { useQueueStore } from '../stores/queueStore';
-import { useAudioStore } from '../stores/audioStore';
 import { fetchSongs } from '../services/musicApi';
 
 const RECENTLY_PLAYED_LIMIT = 100;
@@ -73,6 +70,7 @@ async function getSimilarMoodSongs(seed: Song, excludeIds: Set<string>, limit: n
 }
 
 async function getHistoryBasedSongs(excludeIds: Set<string>, limit: number): Promise<Song[]> {
+  const { useHistoryStore } = await import('../stores/historyStore');
   const history = useHistoryStore.getState().history;
   const recentArtists = new Map<string, number>();
   const recentGenres = new Map<string, number>();
@@ -102,6 +100,7 @@ async function getHistoryBasedSongs(excludeIds: Set<string>, limit: number): Pro
 }
 
 async function getFavoritesBasedSongs(excludeIds: Set<string>, limit: number): Promise<Song[]> {
+  const { useAudioStore } = await import('../stores/audioStore');
   const favorites = useAudioStore.getState().favorites;
   const allSongs = await fetchSongs();
   const favSongs = allSongs.filter(s => favorites.includes(s.id));
@@ -118,6 +117,7 @@ async function getFavoritesBasedSongs(excludeIds: Set<string>, limit: number): P
 }
 
 async function getQueueBasedSongs(excludeIds: Set<string>, limit: number): Promise<Song[]> {
+  const { useQueueStore } = await import('../stores/queueStore');
   const queue = useQueueStore.getState().queue;
   if (queue.length === 0) return [];
   
@@ -173,20 +173,22 @@ export async function getRecommendations(options: RecommendationOptions = {}): P
     useQueue = true,
   } = options;
 
+  const localExclude = new Set(excludeIds);
   if (seedSong) {
-    excludeIds.add(seedSong.id);
+    localExclude.add(seedSong.id);
   }
 
+  const { useHistoryStore } = await import('../stores/historyStore');
   const recentlyPlayed = useHistoryStore.getState().getRecent(RECENTLY_PLAYED_LIMIT);
-  recentlyPlayed.forEach(entry => excludeIds.add(entry.song.id));
+  recentlyPlayed.forEach(entry => localExclude.add(entry.song.id));
 
   const sources: RecommendationSource[] = [];
   
   if (seedSong) {
     const [sameArtist, sameGenre, similarMood] = await Promise.all([
-      getSameArtistSongs(seedSong.artist, excludeIds, 10),
-      getSameGenreSongs(seedSong.genre, excludeIds, 10),
-      getSimilarMoodSongs(seedSong, excludeIds, 10),
+      getSameArtistSongs(seedSong.artist, localExclude, 10),
+      getSameGenreSongs(seedSong.genre, localExclude, 10),
+      getSimilarMoodSongs(seedSong, localExclude, 10),
     ]);
     
     if (sameArtist.length) sources.push({ name: 'sameArtist', weight: 50, songs: sameArtist });
@@ -195,24 +197,24 @@ export async function getRecommendations(options: RecommendationOptions = {}): P
   }
   
   if (useQueue) {
-    const queueSongs = await getQueueBasedSongs(excludeIds, 15);
+    const queueSongs = await getQueueBasedSongs(localExclude, 15);
     if (queueSongs.length) sources.push({ name: 'queueBased', weight: 25, songs: queueSongs });
   }
   
   if (useHistory) {
-    const historySongs = await getHistoryBasedSongs(excludeIds, 15);
+    const historySongs = await getHistoryBasedSongs(localExclude, 15);
     if (historySongs.length) sources.push({ name: 'historyBased', weight: 35, songs: historySongs });
   }
   
   if (useFavorites) {
-    const favSongs = await getFavoritesBasedSongs(excludeIds, 10);
+    const favSongs = await getFavoritesBasedSongs(localExclude, 10);
     if (favSongs.length) sources.push({ name: 'favoritesBased', weight: 40, songs: favSongs });
   }
   
-  const popularSongs = await getPopularSongs(excludeIds, 10);
+  const popularSongs = await getPopularSongs(localExclude, 10);
   if (popularSongs.length) sources.push({ name: 'popular', weight: 10, songs: popularSongs });
   
-  return rankAndDedupe(sources, excludeIds, limit);
+  return rankAndDedupe(sources, localExclude, limit);
 }
 
 export async function preloadSongs(songs: Song[], count: number = PRELOAD_COUNT): Promise<void> {

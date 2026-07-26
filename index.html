@@ -14,7 +14,29 @@
     <link rel="apple-touch-icon" href="/icons/icon-192.png" />
     <link rel="manifest" href="/manifest.json" />
 
+    <!-- Playback preconnect hints -->
+    <link rel="dns-prefetch" href="https://www.youtube.com" />
+    <link rel="dns-prefetch" href="https://i.ytimg.com" />
+    <link rel="preconnect" href="https://www.youtube.com" crossorigin />
+    <link rel="preconnect" href="https://i.ytimg.com" crossorigin />
+    <link rel="preconnect" href="https://www.google.com" crossorigin />
+    <link rel="preload" as="script" href="https://www.youtube.com/iframe_api" />
+    <link rel="dns-prefetch" href="https://musicapp-server-alkf.onrender.com" />
+    <link rel="modulepreload" href="/src/main.tsx" />
+
     <title>MusicApp</title>
+    <style>
+      #root:empty { display: flex; align-items: center; justify-content: center; min-height: 100vh; background: #0a0a0f; }
+      #root:empty::after {
+        content: '';
+        width: 32px; height: 32px;
+        border: 3px solid rgba(139,92,246,0.2);
+        border-top-color: #8b5cf6;
+        border-radius: 50%;
+        animation: spin .7s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
   </head>
   <body>
     <div id="root"></div>

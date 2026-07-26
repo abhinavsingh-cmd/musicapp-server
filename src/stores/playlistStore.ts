@@ -34,7 +34,7 @@ interface PlaylistStore {
   // Songs
   addSong: (playlistId: string, song: Song) => void;
   addSongs: (playlistId: string, songs: Song[]) => void;
-  removeSong: (playlistId: string, songId: string) => void;
+  removeSong: (playlistId: string, songId: string, songDuration?: number) => void;
   reorderSong: (playlistId: string, fromIndex: number, toIndex: number) => void;
 
   // Toggles
@@ -152,14 +152,15 @@ export const usePlaylistStore = create<PlaylistStore>((set, get) => ({
     });
   },
 
-  removeSong: (playlistId, songId) => {
+  removeSong: (playlistId, songId, songDuration) => {
     set((s) => {
       const updated = s.playlists.map((p) => {
         if (p.id !== playlistId) return p;
         const idx = p.songIds.indexOf(songId);
         if (idx === -1) return p;
         const songIds = p.songIds.filter((id) => id !== songId);
-        return { ...p, songIds, trackCount: songIds.length, updatedAt: new Date().toISOString() };
+        const removedDuration = songDuration ?? (p.trackCount > 0 ? Math.round(p.duration / p.trackCount) : 0);
+        return { ...p, songIds, trackCount: songIds.length, duration: Math.max(0, p.duration - removedDuration), updatedAt: new Date().toISOString() };
       });
       savePlaylists(updated);
       return { playlists: updated };

@@ -1,15 +1,22 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import { useGoBack } from '../hooks/useGoBack';
 import { backupService } from '../services/backupService';
 import { useQueueStore } from '../stores/queueStore';
 import { ThemePicker } from '../features/theme/ThemePicker';
 import { motion } from 'framer-motion';
-import { Settings, Download, Upload, Save, Zap, Loader2, Check, X, ToggleLeft } from 'lucide-react';
+import { Settings, Download, Upload, Save, Zap, Loader2, Check, X, ToggleLeft, ArrowLeft } from 'lucide-react';
 
 export const SettingsPage: React.FC = () => {
+  const goBack = useGoBack();
   const [exporting, setExporting] = useState(false);
   const [importing, setImporting] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
-  const [autoplayEnabled, setAutoplayEnabled] = useState(useQueueStore.getState().autoplayEnabled);
+  const autoplayEnabled = useQueueStore((s) => s.autoplayEnabled);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    return () => { mountedRef.current = false; };
+  }, []);
 
   const handleExport = async () => {
     setExporting(true);
@@ -21,7 +28,7 @@ export const SettingsPage: React.FC = () => {
       setMessage({ type: 'error', text: 'Failed to export library' });
     }
     setExporting(false);
-    setTimeout(() => setMessage(null), 3000);
+    setTimeout(() => { if (mountedRef.current) setMessage(null); }, 3000);
   };
 
   const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -36,17 +43,19 @@ export const SettingsPage: React.FC = () => {
       setMessage({ type: 'error', text: 'Failed to import library' });
     }
     setImporting(false);
-    setTimeout(() => setMessage(null), 3000);
+    setTimeout(() => { if (mountedRef.current) setMessage(null); }, 3000);
   };
 
   const toggleAutoplay = () => {
     useQueueStore.getState().toggleAutoplay();
-    setAutoplayEnabled(useQueueStore.getState().autoplayEnabled);
   };
 
   return (
     <div className="p-6 space-y-8 max-w-4xl mx-auto">
       <div className="flex items-center gap-3">
+        <button onClick={goBack} className="p-2 rounded-xl hover:bg-white/5 transition-colors text-gray-400 hover:text-white" aria-label="Go back">
+          <ArrowLeft size={20} />
+        </button>
         <div className="w-10 h-10 bg-gradient-to-br from-violet-500 to-fuchsia-500 rounded-xl flex items-center justify-center">
           <Settings size={20} className="text-white" />
         </div>
@@ -142,11 +151,11 @@ export const SettingsPage: React.FC = () => {
         </div>
       </section>
 
-      {/* Crossfade */}
+      {/* Keyboard Shortcuts */}
       <section className="bg-[#1a1a2e] rounded-2xl p-6 border border-white/5">
         <h2 className="text-lg font-bold text-white mb-4 flex items-center gap-2">
           <Zap size={20} className="text-violet-400" />
-          Crossfade
+          Keyboard Shortcuts
         </h2>
         <div className="grid grid-cols-2 gap-4 text-sm">
           <div className="flex justify-between p-2 rounded bg-white/5">

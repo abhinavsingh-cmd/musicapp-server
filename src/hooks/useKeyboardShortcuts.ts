@@ -1,103 +1,69 @@
 import { useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { useAudioStore } from '../stores/audioStore';
+import { audioService } from '../services/audioServiceInstance';
 
-/**
- * Desktop keyboard shortcuts.
- *
- * Space       → Play / Pause
- * ←           → Seek backward 5 s
- * →           → Seek forward 5 s
- * ↑           → Volume up
- * ↓           → Volume down
- * Ctrl+L      → Toggle lyrics panel
- * Ctrl+K      → Navigate to Search
- * Ctrl+Shift+S → Toggle shuffle
- * Esc         → Close any open panel / modal
- *
- * Shortcuts are ignored while typing in <input>, <textarea>, or contentEditable.
- */
 export function useKeyboardShortcuts() {
-  const navigate = useNavigate();
-
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      const isEditable =
-        e.target instanceof HTMLInputElement ||
-        e.target instanceof HTMLTextAreaElement ||
-        (e.target instanceof HTMLElement && e.target.isContentEditable);
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return;
 
-      if (isEditable) return;
-
-      const {
-        togglePlayPause,
-        seek,
-        progress,
-        setVolume,
-        volume,
-        toggleShuffle,
-      } = useAudioStore.getState();
-
-      const ctrl = e.ctrlKey || e.metaKey; // support Cmd on macOS
+      const state = useAudioStore.getState();
 
       switch (e.code) {
-        // ---- Playback ----
-        case 'Space':
+        case 'Space': {
           e.preventDefault();
-          togglePlayPause();
+          if (state.currentSong) state.togglePlayPause();
           break;
-
-        // ---- Seek ----
-        case 'ArrowRight':
-          e.preventDefault();
-          seek(Math.min(progress + 5, useAudioStore.getState().duration));
-          break;
-        case 'ArrowLeft':
-          e.preventDefault();
-          seek(Math.max(progress - 5, 0));
-          break;
-
-        // ---- Volume ----
-        case 'ArrowUp':
-          e.preventDefault();
-          setVolume(Math.min(volume + 0.05, 1));
-          break;
-        case 'ArrowDown':
-          e.preventDefault();
-          setVolume(Math.max(volume - 0.05, 0));
-          break;
-
-        // ---- Panels / Navigation (Ctrl combos) ----
-        case 'KeyL':
-          if (ctrl && !e.shiftKey) {
+        }
+        case 'ArrowRight': {
+          if (e.shiftKey) {
             e.preventDefault();
-            window.dispatchEvent(new CustomEvent('toggle-lyrics'));
+            if (state.currentSong) {
+              const t = audioService.getCurrentTime();
+              const d = audioService.getDuration();
+              state.seek(Math.min(t + 10, d));
+            }
           }
           break;
-
-        case 'KeyK':
-          if (ctrl && !e.shiftKey) {
+        }
+        case 'ArrowLeft': {
+          if (e.shiftKey) {
             e.preventDefault();
-            navigate('/search');
+            if (state.currentSong) {
+              const t = audioService.getCurrentTime();
+              state.seek(Math.max(t - 10, 0));
+            }
           }
           break;
-
-        case 'KeyS':
-          if (ctrl && e.shiftKey) {
+        }
+        case 'KeyN': {
+          if (e.shiftKey) {
             e.preventDefault();
-            toggleShuffle();
+            state.nextSong();
           }
           break;
-
-        // ---- Close modals ----
-        case 'Escape':
-          e.preventDefault();
-          window.dispatchEvent(new CustomEvent('close-panels'));
+        }
+        case 'KeyP': {
+          if (e.shiftKey) {
+            e.preventDefault();
+            state.previousSong();
+          }
           break;
+        }
+        case 'KeyL': {
+          if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
+            if (state.currentSong) {
+              e.preventDefault();
+              state.toggleFavorite(state.currentSong.id);
+            }
+          }
+          break;
+        }
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [navigate]);
+  }, []);
 }

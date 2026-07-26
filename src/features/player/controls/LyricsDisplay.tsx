@@ -34,6 +34,7 @@ export const LyricsDisplay: React.FC = memo(() => {
     if (currentSong) {
       fetchLyrics(currentSong.id, currentSong.title, currentSong.artist);
     }
+    lineRefs.current.clear();
   }, [currentSong, fetchLyrics]);
 
   useEffect(() => {

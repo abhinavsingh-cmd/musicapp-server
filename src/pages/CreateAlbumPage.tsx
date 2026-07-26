@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useGoBack } from '../hooks/useGoBack';
 import { useAlbumStore } from '../stores/albumStore';
-import { fetchSongs } from '../services/musicApi';
-import { Song } from '../types/music';
-import { Plus, Disc, X, Music2, Check, ChevronUp, ChevronDown } from 'lucide-react';
+import { useSongsStore } from '../stores/songsStore';
+import { Plus, Disc, X, Music2, Check, ChevronUp, ChevronDown, ArrowLeft } from 'lucide-react';
 
 export const CreateAlbumPage: React.FC = () => {
   const [title, setTitle] = useState('');
@@ -14,18 +14,18 @@ export const CreateAlbumPage: React.FC = () => {
   const [selectedSongs, setSelectedSongs] = useState<string[]>([]);
   const [showSongPicker, setShowSongPicker] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [allSongs, setAllSongs] = useState<Song[]>([]);
-  const [loading, setLoading] = useState(true);
+  const allSongs = useSongsStore((s) => s.songs);
+  const loading = useSongsStore((s) => s.loading);
+  const ensureLoaded = useSongsStore((s) => s.ensureLoaded);
   const [dragActive, setDragActive] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const navigate = useNavigate();
+  const goBack = useGoBack();
   const createAlbum = useAlbumStore((s) => s.createAlbum);
 
   const genres = ['Pop', 'Rock', 'Hip Hop', 'R&B', 'Electronic', 'Indie', 'Jazz', 'Classical', 'Country', 'Folk', 'Metal', 'Punk', 'Reggae', 'Blues', 'Soul', 'Funk', 'Disco', 'House', 'Techno', 'Trance', 'Ambient', 'Soundtrack', 'Other'];
 
-  useEffect(() => {
-    fetchSongs().then(s => { setAllSongs(s); setLoading(false); }).catch(() => setLoading(false));
-  }, []);
+  useEffect(() => { ensureLoaded(); }, [ensureLoaded]);
 
   const filteredSongs = useMemo(() => allSongs.filter(s =>
     (s.title || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -76,7 +76,7 @@ export const CreateAlbumPage: React.FC = () => {
       title: title.trim(),
       artist: artist.trim(),
       coverArt: coverPreview || '',
-      releaseYear: parseInt(year),
+      releaseYear: parseInt(year) || 2025,
       genre,
       songIds: selectedSongs,
       allSongs,
@@ -95,10 +95,15 @@ export const CreateAlbumPage: React.FC = () => {
 
   return (
     <div className="p-6 max-w-3xl mx-auto space-y-6">
-      <h2 className="text-2xl font-bold text-white flex items-center gap-3">
-        <span className="p-2 rounded-xl bg-orange-500/20"><Plus size={20} className="text-orange-500" /></span>
-        New Album
-      </h2>
+      <div className="flex items-center gap-3">
+        <button onClick={goBack} className="p-2 rounded-xl hover:bg-white/5 transition-colors text-gray-400 hover:text-white" aria-label="Go back">
+          <ArrowLeft size={20} />
+        </button>
+        <h2 className="text-2xl font-bold text-white flex items-center gap-3">
+          <span className="p-2 rounded-xl bg-orange-500/20"><Plus size={20} className="text-orange-500" /></span>
+          New Album
+        </h2>
+      </div>
 
       <form onSubmit={handleSubmit} className="space-y-6 bg-[#1a1a2e] rounded-2xl p-6 border border-white/5">
         {/* Cover Art */}

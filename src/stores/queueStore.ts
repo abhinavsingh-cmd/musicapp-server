@@ -1,6 +1,5 @@
 import { create } from 'zustand';
 import { Song } from '../types/music';
-import { getRecommendations, preloadSongs } from '../services/recommendationService';
 
 const QUEUE_KEY = 'playback-queue';
 const MAX_RECENT = 50;
@@ -86,8 +85,8 @@ export interface QueueState {
   clearRecent: () => void;
 
   ensureQueueSize: () => Promise<void>;
-  preloadNextSongs: () => void;
-  appendRecommendations: (songs: Song[]) => void;
+  preloadNextSongs: () => Promise<void>;
+  appendRecommendations: (songs: Song[]) => Promise<void>;
 }
 
 const saved = loadQueue();
@@ -172,8 +171,13 @@ export const useQueueStore = create<QueueState>((set, get) => ({
   },
 
   previousSong: async () => {
-    const { queue, currentIndex, isShuffled } = get();
+    const { queue, currentIndex, isShuffled, repeatMode } = get();
     if (queue.length === 0) return null;
+
+    if (repeatMode === 'one') {
+      const song = queue[currentIndex];
+      return song;
+    }
 
     let prevIndex: number;
     if (isShuffled) {
@@ -321,6 +325,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
     set({ isFetchingRecommendations: true });
     
     try {
+      const { getRecommendations } = await import('../services/recommendationService');
       const currentSong = queue[currentIndex];
       const excludeIds = new Set(queue.map(s => s.id));
       
@@ -335,24 +340,27 @@ export const useQueueStore = create<QueueState>((set, get) => ({
       }
     } catch (error) {
       console.error('Failed to fetch recommendations:', error);
-      const fallback = await getRecommendations({ limit: MIN_QUEUE_SIZE, excludeIds: new Set(queue.map(s => s.id)) });
-      if (fallback.length > 0) {
-        get().appendRecommendations(fallback);
+      try {
+        const { getRecommendations } = await import('../services/recommendationService');
+        const fallback = await getRecommendations({ limit: MIN_QUEUE_SIZE, excludeIds: new Set(queue.map(s => s.id)) });
+        if (fallback.length > 0) {
+          get().appendRecommendations(fallback);
+        }
+      } catch (fallbackError) {
+        console.error('Fallback recommendations also failed:', fallbackError);
       }
     } finally {
       set({ isFetchingRecommendations: false });
     }
   },
 
-  preloadNextSongs: () => {
+  preloadNextSongs: async () => {
     const { queue, currentIndex } = get();
-    const nextSongs = queue.slice(currentIndex + 1, currentIndex + 4);
-    if (nextSongs.length > 0) {
-      preloadSongs(nextSongs, 3);
-    }
+    const { preloadNextSongs: preload } = await import('../services/preloadService');
+    preload(queue, currentIndex, { count: 3 });
   },
 
-  appendRecommendations: (songs: Song[]) => {
+  appendRecommendations: async (songs: Song[]) => {
     const { queue } = get();
     const existingIds = new Set(queue.map(s => s.id));
     const newSongs = songs.filter(s => !existingIds.has(s.id));
@@ -360,7 +368,9 @@ export const useQueueStore = create<QueueState>((set, get) => ({
     if (newSongs.length > 0) {
       set((s) => ({ queue: [...s.queue, ...newSongs] }));
       schedulePersist(get());
-      preloadSongs(newSongs.slice(0, 3), 3);
+      const { preloadNextSongs: preload } = await import('../services/preloadService');
+      const newIdx = get().currentIndex;
+      preload(get().queue, newIdx, { count: 3 });
     }
   },
 }));

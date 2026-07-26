@@ -1,15 +1,16 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useGoBack } from '../hooks/useGoBack';
 import { useAudioStore } from '../stores/audioStore';
 import { usePlaylistStore } from '../stores/playlistStore';
+import { useSongsStore } from '../stores/songsStore';
 import { SongTable } from '../features/library/SongTable';
 import { AlbumGrid } from '../features/album/AlbumGrid';
 import { PlaylistCard } from '../features/playlist/PlaylistCard';
 import { cn } from '../utils/cn';
-import { Search, List, Grid, Plus, Music2 } from 'lucide-react';
+import { Search, List, Grid, Plus, Music2, ArrowLeft } from 'lucide-react';
 import { Album, Song, Playlist } from '../types/music';
 import { AnimatePresence, motion } from 'framer-motion';
-import { fetchSongs } from '../services/musicApi';
 
 const tabs = [
   { key: 'songs' as const, label: 'Songs' },
@@ -21,15 +22,15 @@ export const LibraryPage: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [activeTab, setActiveTab] = useState<'songs' | 'albums' | 'playlists'>('songs');
   const [viewMode, setViewMode] = useState<'list' | 'grid'>('list');
-  const [songs, setSongs] = useState<Song[]>([]);
-  const [loading, setLoading] = useState(true);
+  const songs = useSongsStore((s) => s.songs);
+  const loading = useSongsStore((s) => s.loading);
+  const ensureLoaded = useSongsStore((s) => s.ensureLoaded);
   const loadSong = useAudioStore((s) => s.loadSong);
   const userPlaylists = usePlaylistStore((s) => s.playlists);
   const navigate = useNavigate();
+  const goBack = useGoBack();
 
-  useEffect(() => {
-    fetchSongs().then(s => { setSongs(s); setLoading(false); }).catch(() => setLoading(false));
-  }, []);
+  useEffect(() => { ensureLoaded(); }, [ensureLoaded]);
 
   const filteredSongs = useMemo(() => songs.filter(song =>
     (song.title || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -51,7 +52,7 @@ export const LibraryPage: React.FC = () => {
           id: `lib-album-${i}`, title: `${artist} Collection`, artist,
           coverArt: artistSongs[0].coverArt, releaseYear: 2024,
           songIds: artistSongs.map(s => s.id), trackCount: artistSongs.length,
-          duration: artistSongs.reduce((sum, s) => sum + s.duration, 0),
+          duration: artistSongs.reduce((sum, s) => sum + (s.duration || 0), 0),
           genre: artistSongs[0].genre,
         });
         i++;
@@ -80,6 +81,12 @@ export const LibraryPage: React.FC = () => {
 
   return (
     <div className="p-6 space-y-6">
+      <div className="flex items-center gap-3">
+        <button onClick={goBack} className="p-2 rounded-xl hover:bg-white/5 transition-colors text-gray-400 hover:text-white" aria-label="Go back">
+          <ArrowLeft size={20} />
+        </button>
+        <h1 className="text-2xl font-bold text-white">Your Library</h1>
+      </div>
       <div className="claymorphism p-6 rounded-2xl">
         <div className="relative max-w-2xl mx-auto">
           <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 text-gray-400" size={20} />
@@ -132,13 +139,33 @@ export const LibraryPage: React.FC = () => {
           {activeTab === 'songs' && (
             <div className="claymorphism p-6 rounded-2xl">
               <h2 className="text-lg font-bold text-white mb-4">{filteredSongs.length} songs</h2>
-              <SongTable songs={filteredSongs} />
+              {filteredSongs.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-12 text-center">
+                  <div className="w-16 h-16 rounded-2xl bg-white/5 flex items-center justify-center mb-3">
+                    <Music2 size={28} className="text-gray-600" />
+                  </div>
+                  <p className="text-gray-400 font-medium mb-1">{searchQuery ? 'No songs match your search' : 'No songs in your library'}</p>
+                  <p className="text-gray-600 text-sm">{searchQuery ? 'Try a different search term' : 'Browse Discover or Charts to find music'}</p>
+                </div>
+              ) : (
+                <SongTable songs={filteredSongs} />
+              )}
             </div>
           )}
           {activeTab === 'albums' && (
             <div className="claymorphism p-6 rounded-2xl">
               <h2 className="text-lg font-bold text-white mb-4">{filteredAlbums.length} albums</h2>
-              <AlbumGrid albums={filteredAlbums} onPlayAlbum={handlePlayAlbum} />
+              {filteredAlbums.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-12 text-center">
+                  <div className="w-16 h-16 rounded-2xl bg-white/5 flex items-center justify-center mb-3">
+                    <Grid size={28} className="text-gray-600" />
+                  </div>
+                  <p className="text-gray-400 font-medium mb-1">{searchQuery ? 'No albums match your search' : 'No albums yet'}</p>
+                  <p className="text-gray-600 text-sm">{searchQuery ? 'Try a different search term' : 'Create an album to organize your music'}</p>
+                </div>
+              ) : (
+                <AlbumGrid albums={filteredAlbums} onPlayAlbum={handlePlayAlbum} />
+              )}
             </div>
           )}
           {activeTab === 'playlists' && (

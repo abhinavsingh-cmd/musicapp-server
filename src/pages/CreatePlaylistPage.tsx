@@ -1,9 +1,9 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useGoBack } from '../hooks/useGoBack';
 import { Plus, Image, Globe, Users, ArrowLeft, X, Check, Music2 } from 'lucide-react';
 import { usePlaylistStore } from '../stores/playlistStore';
-import { fetchSongs } from '../services/musicApi';
-import { Song } from '../types/music';
+import { useSongsStore } from '../stores/songsStore';
 
 export const CreatePlaylistPage: React.FC = () => {
   const [name, setName] = useState('');
@@ -15,15 +15,15 @@ export const CreatePlaylistPage: React.FC = () => {
   const [selectedSongs, setSelectedSongs] = useState<string[]>([]);
   const [showSongPicker, setShowSongPicker] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [allSongs, setAllSongs] = useState<Song[]>([]);
-  const [loading, setLoading] = useState(true);
+  const allSongs = useSongsStore((s) => s.songs);
+  const loading = useSongsStore((s) => s.loading);
+  const ensureLoaded = useSongsStore((s) => s.ensureLoaded);
   const fileRef = useRef<HTMLInputElement>(null);
   const navigate = useNavigate();
+  const goBack = useGoBack();
   const createPlaylist = usePlaylistStore((s) => s.createPlaylist);
 
-  useEffect(() => {
-    fetchSongs().then(s => { setAllSongs(s); setLoading(false); }).catch(() => setLoading(false));
-  }, []);
+  useEffect(() => { ensureLoaded(); }, [ensureLoaded]);
 
   const filteredSongs = useMemo(() => allSongs.filter(s =>
     (s.title || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -77,7 +77,7 @@ export const CreatePlaylistPage: React.FC = () => {
   return (
     <div className="p-6 max-w-lg mx-auto">
       <button
-        onClick={() => navigate(-1)}
+        onClick={goBack}
         className="flex items-center gap-2 text-gray-400 hover:text-white mb-6 transition-colors"
       >
         <ArrowLeft size={18} />

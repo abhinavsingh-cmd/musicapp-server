@@ -2,6 +2,8 @@ import { create } from 'zustand';
 import { lyricsService, LyricLine } from '../services/lyricsService';
 import { findActiveLine } from '../utils/lrcParser';
 
+const LYRICS_TIMEOUT_MS = 10_000;
+
 export type { LyricLine } from '../utils/lrcParser';
 
 export interface LyricsStore {
@@ -28,8 +30,12 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
 
     set({ loading: true, error: null, lyrics: [], currentLine: -1, songId });
     try {
-      const lyrics = await lyricsService.fetchLyrics(title, artist);
-      // Guard: song may have changed while fetching
+      const lyrics = await Promise.race([
+        lyricsService.fetchLyrics(title, artist),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Lyrics timeout')), LYRICS_TIMEOUT_MS)
+        ),
+      ]);
       if (get().songId !== songId) return;
       set({ lyrics, loading: false });
     } catch {

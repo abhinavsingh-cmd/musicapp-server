@@ -1,11 +1,31 @@
 import React, { useState, useEffect, useMemo, useCallback, memo } from 'react';
 import { useAudioStore } from '../stores/audioStore';
+import { useSongsStore } from '../stores/songsStore';
 import { SongTable } from '../features/library/SongTable';
 import { PlaylistDetail } from '../features/playlist/PlaylistDetail';
 import { Song, Playlist } from '../types/music';
-import { fetchSongs, fetchYouTubeTrending } from '../services/musicApi';
+import { fetchYouTubeTrending } from '../services/musicApi';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Disc3, TrendingUp, Play, Music, Sparkles, Headphones, Radio, Zap, Globe, Loader2 } from 'lucide-react';
+import { Disc3, TrendingUp, Play, Music, Sparkles, Radio, Zap, Globe, RefreshCw } from 'lucide-react';
+
+// Trending cache: skip refetch if fetched within last 5 minutes
+let lastTrendingFetchTime = 0;
+const TRENDING_CACHE_MS = 30 * 60 * 1000;
+
+// --- Startup perf ---
+if (import.meta.env.DEV) {
+  performance.mark('home_enter');
+  requestAnimationFrame(() => {
+    performance.mark('home_first_frame');
+    performance.measure('home_enter→first_frame', 'home_enter', 'home_first_frame');
+    const m = performance.getEntriesByName('home_enter→first_frame')[0];
+    console.log(`[Perf] Home enter → First Frame: ${m?.duration?.toFixed(0)}ms`);
+  });
+}
+
+const SkeletonBlock: React.FC<{ className?: string }> = ({ className }) => (
+  <div className={`animate-pulse rounded-xl bg-white/5 ${className || ''}`} />
+);
 
 const HERO_GRADIENTS = [
   'from-violet-600 via-fuchsia-500 to-orange-400',
@@ -13,21 +33,6 @@ const HERO_GRADIENTS = [
   'from-blue-600 via-indigo-500 to-cyan-400',
   'from-rose-600 via-pink-500 to-violet-500',
 ];
-
-const container = {
-  hidden: { opacity: 0 },
-  show: {
-    opacity: 1,
-    transition: {
-      staggerChildren: 0.1,
-    },
-  },
-};
-
-const item = {
-  hidden: { opacity: 0, y: 20 },
-  show: { opacity: 1, y: 0, transition: { type: 'spring' as const, stiffness: 300, damping: 24 } },
-};
 
 const HeroSection = memo(({ songCount, onPlayAll, onPlayTrending }: { songCount: number; onPlayAll: () => void; onPlayTrending: () => void }) => {
   const [heroIdx, setHeroIdx] = useState(0);
@@ -126,26 +131,86 @@ const HeroSection = memo(({ songCount, onPlayAll, onPlayTrending }: { songCount:
 HeroSection.displayName = 'HeroSection';
 
 export const HomePage: React.FC = () => {
-  const [songs, setSongs] = useState<Song[]>([]);
+  const songs = useSongsStore((s) => s.songs);
+  const ensureLoaded = useSongsStore((s) => s.ensureLoaded);
   const [trending, setTrending] = useState<Song[]>([]);
-  const [loading, setLoading] = useState(true);
   const [trendingLoading, setTrendingLoading] = useState(true);
+  const [trendingSource, setTrendingSource] = useState<string>('none');
+  const [trendingLastUpdated, setTrendingLastUpdated] = useState<number | null>(null);
+  const [trendingError, setTrendingError] = useState(false);
   const [selectedPlaylist, setSelectedPlaylist] = useState<Playlist | null>(null);
   const [selectedArtist, setSelectedArtist] = useState<string | null>(null);
   const loadSong = useAudioStore((s) => s.loadSong);
 
+  // Fire-and-forget: kick off background fetches, never block render
   useEffect(() => {
-    fetchSongs().then(s => { setSongs(s); setLoading(false); }).catch(() => setLoading(false));
-  }, []);
+    let cancelled = false;
 
-  useEffect(() => {
-    setTrendingLoading(true);
-    fetchYouTubeTrending()
-      .then(songs => {
-        setTrending(songs);
+    // Safety: force loading off after 10s no matter what
+    const safetyTimer = setTimeout(() => {
+      if (!cancelled) setTrendingLoading(false);
+    }, 10_000);
+
+    // Songs are already loaded from localStorage cache — just ensure API fetch happens in background
+    ensureLoaded().catch(() => {});
+
+    // Trending: defer to idle time so it never competes with first paint
+    const startTrending = () => {
+      if (cancelled) return;
+      const now = Date.now();
+      if (now - lastTrendingFetchTime >= TRENDING_CACHE_MS) {
+        fetchYouTubeTrending()
+          .then(result => {
+            if (cancelled) return;
+            lastTrendingFetchTime = Date.now();
+            setTrending(result.songs);
+            setTrendingSource(result.source);
+            setTrendingLastUpdated(result.lastUpdated);
+            setTrendingError(result.songs.length === 0);
+            setTrendingLoading(false);
+          })
+          .catch(() => {
+            if (!cancelled) {
+              setTrendingLoading(false);
+              setTrendingError(true);
+            }
+          });
+      } else {
         setTrendingLoading(false);
+      }
+    };
+
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(startTrending, { timeout: 2000 });
+    } else {
+      setTimeout(startTrending, 500);
+    }
+
+    return () => { cancelled = true; clearTimeout(safetyTimer); };
+  }, [ensureLoaded]);
+
+  const loadTrending = useCallback(() => {
+    let cancelled = false;
+    setTrendingLoading(true);
+    setTrendingError(false);
+    fetchYouTubeTrending()
+      .then(result => {
+        if (!cancelled) {
+          lastTrendingFetchTime = Date.now();
+          setTrending(result.songs);
+          setTrendingSource(result.source);
+          setTrendingLastUpdated(result.lastUpdated);
+          setTrendingLoading(false);
+          setTrendingError(result.songs.length === 0);
+        }
       })
-      .catch(() => setTrendingLoading(false));
+      .catch(() => {
+        if (!cancelled) {
+          setTrendingLoading(false);
+          setTrendingError(true);
+        }
+      });
+    return () => { cancelled = true; };
   }, []);
 
   const playlists = useMemo(() => {
@@ -213,53 +278,14 @@ export const HomePage: React.FC = () => {
     setSelectedPlaylist(playlist);
   }, []);
 
-  if (loading) {
-    return (
-      <div className="flex-1 flex items-center justify-center">
-        <motion.div 
-          initial={{ opacity: 0, scale: 0.9 }}
-          animate={{ opacity: 1, scale: 1 }}
-          className="text-center"
-        >
-          <div className="relative mx-auto w-20 h-20">
-            <motion.div 
-              animate={{ rotate: 360 }}
-              transition={{ duration: 2, repeat: Infinity, ease: 'linear' }}
-              className="w-20 h-20 rounded-full bg-gradient-to-br from-violet-500 to-fuchsia-500"
-              style={{ filter: 'blur(1px)' }}
-            />
-            <div className="absolute inset-0 flex items-center justify-center">
-              <Headphones className="text-white" size={28} />
-            </div>
-            <motion.div 
-              animate={{ scale: [1, 1.2, 1] }}
-              transition={{ duration: 2, repeat: Infinity }}
-              className="absolute inset-0 rounded-full bg-gradient-to-br from-violet-500 to-fuchsia-500 opacity-50 blur-xl"
-            />
-          </div>
-          <motion.p 
-            animate={{ opacity: [0.5, 1, 0.5] }}
-            transition={{ duration: 2, repeat: Infinity }}
-            className="mt-6 text-gray-400 font-medium"
-          >
-            Loading your music...
-          </motion.p>
-        </motion.div>
-      </div>
-    );
-  }
-
   return (
     <div className="pb-8">
       <HeroSection songCount={songs.length} onPlayAll={handlePlayAll} onPlayTrending={handlePlayTrending} />
 
-      <motion.div 
-        variants={container}
-        initial="hidden"
-        animate="show"
-        className="px-4 sm:px-6 space-y-8 sm:space-y-10 mt-6 sm:mt-8"
-      >
-        <motion.section variants={item}>
+      <div className="px-4 sm:px-6 space-y-8 sm:space-y-10 mt-6 sm:mt-8">
+
+        {/* Trending section — renders immediately with skeleton, fills in when ready */}
+        <section>
           <div className="flex items-center justify-between mb-4 sm:mb-6">
             <h2 className="text-xl sm:text-2xl font-bold text-white flex items-center gap-2 sm:gap-3">
               <span className="p-2 sm:p-2.5 rounded-xl sm:rounded-2xl bg-gradient-to-br from-red-500 to-orange-500 shadow-lg shadow-red-500/25">
@@ -267,15 +293,47 @@ export const HomePage: React.FC = () => {
               </span>
               Trending Now
             </h2>
-            <span className="text-xs text-gray-400 flex items-center gap-1">
-              <Globe size={12} className="text-red-400" />
-              Live from YouTube
-            </span>
+            <div className="flex items-center gap-3">
+              {trendingLastUpdated && !trendingLoading && (
+                <span className="text-xs text-gray-500 flex items-center gap-1">
+                  <Globe size={12} className="text-red-400" />
+                  {trendingSource === 'youtube_music' ? 'Live from YouTube' :
+                   trendingSource === 'charts' ? 'Official Charts' :
+                   trendingSource === 'cache' ? 'Cached' : 'Fallback'}
+                  {' · '}
+                  {(() => {
+                    const diff = Date.now() - trendingLastUpdated;
+                    if (diff < 60000) return 'Just now';
+                    if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+                    return `${Math.floor(diff / 3600000)}h ago`;
+                  })()}
+                </span>
+              )}
+              <button
+                onClick={loadTrending}
+                disabled={trendingLoading}
+                className="p-1.5 rounded-lg hover:bg-white/5 transition-colors text-gray-400 hover:text-white disabled:opacity-50"
+                title="Refresh trending"
+              >
+                <RefreshCw size={14} className={trendingLoading ? 'animate-spin' : ''} />
+              </button>
+            </div>
           </div>
           {trendingLoading ? (
-            <div className="liquid-glass rounded-2xl p-8 text-center text-gray-400">
-              <Loader2 size={24} className="animate-spin mx-auto mb-2 text-violet-400" />
-              Fetching trending songs...
+            <div className="space-y-2">
+              {[1, 2, 3, 4, 5].map(i => (
+                <SkeletonBlock key={i} className="h-14 w-full rounded-xl" />
+              ))}
+            </div>
+          ) : trendingError ? (
+            <div className="liquid-glass rounded-2xl p-8 text-center">
+              <p className="text-red-400 mb-3">Could not load trending songs</p>
+              <button
+                onClick={loadTrending}
+                className="px-4 py-2 rounded-xl bg-violet-500/20 text-violet-400 hover:bg-violet-500/30 transition-colors text-sm font-medium"
+              >
+                Try again
+              </button>
             </div>
           ) : trending.length > 0 ? (
             <div className="liquid-glass rounded-xl sm:rounded-2xl p-1 sm:p-2">
@@ -283,12 +341,13 @@ export const HomePage: React.FC = () => {
             </div>
           ) : (
             <div className="liquid-glass rounded-2xl p-8 text-center text-gray-500">
-              Could not load trending songs
+              No trending data available
             </div>
           )}
-        </motion.section>
+        </section>
 
-        <motion.section variants={item}>
+        {/* Playlists section — renders when songs load */}
+        <section>
           <div className="flex items-center justify-between mb-4 sm:mb-6">
             <h2 className="text-xl sm:text-2xl font-bold text-white flex items-center gap-2 sm:gap-3">
               <span className="p-2 sm:p-2.5 rounded-xl sm:rounded-2xl bg-gradient-to-br from-violet-500 to-fuchsia-500 shadow-lg shadow-violet-500/25">
@@ -297,42 +356,39 @@ export const HomePage: React.FC = () => {
               Playlists
             </h2>
           </div>
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
-            {playlists.map((pl) => (
-              <motion.div
-                key={pl.id}
-                variants={item}
-                whileHover={{ scale: 1.03, y: -5 }}
-                whileTap={{ scale: 0.97 }}
-                onClick={() => handlePlayPlaylist(pl)}
-                className="group cursor-pointer liquid-glass rounded-xl sm:rounded-2xl p-3 sm:p-4 transition-all duration-300"
-              >
-                <div className={`w-full aspect-square rounded-lg sm:rounded-xl bg-gradient-to-br ${pl.gradient} mb-2 sm:mb-3 flex items-center justify-center shadow-lg relative overflow-hidden`}>
-                  <motion.span 
-                    animate={{ rotate: [0, 5, -5, 0] }}
-                    transition={{ duration: 4, repeat: Infinity, ease: 'easeInOut' }}
-                    className="text-2xl sm:text-4xl"
-                  >
-                    {pl.emoji}
-                  </motion.span>
-                  <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors flex items-center justify-center">
-                    <motion.div 
-                      whileHover={{ scale: 1.1 }}
-                      className="w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-white/90 flex items-center justify-center opacity-0 group-hover:opacity-100 scale-75 group-hover:scale-100 transition-all duration-300 shadow-xl"
-                    >
-                      <Play size={16} fill="currentColor" className="text-gray-900 ml-0.5 sm:w-5 sm:h-5" />
-                    </motion.div>
+          {playlists.length === 0 ? (
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
+              {[1, 2, 3, 4].map(i => (
+                <SkeletonBlock key={i} className="aspect-square rounded-2xl" />
+              ))}
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
+              {playlists.map((pl) => (
+                <div
+                  key={pl.id}
+                  onClick={() => handlePlayPlaylist(pl)}
+                  className="group cursor-pointer liquid-glass rounded-xl sm:rounded-2xl p-3 sm:p-4 transition-all duration-300 hover:scale-[1.03] hover:-translate-y-1"
+                >
+                  <div className={`w-full aspect-square rounded-lg sm:rounded-xl bg-gradient-to-br ${pl.gradient} mb-2 sm:mb-3 flex items-center justify-center shadow-lg relative overflow-hidden`}>
+                    <span className="text-2xl sm:text-4xl">{pl.emoji}</span>
+                    <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors flex items-center justify-center">
+                      <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-white/90 flex items-center justify-center opacity-0 group-hover:opacity-100 scale-75 group-hover:scale-100 transition-all duration-300 shadow-xl">
+                        <Play size={16} fill="currentColor" className="text-gray-900 ml-0.5 sm:w-5 sm:h-5" />
+                      </div>
+                    </div>
                   </div>
+                  <h3 className="font-bold text-white text-xs sm:text-sm truncate">{pl.name}</h3>
+                  <p className="text-[10px] sm:text-xs text-gray-400 mt-0.5">{pl.trackCount} songs</p>
                 </div>
-                <h3 className="font-bold text-white text-xs sm:text-sm truncate">{pl.name}</h3>
-                <p className="text-[10px] sm:text-xs text-gray-400 mt-0.5">{pl.trackCount} songs</p>
-              </motion.div>
-            ))}
-          </div>
-        </motion.section>
+              ))}
+            </div>
+          )}
+        </section>
 
+        {/* Top Artists section */}
         {topArtists.length > 0 && (
-          <motion.section variants={item}>
+          <section>
             <div className="flex items-center justify-between mb-4 sm:mb-6">
               <h2 className="text-xl sm:text-2xl font-bold text-white flex items-center gap-2 sm:gap-3">
                 <span className="p-2 sm:p-2.5 rounded-xl sm:rounded-2xl bg-gradient-to-br from-orange-500 to-red-500 shadow-lg shadow-orange-500/25">
@@ -377,10 +433,11 @@ export const HomePage: React.FC = () => {
                 </div>
               ))}
             </div>
-          </motion.section>
+          </section>
         )}
 
-        <motion.section variants={item}>
+        {/* All Songs section */}
+        <section>
           <div className="flex items-center justify-between mb-4 sm:mb-6">
             <h2 className="text-xl sm:text-2xl font-bold text-white flex items-center gap-2 sm:gap-3">
               <span className="p-2 sm:p-2.5 rounded-xl sm:rounded-2xl bg-gradient-to-br from-emerald-500 to-teal-500 shadow-lg shadow-emerald-500/25">
@@ -390,11 +447,19 @@ export const HomePage: React.FC = () => {
             </h2>
             <span className="text-xs sm:text-sm text-gray-400 font-medium">{filteredSongs.length} tracks</span>
           </div>
-          <div className="liquid-glass rounded-xl sm:rounded-2xl p-1 sm:p-2">
-            <SongTable songs={filteredSongs} />
-          </div>
-        </motion.section>
-      </motion.div>
+          {filteredSongs.length === 0 ? (
+            <div className="space-y-2">
+              {[1, 2, 3, 4, 5, 6].map(i => (
+                <SkeletonBlock key={i} className="h-14 w-full rounded-xl" />
+              ))}
+            </div>
+          ) : (
+            <div className="liquid-glass rounded-xl sm:rounded-2xl p-1 sm:p-2">
+              <SongTable songs={filteredSongs} />
+            </div>
+          )}
+        </section>
+      </div>
 
       <AnimatePresence>
         {selectedPlaylist && (

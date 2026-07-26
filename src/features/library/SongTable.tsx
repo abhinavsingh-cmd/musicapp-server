@@ -1,9 +1,12 @@
 import React, { memo, useCallback, useRef, useState, useEffect, useMemo } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useAudioStore } from '../../stores/audioStore';
 import { useDownloadsStore } from '../../stores/downloadsStore';
 import { Song } from '../../types/music';
 import { cn } from '../../utils/cn';
-import { Heart, Play, Pause, Clock, Download, Check, Loader2 } from 'lucide-react';
+import { Heart, Play, Pause, Clock, Download, Check, X } from 'lucide-react';
+import CachedImage from '../../components/CachedImage';
+import { useSongContextMenu } from '../../components/SongContextMenu';
 
 interface SongTableProps {
   songs: Song[];
@@ -24,19 +27,24 @@ Equalizer.displayName = 'Equalizer';
 
 const fmt = (s: number) => Math.floor(s / 60) + ':' + Math.floor(s % 60).toString().padStart(2, '0');
 
-const SongRow = memo(({ song, index, isActive, isCurrentlyPlaying, onClick, onFavToggle, isFav, isDownloaded, isDownloading, onDownload }: {
-  song: Song; index: number; isActive: boolean; isCurrentlyPlaying: boolean;
+const SongRow = memo(({ song, index, isActive, isCurrentlyPlaying, isLoading, onClick, onFavToggle, isFav, isDownloaded, isDownloading, onDownload, onCancelDownload, onContextMenu, onTouchStart }: {
+  song: Song; index: number; isActive: boolean; isCurrentlyPlaying: boolean; isLoading: boolean;
   onClick: () => void; onFavToggle: () => void; isFav: boolean;
-  isDownloaded: boolean; isDownloading: boolean; onDownload: () => void;
+  isDownloaded: boolean; isDownloading: boolean; onDownload: () => void; onCancelDownload: () => void;
+  onContextMenu: (e: React.MouseEvent) => void; onTouchStart: (e: React.TouchEvent) => void;
 }) => {
   return (
     <div
       className={cn("grid grid-cols-12 gap-4 px-6 py-2 text-sm cursor-pointer song-row", isActive && "bg-violet-500/10", "group transition-colors duration-100")}
       style={{ height: ROW_HEIGHT }}
       onClick={onClick}
+      onContextMenu={onContextMenu}
+      onTouchStart={onTouchStart}
     >
       <div className="col-span-1 flex items-center">
-        {isCurrentlyPlaying ? <Equalizer /> : isActive ? <div className="text-violet-400"><Pause size={16} /></div> : (
+        {isCurrentlyPlaying ? <Equalizer /> : isActive && isLoading ? (
+          <div className="w-4 h-4 border-2 border-violet-400 border-t-transparent rounded-full animate-spin" />
+        ) : isActive ? <div className="text-violet-400"><Pause size={16} /></div> : (
           <div className="text-gray-500 group-hover:text-violet-400 transition-colors">
             <span className="group-hover:hidden">{index + 1}</span>
             <Play size={14} className="hidden group-hover:block" />
@@ -44,7 +52,7 @@ const SongRow = memo(({ song, index, isActive, isCurrentlyPlaying, onClick, onFa
         )}
       </div>
       <div className="col-span-5 flex items-center space-x-3 min-w-0">
-        <img src={song.coverArt} alt="" loading="lazy" className={cn("w-10 h-10 rounded-lg object-cover flex-shrink-0 transition-all duration-200", isCurrentlyPlaying && "ring-2 ring-violet-500 ring-offset-1 ring-offset-[var(--color-bg)] shadow-md shadow-violet-500/20")} />
+        <CachedImage src={song.coverArt} alt="" className={cn("w-10 h-10 rounded-lg object-cover flex-shrink-0 transition-all duration-200", isCurrentlyPlaying && "ring-2 ring-violet-500 ring-offset-1 ring-offset-[var(--color-bg)] shadow-md shadow-violet-500/20")} />
         <div className="min-w-0">
           <div className={cn("font-medium truncate transition-colors", isActive ? "text-violet-400" : "text-white")}>{song.title}</div>
           <div className="text-sm text-gray-400 truncate">{song.artist}</div>
@@ -54,12 +62,12 @@ const SongRow = memo(({ song, index, isActive, isCurrentlyPlaying, onClick, onFa
       <div className="col-span-2 hidden sm:flex items-center text-sm text-gray-500"><Clock size={12} className="mr-1" />{fmt(song.duration)}</div>
       <div className="col-span-1 flex items-center justify-end gap-1">
         <button
-          onClick={(e) => { e.stopPropagation(); if (!isDownloaded && !isDownloading && song.youtubeId) onDownload(); }}
-          disabled={isDownloaded || isDownloading || !song.youtubeId}
+          onClick={(e) => { e.stopPropagation(); if (isDownloading) onCancelDownload(); else if (!isDownloaded) onDownload(); }}
+          disabled={isDownloaded && !isDownloading}
           className={cn("p-1.5 rounded-lg transition-all", isDownloaded ? "text-emerald-400 opacity-100" : isDownloading ? "text-violet-400 opacity-100" : "text-gray-500 opacity-0 group-hover:opacity-100 hover:text-violet-400 hover:bg-white/5")}
-          title={isDownloaded ? "Downloaded" : isDownloading ? "Downloading..." : "Download"}
+          title={isDownloaded ? "Downloaded" : isDownloading ? "Cancel download" : "Download"}
         >
-          {isDownloaded ? <Check size={14} /> : isDownloading ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+          {isDownloaded ? <Check size={14} /> : isDownloading ? <X size={14} /> : <Download size={14} />}
         </button>
         <button className={cn("transition-all duration-200 p-1.5 rounded-lg", isFav ? "text-red-500" : "text-gray-500 opacity-0 group-hover:opacity-100 hover:text-red-400 hover:bg-white/5")} onClick={(e) => { e.stopPropagation(); onFavToggle(); }}>
           <Heart size={14} fill={isFav ? "currentColor" : "none"} />
@@ -72,6 +80,7 @@ const SongRow = memo(({ song, index, isActive, isCurrentlyPlaying, onClick, onFa
     && prev.index === next.index
     && prev.isActive === next.isActive
     && prev.isCurrentlyPlaying === next.isCurrentlyPlaying
+    && prev.isLoading === next.isLoading
     && prev.isFav === next.isFav
     && prev.isDownloaded === next.isDownloaded
     && prev.isDownloading === next.isDownloading;
@@ -79,17 +88,26 @@ const SongRow = memo(({ song, index, isActive, isCurrentlyPlaying, onClick, onFa
 SongRow.displayName = 'SongRow';
 
 export const SongTable: React.FC<SongTableProps> = memo(({ songs, className }) => {
+  const navigate = useNavigate();
   const currentSongId = useAudioStore((s) => s.currentSong?.id ?? null);
   const isPlaying = useAudioStore((s) => s.isPlaying);
+  const isLoading = useAudioStore((s) => s.isLoading);
   const loadSong = useAudioStore((s) => s.loadSong);
   const togglePlayPause = useAudioStore((s) => s.togglePlayPause);
   const toggleFavorite = useAudioStore((s) => s.toggleFavorite);
   const favorites = useAudioStore((s) => s.favorites);
   const downloadSong = useDownloadsStore((s) => s.downloadSong);
+  const cancelDownload = useDownloadsStore((s) => s.cancelDownload);
   const downloads = useDownloadsStore((s) => s.downloads);
   const containerRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
+  const [containerHeight, setContainerHeight] = useState(600);
   const rafRef = useRef<number>(0);
+
+  const { handleContextMenu, handleLongPress, ContextMenu } = useSongContextMenu(
+    (artist) => navigate(`/search?q=${encodeURIComponent(artist)}`),
+    (album) => navigate(`/search?q=${encodeURIComponent(album)}`),
+  );
 
   const favSet = useMemo(() => new Set(favorites), [favorites]);
 
@@ -129,14 +147,21 @@ export const SongTable: React.FC<SongTableProps> = memo(({ songs, className }) =
     const el = containerRef.current;
     if (!el) return;
     el.addEventListener('scroll', handleScroll, { passive: true });
+    const observer = new ResizeObserver(entries => {
+      for (const entry of entries) {
+        setContainerHeight(entry.contentRect.height);
+      }
+    });
+    observer.observe(el);
     return () => {
       el.removeEventListener('scroll', handleScroll);
+      observer.disconnect();
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };
   }, [handleScroll]);
 
   const startIndex = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - BUFFER);
-  const visibleCount = Math.min(songs.length - startIndex, Math.ceil(600 / ROW_HEIGHT) + BUFFER * 2);
+  const visibleCount = Math.min(songs.length - startIndex, Math.ceil(containerHeight / ROW_HEIGHT) + BUFFER * 2);
   const visibleSongs = songs.slice(startIndex, startIndex + visibleCount);
 
   const handleRowClick = useCallback((song: Song, index: number) => {
@@ -168,15 +193,17 @@ export const SongTable: React.FC<SongTableProps> = memo(({ songs, className }) =
               const actualIndex = startIndex + i;
               const isActive = currentSongId === song.id;
               return (
-                <SongRow key={song.id} song={song} index={actualIndex} isActive={isActive} isCurrentlyPlaying={isActive && isPlaying}
+                <SongRow key={song.id} song={song} index={actualIndex} isActive={isActive} isCurrentlyPlaying={isActive && isPlaying} isLoading={isActive && isLoading}
                   onClick={() => handleRowClick(song, actualIndex)} onFavToggle={() => toggleFavorite(song.id)} isFav={favSet.has(song.id)}
                   isDownloaded={song.youtubeId ? downloadedSet.has(song.youtubeId) : false} isDownloading={song.youtubeId ? downloadingSet.has(song.youtubeId) : false}
-                  onDownload={() => downloadSong(song)} />
+                  onDownload={() => downloadSong(song)} onCancelDownload={() => song.youtubeId && cancelDownload(song.youtubeId)}
+                  onContextMenu={(e) => handleContextMenu(e, song)} onTouchStart={(e) => handleLongPress(e, song)} />
               );
             })}
           </div>
         </div>
       </div>
+      <ContextMenu />
     </div>
   );
 });

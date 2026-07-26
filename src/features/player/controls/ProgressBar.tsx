@@ -1,4 +1,4 @@
-import React, { memo, useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback } from 'react';
 import { useAudioStore } from '../../../stores/audioStore';
 import { cn } from '../../../utils/cn';
 
@@ -12,7 +12,7 @@ const formatTime = (seconds: number) => {
   return `${mins}:${secs.toString().padStart(2, '0')}`;
 };
 
-export const ProgressBar: React.FC<ProgressBarProps> = memo(({ className }) => {
+export const ProgressBar: React.FC<ProgressBarProps> = ({ className }) => {
   const progress = useAudioStore((s) => s.progress);
   const duration = useAudioStore((s) => s.duration);
   const seek = useAudioStore((s) => s.seek);
@@ -73,5 +73,5 @@ export const ProgressBar: React.FC<ProgressBarProps> = memo(({ className }) => {
       </div>
     </div>
   );
-});
+};
 ProgressBar.displayName = 'ProgressBar';

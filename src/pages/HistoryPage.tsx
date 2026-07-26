@@ -1,7 +1,8 @@
-import React, { useState, useRef, useCallback, memo } from 'react';
+import React, { useState, useRef, useCallback, useMemo, memo } from 'react';
+import { useGoBack } from '../hooks/useGoBack';
 import { useHistoryStore } from '../stores/historyStore';
 import { useAudioStore } from '../stores/audioStore';
-import { Clock, Trash2, Music, Play } from 'lucide-react';
+import { Clock, Trash2, Music, Play, ArrowLeft } from 'lucide-react';
 
 const ROW_HEIGHT = 64;
 const BUFFER = 5;
@@ -41,18 +42,24 @@ const HistoryRow = memo(({ entry, formatTime, onPlay, onRemove }: {
       <Trash2 size={14} />
     </button>
   </div>
-));
+), (prev, next) => {
+  return prev.entry.song.id === next.entry.song.id
+    && prev.entry.playedAt === next.entry.playedAt;
+});
 HistoryRow.displayName = 'HistoryRow';
 
-export const HistoryPage: React.FC = () => {
-  const history = useHistoryStore((s) => s.history) ?? [];
+export const EMPTY_HISTORY: never[] = [];
+
+const HistoryPage: React.FC = () => {
+  const goBack = useGoBack();
+  const history = useHistoryStore((s) => s.history) ?? EMPTY_HISTORY;
   const clearHistory = useHistoryStore((s) => s.clearHistory);
   const removeSong = useHistoryStore((s) => s.removeSong);
   const loadSong = useAudioStore((s) => s.loadSong);
   const [scrollTop, setScrollTop] = useState(0);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  const validHistory = history.filter(e => e && e.song);
+  const validHistory = useMemo(() => history.filter(e => e && e.song), [history]);
   const containerHeight = containerRef.current?.clientHeight || 600;
 
   const startIndex = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - BUFFER);
@@ -61,7 +68,11 @@ export const HistoryPage: React.FC = () => {
 
   const totalHeight = validHistory.length * ROW_HEIGHT;
 
+  const lastScrollRef = useRef(0);
   const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    const now = Date.now();
+    if (now - lastScrollRef.current < 16) return;
+    lastScrollRef.current = now;
     setScrollTop(e.currentTarget.scrollTop);
   }, []);
 
@@ -85,6 +96,9 @@ export const HistoryPage: React.FC = () => {
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
+          <button onClick={goBack} className="p-2 rounded-xl hover:bg-white/5 transition-colors text-gray-400 hover:text-white" aria-label="Go back">
+            <ArrowLeft size={20} />
+          </button>
           <div className="w-10 h-10 bg-gradient-to-br from-violet-500 to-fuchsia-500 rounded-xl flex items-center justify-center">
             <Clock size={20} className="text-white" />
           </div>

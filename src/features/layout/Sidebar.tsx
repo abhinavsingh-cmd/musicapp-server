@@ -26,6 +26,22 @@ interface SidebarProps {
   onClose?: () => void;
 }
 
+const routePreloadMap: Record<string, () => Promise<unknown>> = {
+  '/': () => import('../../pages/HomePage'),
+  '/search': () => import('../../pages/SearchPage'),
+  '/library': () => import('../../pages/LibraryPage'),
+  '/discover': () => import('../../pages/DiscoverPage'),
+  '/favorites': () => import('../../pages/FavoritesPage'),
+  '/charts': () => import('../../pages/ChartsPage'),
+  '/history': () => import('../../pages/HistoryPage'),
+  '/downloads': () => import('../../pages/DownloadsPage'),
+  '/settings': () => import('../../pages/SettingsPage'),
+  '/create-playlist': () => import('../../pages/CreatePlaylistPage'),
+  '/create-album': () => import('../../pages/CreateAlbumPage'),
+};
+
+const preloaded = new Set<string>();
+
 const navItems = [
   { icon: Home, label: 'Home', path: '/' },
   { icon: Search, label: 'Search', path: '/search' },
@@ -50,11 +66,19 @@ const NavItem = memo(function NavItem({ item, isActive, onClose }: {
 }) {
   const Icon = item.icon;
   
+  const handlePreload = () => {
+    if (!preloaded.has(item.path)) {
+      preloaded.add(item.path);
+      routePreloadMap[item.path]?.();
+    }
+  };
+
   return (
     <div key={item.path}>
       <Link
         to={item.path}
         onClick={onClose}
+        onMouseEnter={handlePreload}
         className={cn(
           "flex items-center space-x-3 px-3 py-2.5 rounded-xl transition-all duration-200 group relative overflow-hidden",
           isActive
@@ -163,7 +187,7 @@ export const Sidebar = memo(({ className, isOpen = true, onClose }: SidebarProps
     <AnimatePresence>
       {isOpen && (
         <motion.div
-          initial={{ x: -280, opacity: 0 }}
+          initial={false}
           animate={{ x: 0, opacity: 1 }}
           exit={{ x: -280, opacity: 0 }}
           transition={{ type: 'spring', stiffness: 300, damping: 30 }}

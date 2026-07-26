@@ -3,8 +3,8 @@ import { usePlaylistStore } from '../../stores/playlistStore';
 import { useAudioStore } from '../../stores/audioStore';
 import { useQueueStore } from '../../stores/queueStore';
 import { useDownloadsStore } from '../../stores/downloadsStore';
+import { useSongsStore } from '../../stores/songsStore';
 import { Playlist, Song } from '../../types/music';
-import { fetchSongs } from '../../services/musicApi';
 import { cn } from '../../utils/cn';
 import {
   DndContext,
@@ -133,14 +133,14 @@ const SortablePlaylistSongRow: React.FC<SortablePlaylistSongRowProps> = React.me
           <Heart size={14} fill={favorites.includes(song.id) ? "currentColor" : "none"} />
         </button>
         <button
-          onClick={(e) => { e.stopPropagation(); if (song.youtubeId && !isDownloadedFn(song.youtubeId) && !isDownloadingFn(song.youtubeId)) downloadSong(song); }}
-          disabled={!song.youtubeId || isDownloadedFn(song.youtubeId ?? '') || isDownloadingFn(song.youtubeId ?? '')}
+          onClick={(e) => { e.stopPropagation(); const key = song.youtubeId || song.id; if (isDownloadingFn(key)) return; if (!isDownloadedFn(key)) downloadSong(song); }}
+          disabled={isDownloadedFn(song.youtubeId || song.id) && !isDownloadingFn(song.youtubeId || song.id)}
           className={cn(
             "p-1.5 rounded-lg transition-all",
-            isDownloadedFn(song.youtubeId ?? '') ? "text-emerald-400" : isDownloadingFn(song.youtubeId ?? '') ? "text-violet-400" : "text-gray-500 opacity-0 group-hover:opacity-100 hover:text-violet-400"
+            isDownloadedFn(song.youtubeId || song.id) ? "text-emerald-400" : isDownloadingFn(song.youtubeId || song.id) ? "text-violet-400" : "text-gray-500 opacity-0 group-hover:opacity-100 hover:text-violet-400"
           )}
         >
-          {isDownloadedFn(song.youtubeId ?? '') ? <Check size={14} /> : isDownloadingFn(song.youtubeId ?? '') ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+          {isDownloadedFn(song.youtubeId || song.id) ? <Check size={14} /> : isDownloadingFn(song.youtubeId || song.id) ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
         </button>
         <button
           onClick={(e) => { e.stopPropagation(); onRemove(); }}
@@ -153,6 +153,39 @@ const SortablePlaylistSongRow: React.FC<SortablePlaylistSongRowProps> = React.me
   );
 });
 SortablePlaylistSongRow.displayName = 'SortablePlaylistSongRow';
+
+const PlaylistSongRowWrapper = React.memo(({ song, index, realIndex, isCurrent, isPlaying, playlistSongs, playlistId }: {
+  song: Song; index: number; realIndex: number; isCurrent: boolean; isPlaying: boolean; playlistSongs: Song[]; playlistId: string;
+}) => {
+  const loadSong = useAudioStore((s) => s.loadSong);
+  const togglePlayPause = useAudioStore((s) => s.togglePlayPause);
+  const currentSongId = useAudioStore((s) => s.currentSong?.id);
+  const removeSong = usePlaylistStore((s) => s.removeSong);
+
+  const handlePlay = React.useCallback(() => {
+    if (currentSongId === song.id) {
+      togglePlayPause();
+    } else {
+      loadSong(song, playlistSongs, realIndex);
+    }
+  }, [song, playlistSongs, realIndex, currentSongId, loadSong, togglePlayPause]);
+
+  const handleRemove = React.useCallback(() => {
+    removeSong(playlistId, song.id);
+  }, [playlistId, song.id, removeSong]);
+
+  return (
+    <SortablePlaylistSongRow
+      song={song}
+      index={index}
+      isCurrent={isCurrent}
+      isPlaying={isPlaying}
+      onPlay={handlePlay}
+      onRemove={handleRemove}
+    />
+  );
+});
+PlaylistSongRowWrapper.displayName = 'PlaylistSongRowWrapper';
 
 interface PlaylistDetailProps {
   playlist: Playlist;
@@ -169,16 +202,15 @@ export const PlaylistDetail: React.FC<PlaylistDetailProps> = ({ playlist, onClos
   const generateShareLink = usePlaylistStore((s) => s.generateShareLink);
   const exportPlaylist = usePlaylistStore((s) => s.exportPlaylist);
   const reorderSong = usePlaylistStore((s) => s.reorderSong);
-  const removeSong = usePlaylistStore((s) => s.removeSong);
   const loadSong = useAudioStore((s) => s.loadSong);
   const currentSong = useAudioStore((s) => s.currentSong);
   const isPlaying = useAudioStore((s) => s.isPlaying);
-  const togglePlayPause = useAudioStore((s) => s.togglePlayPause);
-  const [library, setLibrary] = useState<Song[]>([]);
+  const library = useSongsStore((s) => s.songs);
+  const ensureLoaded = useSongsStore((s) => s.ensureLoaded);
 
   useEffect(() => {
-    fetchSongs().then(setLibrary).catch(() => {});
-  }, []);
+    ensureLoaded();
+  }, [ensureLoaded]);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [isEditing, setIsEditing] = useState(false);
@@ -190,6 +222,11 @@ export const PlaylistDetail: React.FC<PlaylistDetailProps> = ({ playlist, onClos
   const [showImport, setShowImport] = useState(false);
   const [importSuccess, setImportSuccess] = useState<boolean | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    return () => { mountedRef.current = false; };
+  }, []);
 
   // Resolve songs from IDs
   const playlistSongs = useMemo(() => {
@@ -213,20 +250,20 @@ export const PlaylistDetail: React.FC<PlaylistDetailProps> = ({ playlist, onClos
 
   // ---- Handlers ----
 
-  const handlePlayAll = () => {
+  const handlePlayAll = React.useCallback(() => {
     if (playlistSongs.length > 0) {
       loadSong(playlistSongs[0], playlistSongs, 0);
     }
-  };
+  }, [playlistSongs, loadSong]);
 
-  const handleShufflePlay = () => {
+  const handleShufflePlay = React.useCallback(() => {
     if (playlistSongs.length > 0) {
       const qs = useQueueStore.getState();
       if (!qs.isShuffled) qs.toggleShuffle();
       const shuffled = [...playlistSongs].sort(() => 0.5 - Math.random());
       loadSong(shuffled[0], shuffled, 0);
     }
-  };
+  }, [playlistSongs, loadSong]);
 
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
@@ -236,10 +273,6 @@ export const PlaylistDetail: React.FC<PlaylistDetailProps> = ({ playlist, onClos
     if (oldIndex !== -1 && newIndex !== -1) {
       reorderSong(playlist.id, oldIndex, newIndex);
     }
-  };
-
-  const handleRemoveSong = (songId: string) => {
-    removeSong(playlist.id, songId);
   };
 
   const handleSaveEdit = () => {
@@ -265,7 +298,7 @@ export const PlaylistDetail: React.FC<PlaylistDetailProps> = ({ playlist, onClos
     const url = generateShareLink(playlist.id);
     navigator.clipboard.writeText(url).then(() => {
       setShowShareToast(true);
-      setTimeout(() => setShowShareToast(false), 2000);
+      setTimeout(() => { if (mountedRef.current) setShowShareToast(false); }, 2000);
     });
   };
 
@@ -284,7 +317,7 @@ export const PlaylistDetail: React.FC<PlaylistDetailProps> = ({ playlist, onClos
   const handleImport = () => {
     const ok = usePlaylistStore.getState().importPlaylist(importText);
     setImportSuccess(ok);
-    setTimeout(() => { setImportSuccess(null); setShowImport(false); setImportText(''); }, 1500);
+    setTimeout(() => { if (mountedRef.current) { setImportSuccess(null); setShowImport(false); setImportText(''); } }, 1500);
   };
 
   const handleCoverChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -306,7 +339,7 @@ export const PlaylistDetail: React.FC<PlaylistDetailProps> = ({ playlist, onClos
   return (
     <div className="min-h-screen bg-[#0a0a14]">
       {/* Header bar */}
-      <div className="sticky top-0 z-50 bg-[#0a0a14]/80 backdrop-blur-xl border-b border-white/5">
+      <div className="sticky top-0 z-50 bg-[#0a0a14]/95 border-b border-white/5">
         <div className="flex items-center gap-3 px-4 py-3">
           <button onClick={onClose} className="w-9 h-9 rounded-full bg-white/5 flex items-center justify-center hover:bg-white/10 transition-all">
             <ArrowLeft size={18} className="text-white" />
@@ -500,20 +533,15 @@ export const PlaylistDetail: React.FC<PlaylistDetailProps> = ({ playlist, onClos
                 {filteredSongs.map((song) => {
                   const realIndex = playlistSongs.indexOf(song);
                   return (
-                    <SortablePlaylistSongRow
+                    <PlaylistSongRowWrapper
                       key={song.id + '-' + realIndex}
                       song={song}
                       index={realIndex}
+                      realIndex={realIndex}
                       isCurrent={currentSong?.id === song.id}
                       isPlaying={currentSong?.id === song.id && isPlaying}
-                      onPlay={() => {
-                        if (currentSong?.id === song.id) {
-                          togglePlayPause();
-                        } else {
-                          loadSong(song, playlistSongs, realIndex);
-                        }
-                      }}
-                      onRemove={() => handleRemoveSong(song.id)}
+                      playlistSongs={playlistSongs}
+                      playlistId={playlist.id}
                     />
                   );
                 })}

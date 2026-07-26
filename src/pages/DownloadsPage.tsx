@@ -1,26 +1,43 @@
-import React, { useEffect, useMemo } from 'react';
+import React, { useEffect, useMemo, useCallback } from 'react';
+import { useGoBack } from '../hooks/useGoBack';
 import { useDownloadsStore } from '../stores/downloadsStore';
 import { useAudioStore } from '../stores/audioStore';
 import { Song } from '../types/music';
-import { Download, Trash2, Play, HardDrive, Loader2, WifiOff } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { Download, Trash2, Play, HardDrive, Loader2, WifiOff, ArrowLeft, X, RotateCcw, AlertCircle } from 'lucide-react';
 
-export const DownloadsPage: React.FC = () => {
-  const downloads = useDownloadsStore((s) => s.downloads) ?? [];
+function formatSize(bytes: number): string {
+  return bytes >= 1048576 ? (bytes / 1048576).toFixed(1) + ' MB' : (bytes / 1024).toFixed(0) + ' KB';
+}
+
+function formatDuration(s: number): string {
+  return Math.floor(s / 60) + ':' + Math.floor(s % 60).toString().padStart(2, '0');
+}
+
+const EMPTY_DOWNLOADS: never[] = [];
+const EMPTY_MAP: Record<string, unknown> = {};
+const EMPTY_SET = new Set<string>();
+
+const DownloadsPage: React.FC = () => {
+  const goBack = useGoBack();
+  const downloads = useDownloadsStore((s) => s.downloads) ?? EMPTY_DOWNLOADS;
   const loading = useDownloadsStore((s) => s.loading);
   const loadDownloads = useDownloadsStore((s) => s.loadDownloads);
   const removeSong = useDownloadsStore((s) => s.removeSong);
+  const cancelDownload = useDownloadsStore((s) => s.cancelDownload);
+  const retryDownload = useDownloadsStore((s) => s.retryDownload);
+  const failedDownloads = useDownloadsStore((s) => s.failedDownloads);
+  const clearFailed = useDownloadsStore((s) => s.clearFailed);
   const isOnline = useDownloadsStore((s) => s.isOnline);
   const cacheSize = useDownloadsStore((s) => s.cacheSize);
-  const progressMap = useDownloadsStore((s) => s.progressMap) ?? {};
-  const downloadingIds = useDownloadsStore((s) => s.downloadingIds) ?? new Set<string>();
+  const progressMap = useDownloadsStore((s) => s.progressMap) ?? EMPTY_MAP;
+  const downloadingIds = useDownloadsStore((s) => s.downloadingIds) ?? EMPTY_SET;
   const loadSong = useAudioStore((s) => s.loadSong);
   const currentSong = useAudioStore((s) => s.currentSong);
   const isPlaying = useAudioStore((s) => s.isPlaying);
 
   useEffect(() => { loadDownloads(); }, [loadDownloads]);
 
-  const handlePlay = (d: typeof downloads[0]) => {
+  const handlePlay = useCallback((d: typeof downloads[0]) => {
     const song: Song = {
       id: d.id, youtubeId: d.youtubeId, title: d.title, artist: d.artist,
       genre: d.genre, duration: d.duration, coverArt: d.coverArt,
@@ -32,22 +49,28 @@ export const DownloadsPage: React.FC = () => {
       album: '', audioUrl: dl.audioUrl, releaseYear: 0,
     } as Song));
     loadSong(song, playlist, downloads.findIndex(dl => dl.id === d.id));
-  };
+  }, [loadSong, downloads]);
 
-  const formatSize = (bytes: number) => bytes >= 1048576 ? (bytes / 1048576).toFixed(1) + ' MB' : (bytes / 1024).toFixed(0) + ' KB';
-  const formatDuration = (s: number) => Math.floor(s / 60) + ':' + Math.floor(s % 60).toString().padStart(2, '0');
+  const handleRemove = useCallback((id: string) => {
+    removeSong(id);
+  }, [removeSong]);
+
   const totalSize = useMemo(() => downloads.reduce((acc, d) => acc + d.size, 0), [downloads]);
 
-  // Active downloads (in-progress)
   const activeDownloads = useMemo(() =>
     Array.from(downloadingIds).map(ytId => ({ youtubeId: ytId, progress: progressMap[ytId] })),
     [downloadingIds, progressMap]
   );
 
+  const currentSongId = currentSong?.id;
+
   return (
     <div className="p-4 sm:p-6 space-y-6">
       <div className="flex items-center justify-between">
-        <div>
+        <div className="flex items-center gap-3">
+          <button onClick={goBack} className="p-2 rounded-xl hover:bg-white/5 transition-colors text-gray-400 hover:text-white" aria-label="Go back">
+            <ArrowLeft size={20} />
+          </button>
           <h1 className="text-2xl sm:text-3xl font-black text-white flex items-center gap-3">
             <span className="p-2.5 rounded-2xl bg-gradient-to-br from-violet-500 to-fuchsia-500 shadow-lg shadow-violet-500/25">
               <Download size={22} className="text-white" />
@@ -66,7 +89,6 @@ export const DownloadsPage: React.FC = () => {
         )}
       </div>
 
-      {/* Active downloads with progress */}
       {activeDownloads.length > 0 && (
         <div className="space-y-2">
           {activeDownloads.map(({ youtubeId, progress }) => (
@@ -76,12 +98,51 @@ export const DownloadsPage: React.FC = () => {
                 <div className="text-xs text-gray-400 truncate">Downloading...</div>
                 <div className="mt-1.5 h-1.5 rounded-full bg-white/10 overflow-hidden">
                   <div
-                    className="h-full rounded-full bg-gradient-to-r from-violet-500 to-fuchsia-500 transition-all duration-300"
-                    style={{ width: `${progress?.percent || 0}%` }}
+                    className="h-full rounded-full bg-gradient-to-r from-violet-500 to-fuchsia-500"
+                    style={{ width: `${progress?.percent || 0}%`, transition: 'width 300ms ease' }}
                   />
                 </div>
               </div>
               <span className="text-xs text-gray-500 flex-shrink-0">{progress?.percent || 0}%</span>
+              <button
+                onClick={() => cancelDownload(youtubeId)}
+                className="p-1.5 rounded-lg text-gray-500 hover:text-red-400 hover:bg-red-500/10 transition-all flex-shrink-0"
+                title="Cancel"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {failedDownloads.length > 0 && (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-xs font-medium text-red-400">
+              <AlertCircle size={12} />
+              Failed Downloads
+            </div>
+            <button onClick={clearFailed} className="text-[10px] text-gray-500 hover:text-gray-300 transition-colors">
+              Clear all
+            </button>
+          </div>
+          {failedDownloads.map((f, i) => (
+            <div key={`${f.song.id}-${i}`} className="flex items-center gap-3 p-3 rounded-xl bg-red-500/5 border border-red-500/10">
+              <AlertCircle size={14} className="text-red-400 flex-shrink-0" />
+              <div className="flex-1 min-w-0">
+                <div className="text-sm text-white truncate">{f.song.title}</div>
+                <div className="text-[10px] text-red-400/70 truncate">{f.message}</div>
+              </div>
+              {isOnline && (
+                <button
+                  onClick={() => retryDownload(f.song)}
+                  className="p-1.5 rounded-lg text-violet-400 hover:bg-violet-500/10 transition-all flex-shrink-0"
+                  title="Retry"
+                >
+                  <RotateCcw size={14} />
+                </button>
+              )}
             </div>
           ))}
         </div>
@@ -104,52 +165,46 @@ export const DownloadsPage: React.FC = () => {
         </div>
       ) : (
         <div className="space-y-2">
-          <AnimatePresence>
-            {downloads.map((d, i) => {
-              const isActive = currentSong?.id === d.id;
-              return (
-                <motion.div
-                  key={d.id}
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, x: -100 }}
-                  transition={{ delay: i * 0.02 }}
-                  className={`flex items-center gap-3 p-3 rounded-xl transition-all group cursor-pointer ${isActive ? 'bg-violet-500/10' : 'hover:bg-white/5'}`}
-                  onClick={() => handlePlay(d)}
+          {downloads.map((d) => {
+            const isActive = currentSongId === d.id;
+            return (
+              <div
+                key={d.id}
+                className={`flex items-center gap-3 p-3 rounded-xl transition-colors group cursor-pointer ${isActive ? 'bg-violet-500/10' : 'hover:bg-white/5'}`}
+                onClick={() => handlePlay(d)}
+              >
+                <div className="relative w-12 h-12 rounded-lg overflow-hidden flex-shrink-0 bg-[#1a1a2e]">
+                  <img src={d.coverArt} alt={d.title} loading="lazy" className="w-full h-full object-cover" />
+                  <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <Play size={16} fill="white" className="text-white" />
+                  </div>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className={`text-sm font-medium truncate ${isActive ? 'text-violet-400' : 'text-white'}`}>{d.title}</div>
+                  <div className="text-xs text-gray-400 truncate">{d.artist}</div>
+                  <div className="flex items-center gap-2 text-[10px] text-gray-500 mt-0.5">
+                    <span>{formatDuration(d.duration)}</span>
+                    <span>·</span>
+                    <span>{formatSize(d.size)}</span>
+                  </div>
+                </div>
+                <button
+                  onClick={(e) => { e.stopPropagation(); handleRemove(d.id); }}
+                  className="p-2 rounded-lg text-gray-500 opacity-0 group-hover:opacity-100 hover:text-red-400 hover:bg-red-500/10 transition-all"
+                  title="Remove"
                 >
-                  <div className="relative w-12 h-12 rounded-lg overflow-hidden flex-shrink-0 bg-[#1a1a2e]">
-                    <img src={d.coverArt} alt={d.title} loading="lazy" className="w-full h-full object-cover" />
-                    <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <Play size={16} fill="white" className="text-white" />
-                    </div>
+                  <Trash2 size={14} />
+                </button>
+                {isActive && isPlaying && (
+                  <div className="playing-indicator text-violet-400 flex items-end gap-[2px] h-4">
+                    {[1, 2, 3].map((i) => (
+                      <span key={i} className="eq-bar" style={{ display: 'block', width: 3, background: 'currentColor', borderRadius: 2, animationDelay: `${i * 0.1}s` }} />
+                    ))}
                   </div>
-                  <div className="flex-1 min-w-0">
-                    <div className={`text-sm font-medium truncate ${isActive ? 'text-violet-400' : 'text-white'}`}>{d.title}</div>
-                    <div className="text-xs text-gray-400 truncate">{d.artist}</div>
-                    <div className="flex items-center gap-2 text-[10px] text-gray-500 mt-0.5">
-                      <span>{formatDuration(d.duration)}</span>
-                      <span>·</span>
-                      <span>{formatSize(d.size)}</span>
-                    </div>
-                  </div>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); removeSong(d.id); }}
-                    className="p-2 rounded-lg text-gray-500 opacity-0 group-hover:opacity-100 hover:text-red-400 hover:bg-red-500/10 transition-all"
-                    title="Remove"
-                  >
-                    <Trash2 size={14} />
-                  </button>
-                  {isActive && isPlaying && (
-                    <div className="playing-indicator text-violet-400 flex items-end gap-[2px] h-4">
-                      {[1, 2, 3].map((i) => (
-                        <span key={i} style={{ display: 'block', width: 3, background: 'currentColor', borderRadius: 2, animation: `eqBounce 0.8s ${i * 0.1}s infinite ease-in-out` }} />
-                      ))}
-                    </div>
-                  )}
-                </motion.div>
-              );
-            })}
-          </AnimatePresence>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>

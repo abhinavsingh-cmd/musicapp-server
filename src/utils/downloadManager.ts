@@ -12,7 +12,7 @@
  *   - Thumbnail prefetch alongside song download
  */
 
-import { api, apiFetch } from '../config/api';
+import { api } from '../config/api';
 
 const DB_NAME = 'music-app-offline';
 const DB_VERSION = 2;
@@ -148,9 +148,18 @@ export async function downloadSongWithProgress(
     audioUrl?: string;
   },
   onProgress?: (p: DownloadProgress) => void,
+  signal?: AbortSignal,
 ): Promise<DownloadedSong> {
   const downloadUrl = song.audioUrl || api(`/download/${song.youtubeId}?title=${encodeURIComponent(song.title)}`);
-  const res = await apiFetch(downloadUrl, { timeout: 60_000, retries: 1 });
+
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+
+  const res = await fetch(downloadUrl, {
+    signal,
+    headers: { 'Accept': 'audio/*' },
+  });
+
+  if (!res.ok) throw new Error(`Download failed: ${res.status}`);
 
   const contentLength = Number(res.headers.get('content-length')) || 0;
   const reader = res.body?.getReader();
@@ -160,6 +169,7 @@ export async function downloadSongWithProgress(
   let received = 0;
 
   while (true) {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     const { done, value } = await reader.read();
     if (done) break;
     chunks.push(value);

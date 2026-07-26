@@ -21,7 +21,7 @@ export const AlbumArtBackground: React.FC = () => {
     }
     prevSongRef.current = currentSong.id;
     prevCoverUrlRef.current = currentCover;
-  }, [currentSong?.id, currentSong?.coverArt]);
+  }, [currentSong, currentSong?.id, currentSong?.coverArt]);
 
   const coverUrl = currentSong?.coverArt || '';
   const prevCoverUrl = prevCoverUrlRef.current;

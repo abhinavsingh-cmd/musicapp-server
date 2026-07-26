@@ -1,7 +1,7 @@
-import React, { memo } from 'react';
+import React from 'react';
 import { Player } from '../player/Player';
 
-export const RightPlayer: React.FC = memo(() => {
+export const RightPlayer: React.FC = React.memo(() => {
   return <Player className="lg:left-64" />;
 });
 RightPlayer.displayName = 'RightPlayer';

@@ -1,15 +1,20 @@
-import React, { memo } from 'react';
+import React, { memo, lazy, Suspense } from 'react';
 import { ErrorBoundary } from '../../components/ErrorBoundary';
 import { Sidebar } from './Sidebar';
 import { MainContent } from './MainContent';
-import { RightPlayer } from './RightPlayer';
-import { AlbumArtBackground } from '../player/AlbumArtBackground';
-import { OfflineIndicator } from '../offline/OfflineIndicator';
 import { useLayout } from '../../contexts/LayoutContext';
+import { useBackNavigation } from '../../hooks/useBackNavigation';
 import { cn } from '../../utils/cn';
+
+const RightPlayer = lazy(() => import('./RightPlayer').then(m => ({ default: m.RightPlayer })));
+const AlbumArtBackground = lazy(() => import('../player/AlbumArtBackground').then(m => ({ default: m.AlbumArtBackground })));
+const OfflineIndicator = lazy(() => import('../offline/OfflineIndicator').then(m => ({ default: m.OfflineIndicator })));
+
+const PlayerFallback = () => <div className="h-24" />;
 
 export const AppLayout: React.FC = memo(() => {
   const { sidebarOpen } = useLayout();
+  useBackNavigation();
 
   return (
     <div className="h-screen bg-[var(--color-bg)] flex overflow-hidden relative">
@@ -19,8 +24,12 @@ export const AppLayout: React.FC = memo(() => {
         <div className="absolute bottom-0 right-1/4 w-96 h-96 bg-fuchsia-500/5 rounded-full blur-3xl float-slow" style={{ animationDelay: '-3s' }} />
       </div>
       
-      <AlbumArtBackground />
-      <OfflineIndicator />
+      <Suspense fallback={null}>
+        <AlbumArtBackground />
+      </Suspense>
+      <Suspense fallback={null}>
+        <OfflineIndicator />
+      </Suspense>
       
       <ErrorBoundary level="section" fallback={<div className="w-64 bg-[var(--color-surface)] border-r border-[var(--color-border)] h-full" />}>
         <Sidebar isOpen={sidebarOpen} onClose={() => {}} />
@@ -36,7 +45,9 @@ export const AppLayout: React.FC = memo(() => {
       </div>
       
       <ErrorBoundary level="section" fallback={<div className="h-24 bg-[var(--color-surface)] border-t border-[var(--color-border)]" />}>
-        <RightPlayer />
+        <Suspense fallback={<PlayerFallback />}>
+          <RightPlayer />
+        </Suspense>
       </ErrorBoundary>
     </div>
   );

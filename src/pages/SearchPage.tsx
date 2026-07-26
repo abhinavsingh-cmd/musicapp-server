@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { useGoBack } from '../hooks/useGoBack';
 import {
   Search, X, Play, Music, Globe, Loader2, Download, Check,
   SlidersHorizontal, Clock, ArrowDownAZ, TrendingUp, Sparkles,
-  AlertCircle, SearchX,
+  AlertCircle, SearchX, ArrowLeft,
 } from 'lucide-react';
 import { SongTable } from '../features/library/SongTable';
 import { Song } from '../types/music';
@@ -21,8 +23,7 @@ import {
   YTSong,
 } from '../stores/searchStore';
 import { cn } from '../utils/cn';
-
-// ---- Filter chips ----
+import { useSongContextMenu } from '../components/SongContextMenu';
 
 const FILTERS: { value: FilterType; label: string }[] = [
   { value: 'all', label: 'All' },
@@ -49,8 +50,6 @@ const DURATION_FILTERS: { value: DurationFilter; label: string }[] = [
 
 const GENRES = ['Pop', 'Rock', 'Hip Hop', 'Indian', 'K-Pop', 'Latin', 'R&B', 'Electronic', 'Indie', 'Afrobeats'];
 
-// ---- Helpers ----
-
 function safeStr(v: unknown, fallback = ''): string {
   return typeof v === 'string' ? v : fallback;
 }
@@ -60,25 +59,52 @@ function safeNum(v: unknown, fallback = 0): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
-// ---- Component ----
+const fmt = (s: number) => {
+  const sec = safeNum(s);
+  if (sec <= 0) return '0:00';
+  return Math.floor(sec / 60) + ':' + Math.floor(sec % 60).toString().padStart(2, '0');
+};
+
+const fmtViews = (n: number) => {
+  const num = safeNum(n);
+  if (num >= 1e9) return (num / 1e9).toFixed(1) + 'B';
+  if (num >= 1e6) return (num / 1e6).toFixed(1) + 'M';
+  if (num >= 1e3) return (num / 1e3).toFixed(1) + 'K';
+  return num.toString();
+};
 
 export const SearchPage: React.FC = () => {
+  const navigate = useNavigate();
+  const goBack = useGoBack();
   const inputRef = useRef<HTMLInputElement>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
   const [query, setQuery] = useState('');
   const [showFilters, setShowFilters] = useState(false);
-  const [showSuggestions, setShowSuggestions] = useState(true);
+  const [showSuggestions, setShowSuggestions] = useState(false);
   const debouncedQuery = useDebounce(query, 300);
+
+  // Delayed focus to let layout stabilize first (avoids Android keyboard shift)
+  useEffect(() => {
+    const timer = setTimeout(() => inputRef.current?.focus(), 100);
+    return () => clearTimeout(timer);
+  }, []);
+
+  const { handleContextMenu, handleLongPress, ContextMenu } = useSongContextMenu(
+    (artist) => navigate(`/search?q=${encodeURIComponent(artist)}`),
+    (album) => navigate(`/search?q=${encodeURIComponent(album)}`),
+  );
 
   const filter = useSearchStore((s) => s.filter);
   const sort = useSearchStore((s) => s.sort);
   const durationFilter = useSearchStore((s) => s.durationFilter);
   const genreFilter = useSearchStore((s) => s.genreFilter);
-  const loading = useSearchStore((s) => s.loading);
-  const ytLoading = useSearchStore((s) => s.ytLoading);
+  const status = useSearchStore((s) => s.status);
+  const ytStatus = useSearchStore((s) => s.ytStatus);
   const hasMore = useSearchStore((s) => s.hasMore);
   const error = useSearchStore((s) => s.error);
   const suggestions = useSearchStore((s) => s.suggestions);
+  const libraryResults = useSearchStore((s) => s.libraryResults);
+  const ytResults = useSearchStore((s) => s.ytResults);
   const setFilter = useSearchStore((s) => s.setFilter);
   const setSort = useSearchStore((s) => s.setSort);
   const setDurationFilter = useSearchStore((s) => s.setDurationFilter);
@@ -87,49 +113,37 @@ export const SearchPage: React.FC = () => {
   const loadMore = useSearchStore((s) => s.loadMore);
   const clear = useSearchStore((s) => s.clear);
 
-  const libraryResults = useSearchStore((s) => s.libraryResults);
-  const ytResults = useSearchStore((s) => s.ytResults);
-
   const filteredLibrary = useMemo(
     () => selectFilteredLibrary({ libraryResults, filter, sort, durationFilter, genreFilter } as any),
     [libraryResults, filter, sort, durationFilter, genreFilter],
   );
-  const uniqueArtists = useMemo(
-    () => selectUniqueArtists({ libraryResults } as any),
-    [libraryResults],
-  );
-  const uniqueAlbums = useMemo(
-    () => selectUniqueAlbums({ libraryResults } as any),
-    [libraryResults],
-  );
-  const uniqueGenres = useMemo(
-    () => selectUniqueGenres({ libraryResults } as any),
-    [libraryResults],
-  );
+  const uniqueArtists = useMemo(() => selectUniqueArtists({ libraryResults } as any), [libraryResults]);
+  const uniqueAlbums = useMemo(() => selectUniqueAlbums({ libraryResults } as any), [libraryResults]);
+  const uniqueGenres = useMemo(() => selectUniqueGenres({ libraryResults } as any), [libraryResults]);
 
   const loadSong = useAudioStore((s) => s.loadSong);
   const downloadSong = useDownloadsStore((s) => s.downloadSong);
-  const isDownloaded = useDownloadsStore((s) => s.isDownloaded);
-  const isDownloading = useDownloadsStore((s) => s.isDownloading);
+  const isDownloadedFn = useDownloadsStore((s) => s.isDownloaded);
+  const isDownloadingFn = useDownloadsStore((s) => s.isDownloading);
 
-  // ---- Debounced search ----
   useEffect(() => {
     search(debouncedQuery);
-    setShowSuggestions(true);
-  }, [debouncedQuery, search]);
+    if (debouncedQuery && !showSuggestions) {
+      setShowSuggestions(true);
+    }
+  }, [debouncedQuery, search, showSuggestions]);
 
-  // ---- Infinite scroll (YouTube results) ----
   useEffect(() => {
     if (!sentinelRef.current || !hasMore) return;
+    const isLoading = ytStatus === 'loading';
     const obs = new IntersectionObserver(
-      ([entry]) => { if (entry.isIntersecting && !ytLoading && hasMore) loadMore(); },
+      ([entry]) => { if (entry.isIntersecting && !isLoading && hasMore) loadMore(); },
       { rootMargin: '200px' },
     );
     obs.observe(sentinelRef.current);
     return () => obs.disconnect();
-  }, [ytLoading, hasMore, loadMore, ytResults.length]);
+  }, [ytStatus, hasMore, loadMore, ytResults.length]);
 
-  // ---- Play YouTube result ----
   const handlePlayYT = useCallback((r: YTSong) => {
     if (!r || !r.id) return;
     const songs: Song[] = (ytResults || [])
@@ -142,7 +156,7 @@ export const SearchPage: React.FC = () => {
         genre: 'YouTube',
         duration: safeNum(item.duration),
         coverArt: safeStr(item.thumbnail),
-        album: '',
+        album: safeStr(item.album),
         audioUrl: '',
         releaseYear: 0,
       }));
@@ -163,40 +177,29 @@ export const SearchPage: React.FC = () => {
       genre: 'YouTube',
       duration: safeNum(r.duration),
       coverArt: safeStr(r.thumbnail),
-      album: '',
+      album: safeStr(r.album),
       audioUrl: '',
       releaseYear: 0,
     });
   }, [downloadSong]);
 
-  const fmt = (s: number) => {
-    const sec = safeNum(s);
-    if (sec <= 0) return '0:00';
-    return Math.floor(sec / 60) + ':' + Math.floor(sec % 60).toString().padStart(2, '0');
-  };
-
-  const fmtViews = (n: number) => {
-    const num = safeNum(n);
-    if (num >= 1e9) return (num / 1e9).toFixed(1) + 'B';
-    if (num >= 1e6) return (num / 1e6).toFixed(1) + 'M';
-    if (num >= 1e3) return (num / 1e3).toFixed(1) + 'K';
-    return num.toString();
-  };
-
-  const handleSuggestionClick = (song: Song) => {
+  const handleSuggestionClick = useCallback((song: Song) => {
     if (!song || !song.title) return;
     setQuery(song.title);
     setShowSuggestions(false);
-  };
+  }, []);
 
   const hasResults = filteredLibrary.length > 0 || ytResults.length > 0;
-  const isIdle = !query && !loading;
-  const isNoResults = query && !loading && !ytLoading && !hasResults;
+  const isIdle = !query && status === 'idle';
+  const isNoResults = query && status !== 'loading' && ytStatus !== 'loading' && !hasResults;
 
   return (
     <div className="p-4 sm:p-6 space-y-5">
-      {/* ---- Search bar ---- */}
-      <div className="relative max-w-xl">
+      <div className="flex items-center gap-2">
+        <button onClick={goBack} className="p-2 rounded-xl hover:bg-white/5 transition-colors text-gray-400 hover:text-white flex-shrink-0" aria-label="Go back">
+          <ArrowLeft size={20} />
+        </button>
+        <div className="relative max-w-xl flex-1">
         <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500" size={20} />
         <input
           ref={inputRef}
@@ -206,7 +209,6 @@ export const SearchPage: React.FC = () => {
           onFocus={() => setShowSuggestions(true)}
           placeholder="Search songs, artists, albums..."
           className="w-full pl-12 pr-20 py-3 rounded-2xl bg-[#1a1a2e] border border-white/5 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-violet-500 transition-all"
-          autoFocus
         />
         <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
           {query && (
@@ -222,10 +224,10 @@ export const SearchPage: React.FC = () => {
             <SlidersHorizontal size={16} />
           </button>
         </div>
+        </div>
       </div>
 
-      {/* ---- Instant suggestions dropdown ---- */}
-      {query && showSuggestions && suggestions.length > 0 && !loading && (
+      {query && showSuggestions && suggestions.length > 0 && status !== 'loading' && (
         <div className="max-w-xl relative z-20">
           <div className="rounded-2xl bg-[#1a1a2e] border border-white/5 overflow-hidden shadow-xl">
             {suggestions.slice(0, 5).map((s) => (
@@ -245,7 +247,6 @@ export const SearchPage: React.FC = () => {
         </div>
       )}
 
-      {/* ---- Filter & Sort bar ---- */}
       {showFilters && (
         <div className="space-y-3 max-w-xl">
           <div className="flex flex-wrap gap-2">
@@ -329,7 +330,6 @@ export const SearchPage: React.FC = () => {
         </div>
       )}
 
-      {/* ---- Genre browse (no query) ---- */}
       {isIdle && (
         <div>
           <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
@@ -340,7 +340,7 @@ export const SearchPage: React.FC = () => {
               <button
                 key={genre}
                 onClick={() => setQuery(genre)}
-                className="p-4 rounded-xl claymorphism text-white font-medium hover:scale-105 active:scale-95 transition-all text-sm"
+                className="p-4 rounded-xl claymorphism text-white font-medium hover:scale-105 active:scale-95 transition-transform text-sm"
               >
                 {genre}
               </button>
@@ -349,8 +349,17 @@ export const SearchPage: React.FC = () => {
         </div>
       )}
 
-      {/* ---- Error state ---- */}
-      {error && (
+      {status === 'offline' && (
+        <div className="flex items-center gap-3 text-amber-400 py-4 px-4 rounded-xl bg-amber-500/10 border border-amber-500/20">
+          <AlertCircle size={18} />
+          <span className="text-sm">You are offline. Check your connection.</span>
+          <button onClick={() => search(query)} className="ml-auto text-xs text-amber-300 hover:text-white underline">
+            Retry
+          </button>
+        </div>
+      )}
+
+      {status === 'error' && error && (
         <div className="flex items-center gap-3 text-red-400 py-4 px-4 rounded-xl bg-red-500/10 border border-red-500/20">
           <AlertCircle size={18} />
           <span className="text-sm">{error}</span>
@@ -360,16 +369,14 @@ export const SearchPage: React.FC = () => {
         </div>
       )}
 
-      {/* ---- Loading state ---- */}
-      {loading && (
+      {status === 'loading' && (
         <div className="flex items-center gap-3 text-gray-400 py-8">
           <Loader2 size={20} className="animate-spin text-violet-400" />
           Searching your library...
         </div>
       )}
 
-      {/* ---- Library results ---- */}
-      {!loading && filteredLibrary.length > 0 && (
+      {status !== 'loading' && filteredLibrary.length > 0 && (
         <div>
           <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3 flex items-center gap-2">
             <Music size={14} />Your Library ({filteredLibrary.length})
@@ -420,20 +427,29 @@ export const SearchPage: React.FC = () => {
         </div>
       )}
 
-      {/* ---- YouTube results ---- */}
-      {(ytLoading || ytResults.length > 0) && query && (
+      {(ytStatus === 'loading' || ytResults.length > 0) && query && (
         <div>
           <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3 flex items-center gap-2">
             <Globe size={14} className="text-red-400" />YouTube {ytResults.length > 0 ? `(${ytResults.length})` : ''}
           </h3>
-          {ytLoading && ytResults.length === 0 ? (
+          {ytStatus === 'loading' && ytResults.length === 0 ? (
             <div className="flex items-center gap-3 text-gray-400 py-6">
               <Loader2 size={20} className="animate-spin text-violet-400" />Searching YouTube...
             </div>
           ) : (
             <div className="space-y-2">
-              {ytResults.filter((r) => r && r.id).map((r) => (
-                <div key={r.id} onClick={() => handlePlayYT(r)} className="flex items-center gap-3 p-2 rounded-xl hover:bg-white/5 transition-colors group cursor-pointer">
+              {ytResults.filter((r) => r && r.id).map((r) => {
+                const ytSong: Song = {
+                  id: 'yt-' + r.id, title: safeStr(r.title, 'Unknown'), artist: safeStr(r.artist, 'Unknown'),
+                  album: safeStr(r.album, ''), duration: r.duration || 0, genre: 'YouTube',
+                  coverArt: r.thumbnail || '', audioUrl: '', youtubeId: r.id,
+                  releaseYear: 0, isFavorite: false, playCount: 0,
+                };
+                return (
+                <div key={r.id} onClick={() => handlePlayYT(r)}
+                  onContextMenu={(e) => handleContextMenu(e, ytSong)}
+                  onTouchStart={(e) => handleLongPress(e, ytSong)}
+                  className="flex items-center gap-3 p-2 rounded-xl hover:bg-white/5 transition-colors group cursor-pointer">
                   <div className="relative w-16 h-12 rounded-lg overflow-hidden flex-shrink-0 bg-[#1a1a2e]">
                     {r.thumbnail ? (
                       <img src={r.thumbnail} alt={r.title || ''} className="w-full h-full object-cover" loading="lazy" />
@@ -450,6 +466,7 @@ export const SearchPage: React.FC = () => {
                   <div className="flex-1 min-w-0">
                     <div className="text-sm font-medium text-white truncate">{safeStr(r.title, 'Unknown')}</div>
                     <div className="text-xs text-gray-400 truncate">{safeStr(r.artist, 'Unknown')}</div>
+                    {r.album && <div className="text-[10px] text-gray-500 truncate">{safeStr(r.album)}</div>}
                     {r.viewCount > 0 && <div className="text-[10px] text-gray-500">{fmtViews(r.viewCount)} views</div>}
                   </div>
                   <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -458,22 +475,22 @@ export const SearchPage: React.FC = () => {
                     </button>
                     <button
                       onClick={(e) => { e.stopPropagation(); handleDownloadYT(r); }}
-                      disabled={isDownloaded(r.id) || isDownloading(r.id)}
                       className={cn(
                         "p-2 rounded-lg transition-colors",
-                        isDownloaded(r.id) ? "bg-emerald-500/20 text-emerald-400"
-                          : isDownloading(r.id) ? "bg-violet-500/20 text-violet-400"
+                        isDownloadedFn(r.id) ? "bg-emerald-500/20 text-emerald-400"
+                          : isDownloadingFn(r.id) ? "bg-violet-500/20 text-violet-400"
                           : "bg-white/5 text-gray-400 hover:bg-white/10 hover:text-white",
                       )}
                     >
-                      {isDownloaded(r.id) ? <Check size={14} /> : isDownloading(r.id) ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+                      {isDownloadedFn(r.id) ? <Check size={14} /> : isDownloadingFn(r.id) ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
                     </button>
                   </div>
                 </div>
-              ))}
+                );
+              })}
 
               <div ref={sentinelRef} className="h-4" />
-              {ytLoading && ytResults.length > 0 && (
+              {ytStatus === 'loading' && ytResults.length > 0 && (
                 <div className="flex justify-center py-4">
                   <Loader2 size={20} className="animate-spin text-violet-400" />
                 </div>
@@ -483,7 +500,6 @@ export const SearchPage: React.FC = () => {
         </div>
       )}
 
-      {/* ---- Empty state ---- */}
       {isNoResults && (
         <div className="text-center py-16">
           <SearchX size={48} className="mx-auto text-gray-600 mb-4" />
@@ -491,6 +507,7 @@ export const SearchPage: React.FC = () => {
           <p className="text-gray-600 text-sm mt-1">Try a different search term or adjust your filters</p>
         </div>
       )}
+      <ContextMenu />
     </div>
   );
 };

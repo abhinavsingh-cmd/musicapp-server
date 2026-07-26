@@ -53,13 +53,8 @@ class BackgroundPlaybackService {
   }
 
   private setupAudioReconnection(): void {
-    if (typeof MediaSession === 'undefined') return;
-    
-    try {
-      if ('mediaSession' in navigator) {
-        navigator.mediaSession.setActionHandler('play', null);
-      }
-    } catch {}
+    // Reserved for future audio reconnection logic.
+    // Do NOT set mediaSession action handlers here — mediaSessionService owns them.
   }
 
   registerAudioElement(audio: HTMLAudioElement): void {
@@ -73,16 +68,10 @@ class BackgroundPlaybackService {
         this.notifyInterruption('audio-route-change');
       }
     };
-    const stalledHandler = () => {
-      if (this.audioElements.has(audio)) {
-        this.notifyInterruption('system');
-      }
-    };
 
     audio.addEventListener('abort', abortHandler);
     audio.addEventListener('emptied', emptiedHandler);
-    audio.addEventListener('stalled', stalledHandler);
-    this.audioElements.set(audio, [abortHandler, emptiedHandler, stalledHandler]);
+    this.audioElements.set(audio, [abortHandler, emptiedHandler]);
   }
 
   unregisterAudioElement(audio: HTMLAudioElement): void {
@@ -90,7 +79,6 @@ class BackgroundPlaybackService {
     if (handlers) {
       audio.removeEventListener('abort', handlers[0]);
       audio.removeEventListener('emptied', handlers[1]);
-      if (handlers[2]) audio.removeEventListener('stalled', handlers[2]);
       this.audioElements.delete(audio);
     }
   }

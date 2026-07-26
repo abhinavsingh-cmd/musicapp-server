@@ -1,17 +1,31 @@
 import React, { memo, useRef } from 'react';
 import { useAudioStore } from '../../../stores/audioStore';
+import { useQueueStore } from '../../../stores/queueStore';
 import { useDownloadsStore } from '../../../stores/downloadsStore';
 import { cn } from '../../../utils/cn';
-import { Play, Pause, SkipBack, SkipForward, Volume2, VolumeX, Volume1, Shuffle, Repeat, Repeat1, Heart, Download, Check, Loader2 } from 'lucide-react';
-import { motion } from 'framer-motion';
+import { Play, Pause, SkipBack, SkipForward, Volume2, VolumeX, Volume1, Shuffle, Repeat, Repeat1, Heart, Download, Check, X } from 'lucide-react';
 
 interface PlayerControlsProps { className?: string; }
 
-export const PlayerControls: React.FC<PlayerControlsProps> = memo(({ className }) => {
+const Spinner: React.FC<{ size?: number }> = ({ size = 20 }) => (
+  <svg
+    className="animate-spin"
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+  >
+    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+  </svg>
+);
+
+export const PlayerControls: React.FC<PlayerControlsProps> = React.memo(({ className }) => {
   const isPlaying = useAudioStore((s) => s.isPlaying);
+  const isLoading = useAudioStore((s) => s.isLoading);
   const currentSong = useAudioStore((s) => s.currentSong);
-  const isShuffled = useAudioStore((s) => s.isShuffled);
-  const repeatMode = useAudioStore((s) => s.repeatMode);
+  const isShuffled = useQueueStore((s) => s.isShuffled);
+  const repeatMode = useQueueStore((s) => s.repeatMode);
   const volume = useAudioStore((s) => s.volume);
   const favorites = useAudioStore((s) => s.favorites);
   const togglePlayPause = useAudioStore((s) => s.togglePlayPause);
@@ -22,6 +36,7 @@ export const PlayerControls: React.FC<PlayerControlsProps> = memo(({ className }
   const setVolume = useAudioStore((s) => s.setVolume);
   const toggleFavorite = useAudioStore((s) => s.toggleFavorite);
   const downloadSong = useDownloadsStore((s) => s.downloadSong);
+  const cancelDownload = useDownloadsStore((s) => s.cancelDownload);
   const isDownloaded = useDownloadsStore((s) => s.isDownloaded);
   const isDownloading = useDownloadsStore((s) => s.isDownloading);
   const lastSkipRef = useRef(0);
@@ -35,152 +50,124 @@ export const PlayerControls: React.FC<PlayerControlsProps> = memo(({ className }
 
   const isFav = currentSong ? favorites.includes(currentSong.id) : false;
   const RepeatIcon = repeatMode === 'one' ? Repeat1 : Repeat;
-  const downloaded = currentSong?.youtubeId ? isDownloaded(currentSong.youtubeId) : false;
-  const downloading = currentSong?.youtubeId ? isDownloading(currentSong.youtubeId) : false;
+  const downloaded = currentSong ? isDownloaded(currentSong.youtubeId || currentSong.id) : false;
+  const downloading = currentSong ? isDownloading(currentSong.youtubeId || currentSong.id) : false;
 
   return (
     <div className={cn("flex items-center justify-between px-2", className)}>
       <div className="flex items-center space-x-1 sm:space-x-2">
-        {/* Shuffle */}
-        <motion.button 
-          onClick={toggleShuffle} 
-          whileHover={{ scale: 1.15 }} 
-          whileTap={{ scale: 0.85 }} 
+        <button
+          onClick={toggleShuffle}
           className={cn(
-            "w-9 h-9 rounded-full flex items-center justify-center transition-all duration-300",
-            isShuffled 
-              ? "bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white shadow-glow" 
+            "w-9 h-9 rounded-full flex items-center justify-center transition-all duration-200 active:scale-90",
+            isShuffled
+              ? "bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white shadow-glow"
               : "text-gray-500 hover:text-white hover:bg-white/10"
           )}
           title={isShuffled ? "Shuffle On" : "Shuffle Off"}
         >
           <Shuffle size={16} />
-        </motion.button>
+        </button>
 
-        {/* Previous */}
-        <motion.button 
-          onClick={() => handleSkip(previousSong)} 
-          whileHover={{ scale: 1.15 }} 
-          whileTap={{ scale: 0.85 }} 
-          disabled={!currentSong} 
-          className="w-9 h-9 rounded-full flex items-center justify-center text-gray-300 hover:text-white hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed transition-all duration-300"
+        <button
+          onClick={() => handleSkip(previousSong)}
+          disabled={!currentSong}
+          className="w-9 h-9 rounded-full flex items-center justify-center text-gray-300 hover:text-white hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed transition-all duration-200 active:scale-90"
         >
           <SkipBack size={18} fill="currentColor" />
-        </motion.button>
+        </button>
 
-        {/* Play/Pause - Main Button */}
-        <motion.button 
-          onClick={togglePlayPause} 
-          whileHover={{ scale: 1.1 }} 
-          whileTap={{ scale: 0.9 }} 
-          disabled={!currentSong} 
+        <button
+          onClick={togglePlayPause}
+          disabled={!currentSong}
           className={cn(
-            "w-12 h-12 sm:w-14 sm:h-14 rounded-full flex items-center justify-center text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all duration-300",
+            "w-12 h-12 sm:w-14 sm:h-14 rounded-full flex items-center justify-center text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all duration-200 active:scale-90",
             "bg-gradient-to-br from-violet-500 to-fuchsia-500",
             "shadow-[0_0_30px_rgba(139,92,246,0.5)]",
             "hover:shadow-[0_0_40px_rgba(139,92,246,0.7)]"
           )}
         >
-          <motion.div 
-            key={isPlaying ? 'pause' : 'play'} 
-            initial={{ scale: 0, rotate: -90 }} 
-            animate={{ scale: 1, rotate: 0 }} 
-            transition={{ type: 'spring', stiffness: 500, damping: 20 }}
-          >
-            {isPlaying ? <Pause size={24} fill="white" /> : <Play size={24} fill="white" className="ml-1" />}
-          </motion.div>
-        </motion.button>
+          {isLoading ? (
+            <Spinner size={24} />
+          ) : isPlaying ? (
+            <Pause size={24} fill="white" />
+          ) : (
+            <Play size={24} fill="white" className="ml-1" />
+          )}
+        </button>
 
-        {/* Next */}
-        <motion.button 
-          onClick={() => handleSkip(nextSong)} 
-          whileHover={{ scale: 1.15 }} 
-          whileTap={{ scale: 0.85 }} 
-          disabled={!currentSong} 
-          className="w-9 h-9 rounded-full flex items-center justify-center text-gray-300 hover:text-white hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed transition-all duration-300"
+        <button
+          onClick={() => handleSkip(nextSong)}
+          disabled={!currentSong}
+          className="w-9 h-9 rounded-full flex items-center justify-center text-gray-300 hover:text-white hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed transition-all duration-200 active:scale-90"
         >
           <SkipForward size={18} fill="currentColor" />
-        </motion.button>
+        </button>
 
-        {/* Repeat */}
-        <motion.button 
-          onClick={cycleRepeat} 
-          whileHover={{ scale: 1.15 }} 
-          whileTap={{ scale: 0.85 }} 
+        <button
+          onClick={cycleRepeat}
           className={cn(
-            "w-9 h-9 rounded-full flex items-center justify-center transition-all duration-300 relative",
-            repeatMode !== 'off' 
-              ? "bg-gradient-to-br from-emerald-500 to-teal-500 text-white shadow-[0_0_20px_rgba(16,185,129,0.4)]" 
+            "w-9 h-9 rounded-full flex items-center justify-center transition-all duration-200 active:scale-90 relative",
+            repeatMode !== 'off'
+              ? "bg-gradient-to-br from-emerald-500 to-teal-500 text-white shadow-[0_0_20px_rgba(16,185,129,0.4)]"
               : "text-gray-500 hover:text-white hover:bg-white/10"
-          )} 
+          )}
           title={`Repeat: ${repeatMode}`}
         >
           <RepeatIcon size={16} />
           {repeatMode === 'one' && (
-            <motion.span 
-              initial={{ scale: 0 }}
-              animate={{ scale: 1 }}
-              className="absolute -top-1 -right-1 text-[8px] font-bold bg-white text-emerald-600 rounded-full w-4 h-4 flex items-center justify-center"
-            >
+            <span className="absolute -top-1 -right-1 text-[8px] font-bold bg-white text-emerald-600 rounded-full w-4 h-4 flex items-center justify-center">
               1
-            </motion.span>
+            </span>
           )}
-        </motion.button>
+        </button>
       </div>
 
       <div className="flex items-center space-x-1 sm:space-x-2">
-        {/* Favorite */}
-        <motion.button 
-          onClick={() => currentSong && toggleFavorite(currentSong.id)} 
-          whileHover={{ scale: 1.2 }} 
-          whileTap={{ scale: 0.8 }} 
+        <button
+          onClick={() => currentSong && toggleFavorite(currentSong.id)}
           className={cn(
-            "w-9 h-9 rounded-full flex items-center justify-center transition-all duration-300",
-            isFav 
-              ? "bg-gradient-to-br from-red-500 to-pink-500 text-white shadow-[0_0_20px_rgba(239,68,68,0.4)]" 
+            "w-9 h-9 rounded-full flex items-center justify-center transition-all duration-200 active:scale-90",
+            isFav
+              ? "bg-gradient-to-br from-red-500 to-pink-500 text-white shadow-[0_0_20px_rgba(239,68,68,0.4)]"
               : "text-gray-500 hover:text-red-400 hover:bg-white/10"
-          )} 
+          )}
           disabled={!currentSong}
         >
-          <motion.div
-            key={isFav ? 'liked' : 'unliked'}
-            initial={{ scale: 0 }}
-            animate={{ scale: 1 }}
-            transition={{ type: 'spring', stiffness: 500, damping: 20 }}
-          >
-            <Heart size={16} fill={isFav ? "currentColor" : "none"} />
-          </motion.div>
-        </motion.button>
+          <Heart size={16} fill={isFav ? "currentColor" : "none"} />
+        </button>
 
-        {/* Download */}
-        <motion.button 
-          onClick={() => currentSong && downloadSong(currentSong)} 
-          whileHover={{ scale: 1.2 }} 
-          whileTap={{ scale: 0.8 }} 
+        <button
+          onClick={() => {
+            if (!currentSong) return;
+            if (downloading) {
+              cancelDownload(currentSong.youtubeId || currentSong.id);
+            } else if (!downloaded) {
+              downloadSong(currentSong);
+            }
+          }}
           className={cn(
-            "w-9 h-9 rounded-full flex items-center justify-center transition-all duration-300",
-            downloaded 
-              ? "bg-gradient-to-br from-emerald-500 to-teal-500 text-white shadow-[0_0_20px_rgba(16,185,129,0.4)]" 
+            "w-9 h-9 rounded-full flex items-center justify-center transition-all duration-200 active:scale-90",
+            downloaded
+              ? "bg-gradient-to-br from-emerald-500 to-teal-500 text-white shadow-[0_0_20px_rgba(16,185,129,0.4)]"
               : "text-gray-500 hover:text-violet-400 hover:bg-white/10"
-          )} 
-          disabled={!currentSong?.youtubeId || downloading} 
-          title={downloaded ? "Downloaded" : "Download"}
+          )}
+          disabled={!currentSong}
+          title={downloaded ? "Downloaded" : downloading ? "Cancel download" : "Download"}
         >
-          {downloaded ? <Check size={16} /> : downloading ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
-        </motion.button>
+          {downloaded ? <Check size={16} /> : downloading ? <X size={16} /> : <Download size={16} />}
+        </button>
 
-        {/* Volume Icon */}
         <VolumeIcon volume={volume} />
-        
-        {/* Volume Slider */}
+
         <div className="relative group">
-          <input 
-            type="range" 
-            min="0" 
-            max="1" 
-            step="0.01" 
-            value={volume} 
-            onChange={(e) => setVolume(parseFloat(e.target.value))} 
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.01"
+            value={volume}
+            onChange={(e) => setVolume(parseFloat(e.target.value))}
             className="w-20 sm:w-24 h-1.5 rounded-full appearance-none cursor-pointer bg-white/10 group-hover:bg-white/20 transition-all"
             style={{
               background: `linear-gradient(to right, rgb(139 92 246) 0%, rgb(139 92 246) ${volume * 100}%, rgba(255,255,255,0.1) ${volume * 100}%, rgba(255,255,255,0.1) 100%)`,

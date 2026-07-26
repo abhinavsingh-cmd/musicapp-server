@@ -5,9 +5,10 @@ import { SongInfo } from './controls/SongInfo';
 import { LyricsDisplay } from './controls/LyricsDisplay';
 import { EqualizerUI } from './controls/EqualizerUI';
 import { QueuePanel } from './QueuePanel';
+import { ErrorBoundary } from '../../components/ErrorBoundary';
 import { cn } from '../../utils/cn';
-import { motion, AnimatePresence } from 'framer-motion';
-import { Mic2, X, Sliders, ListMusic, ChevronUp, ChevronDown } from 'lucide-react';
+import { Mic2, X, Sliders, ListMusic, ChevronUp, ChevronDown, AlertCircle, RefreshCw } from 'lucide-react';
+import { useAudioStore } from '../../stores/audioStore';
 
 interface PlayerProps {
   className?: string;
@@ -18,6 +19,15 @@ export const Player: React.FC<PlayerProps> = ({ className }) => {
   const [showEqualizer, setShowEqualizer] = useState(false);
   const [showQueue, setShowQueue] = useState(false);
   const [isExpanded, setIsExpanded] = useState(false);
+  const error = useAudioStore((s) => s.error);
+  const currentSong = useAudioStore((s) => s.currentSong);
+  const loadSong = useAudioStore((s) => s.loadSong);
+
+  const handleRetry = useCallback(() => {
+    if (currentSong) {
+      loadSong(currentSong, [currentSong], 0);
+    }
+  }, [currentSong, loadSong]);
 
   const togglePanel = useCallback((panel: 'lyrics' | 'equalizer' | 'queue') => {
     if (panel === 'lyrics') {
@@ -51,112 +61,93 @@ export const Player: React.FC<PlayerProps> = ({ className }) => {
     };
   }, [togglePanel]);
 
+  const hasOpenPanel = showQueue || showLyrics || showEqualizer;
+
   return (
     <>
-      <div id="yt-player-container" className="fixed -left-[9999px] -top-[9999px] pointer-events-none opacity-0" style={{ width: 360, height: 200 }} />
-
-      <AnimatePresence>
-        {showQueue && (
-          <motion.div
-            initial={{ opacity: 0, x: 20, scale: 0.97 }}
-            animate={{ opacity: 1, x: 0, scale: 1 }}
-            exit={{ opacity: 0, x: 20, scale: 0.97 }}
-            transition={{ type: 'spring', stiffness: 300, damping: 25 }}
-            className="fixed bottom-28 right-4 w-96 h-[500px] rounded-3xl overflow-hidden z-40 liquid-glass flex flex-col lg:bottom-32 lg:right-4"
-            style={{
-              boxShadow: '0 25px 80px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.1)'
-            }}
-          >
-            <div className="flex items-center justify-between p-4 border-b border-white/5 flex-shrink-0">
-              <div className="flex items-center gap-3">
-                <div className="w-8 h-8 rounded-full bg-gradient-to-br from-violet-500 to-fuchsia-500 flex items-center justify-center">
-                  <ListMusic size={14} className="text-white" />
-                </div>
-                <span className="text-white font-semibold">Queue</span>
+      {/* Side panels — rendered inline, visibility toggled via CSS */}
+      {showQueue && (
+        <div
+          className="fixed bottom-28 right-4 w-96 h-[500px] rounded-3xl overflow-hidden z-40 liquid-glass flex flex-col lg:bottom-32 lg:right-4"
+          style={{ boxShadow: '0 25px 80px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.1)' }}
+        >
+          <div className="flex items-center justify-between p-4 border-b border-white/5 flex-shrink-0">
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-full bg-gradient-to-br from-violet-500 to-fuchsia-500 flex items-center justify-center">
+                <ListMusic size={14} className="text-white" />
               </div>
-              <motion.button
-                onClick={() => setShowQueue(false)}
-                whileHover={{ scale: 1.1, rotate: 90 }}
-                whileTap={{ scale: 0.9 }}
-                className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-gray-400 hover:text-white hover:bg-white/20 transition-all"
-              >
-                <X size={16} />
-              </motion.button>
+              <span className="text-white font-semibold">Queue</span>
             </div>
-            <div className="flex-1 overflow-hidden">
-              <QueuePanel />
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+            <button
+              onClick={() => setShowQueue(false)}
+              className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-gray-400 hover:text-white hover:bg-white/20 transition-all active:scale-90"
+            >
+              <X size={16} />
+            </button>
+          </div>
+          <div className="flex-1 overflow-hidden">
+            <QueuePanel />
+          </div>
+        </div>
+      )}
 
-      <AnimatePresence>
-        {showLyrics && (
-          <motion.div
-            initial={{ opacity: 0, y: 20, scale: 0.95 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 20, scale: 0.95 }}
-            transition={{ type: 'spring', stiffness: 300, damping: 25 }}
-            className="fixed bottom-28 right-4 w-80 rounded-3xl overflow-hidden z-40 liquid-glass lg:bottom-32 lg:right-4"
-            style={{
-              boxShadow: '0 25px 80px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.1)'
-            }}
-          >
-            <div className="flex items-center justify-between p-4 border-b border-white/10">
-              <div className="flex items-center gap-3">
-                <div className="w-8 h-8 rounded-full bg-gradient-to-br from-violet-500 to-fuchsia-500 flex items-center justify-center">
-                  <Mic2 size={14} className="text-white" />
-                </div>
-                <span className="text-white font-semibold">Lyrics</span>
+      {showLyrics && (
+        <div
+          className="fixed bottom-28 right-4 w-80 rounded-3xl overflow-hidden z-40 liquid-glass lg:bottom-32 lg:right-4"
+          style={{ boxShadow: '0 25px 80px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.1)' }}
+        >
+          <div className="flex items-center justify-between p-4 border-b border-white/10">
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-full bg-gradient-to-br from-violet-500 to-fuchsia-500 flex items-center justify-center">
+                <Mic2 size={14} className="text-white" />
               </div>
-              <motion.button
-                onClick={() => setShowLyrics(false)}
-                whileHover={{ scale: 1.1, rotate: 90 }}
-                whileTap={{ scale: 0.9 }}
-                className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-gray-400 hover:text-white hover:bg-white/20 transition-all"
-              >
-                <X size={16} />
-              </motion.button>
+              <span className="text-white font-semibold">Lyrics</span>
             </div>
-            <LyricsDisplay />
-          </motion.div>
-        )}
-      </AnimatePresence>
+            <button
+              onClick={() => setShowLyrics(false)}
+              className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-gray-400 hover:text-white hover:bg-white/20 transition-all active:scale-90"
+            >
+              <X size={16} />
+            </button>
+          </div>
+          <LyricsDisplay />
+        </div>
+      )}
 
-      <AnimatePresence>
-        {showEqualizer && (
-          <motion.div
-            initial={{ opacity: 0, y: 20, scale: 0.95 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 20, scale: 0.95 }}
-            transition={{ type: 'spring', stiffness: 300, damping: 25 }}
-            className="fixed bottom-28 right-4 w-96 rounded-3xl overflow-hidden z-40 liquid-glass lg:bottom-32 lg:right-4"
-            style={{
-              boxShadow: '0 25px 80px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.1)'
-            }}
-          >
-            <div className="flex items-center justify-between p-4 border-b border-white/10">
-              <div className="flex items-center gap-3">
-                <div className="w-8 h-8 rounded-full bg-gradient-to-br from-violet-500 to-fuchsia-500 flex items-center justify-center">
-                  <Sliders size={14} className="text-white" />
-                </div>
-                <span className="text-white font-semibold">Equalizer</span>
+      {showEqualizer && (
+        <div
+          className="fixed bottom-28 right-4 w-96 rounded-3xl overflow-hidden z-40 liquid-glass lg:bottom-32 lg:right-4"
+          style={{ boxShadow: '0 25px 80px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.1)' }}
+        >
+          <div className="flex items-center justify-between p-4 border-b border-white/10">
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-full bg-gradient-to-br from-violet-500 to-fuchsia-500 flex items-center justify-center">
+                <Sliders size={14} className="text-white" />
               </div>
-              <motion.button
-                onClick={() => setShowEqualizer(false)}
-                whileHover={{ scale: 1.1, rotate: 90 }}
-                whileTap={{ scale: 0.9 }}
-                className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-gray-400 hover:text-white hover:bg-white/20 transition-all"
-              >
-                <X size={16} />
-              </motion.button>
+              <span className="text-white font-semibold">Equalizer</span>
             </div>
-            <div className="p-4">
+            <button
+              onClick={() => setShowEqualizer(false)}
+              className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-gray-400 hover:text-white hover:bg-white/20 transition-all active:scale-90"
+            >
+              <X size={16} />
+            </button>
+          </div>
+          <div className="p-4">
+            <ErrorBoundary level="section">
               <EqualizerUI />
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+            </ErrorBoundary>
+          </div>
+        </div>
+      )}
+
+      {/* Click-away backdrop for panels */}
+      {hasOpenPanel && (
+        <div
+          className="fixed inset-0 z-30"
+          onClick={() => { setShowLyrics(false); setShowEqualizer(false); setShowQueue(false); }}
+        />
+      )}
 
       <div
         className={cn(
@@ -166,18 +157,32 @@ export const Player: React.FC<PlayerProps> = ({ className }) => {
           className
         )}
       >
+        {error && (
+          <div className="bg-red-500/10 border-t border-red-500/20 px-4 py-2">
+            <div className="flex items-center gap-2 text-red-400 text-xs">
+              <AlertCircle size={14} />
+              <span className="flex-1 truncate">{error}</span>
+              <button
+                onClick={handleRetry}
+                className="flex items-center gap-1 px-2 py-1 rounded-lg bg-red-500/20 hover:bg-red-500/30 transition-colors text-red-300 font-medium"
+              >
+                <RefreshCw size={12} />
+                Retry
+              </button>
+            </div>
+          </div>
+        )}
+
         <ProgressBar />
 
         <div className="flex items-center px-4 gap-4 relative z-10" style={{ height: '64px' }}>
           <SongInfo className="flex-1 min-w-0" />
 
           <div className="flex items-center gap-2">
-            <motion.button
+            <button
               onClick={() => togglePanel('queue')}
-              whileHover={{ scale: 1.1 }}
-              whileTap={{ scale: 0.9 }}
               className={cn(
-                "w-10 h-10 rounded-full flex items-center justify-center transition-all liquid-glass",
+                "w-10 h-10 rounded-full flex items-center justify-center transition-all duration-200 active:scale-90 liquid-glass",
                 showQueue
                   ? "bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white shadow-glow"
                   : "text-gray-400 hover:text-white"
@@ -185,14 +190,12 @@ export const Player: React.FC<PlayerProps> = ({ className }) => {
               title="Queue"
             >
               <ListMusic size={18} />
-            </motion.button>
+            </button>
 
-            <motion.button
+            <button
               onClick={() => togglePanel('lyrics')}
-              whileHover={{ scale: 1.1 }}
-              whileTap={{ scale: 0.9 }}
               className={cn(
-                "w-10 h-10 rounded-full flex items-center justify-center transition-all liquid-glass",
+                "w-10 h-10 rounded-full flex items-center justify-center transition-all duration-200 active:scale-90 liquid-glass",
                 showLyrics
                   ? "bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white shadow-glow"
                   : "text-gray-400 hover:text-white"
@@ -200,14 +203,12 @@ export const Player: React.FC<PlayerProps> = ({ className }) => {
               title="Lyrics"
             >
               <Mic2 size={18} />
-            </motion.button>
+            </button>
 
-            <motion.button
+            <button
               onClick={() => togglePanel('equalizer')}
-              whileHover={{ scale: 1.1 }}
-              whileTap={{ scale: 0.9 }}
               className={cn(
-                "w-10 h-10 rounded-full flex items-center justify-center transition-all liquid-glass",
+                "w-10 h-10 rounded-full flex items-center justify-center transition-all duration-200 active:scale-90 liquid-glass",
                 showEqualizer
                   ? "bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white shadow-glow"
                   : "text-gray-400 hover:text-white"
@@ -215,89 +216,71 @@ export const Player: React.FC<PlayerProps> = ({ className }) => {
               title="Equalizer"
             >
               <Sliders size={18} />
-            </motion.button>
+            </button>
           </div>
 
           <PlayerControls className="flex-shrink-0" />
         </div>
 
-        <AnimatePresence>
-          {isExpanded && (
-            <motion.div
-              initial={{ opacity: 0, y: 100 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 100 }}
-              transition={{ type: 'spring', stiffness: 300, damping: 25 }}
-              className="lg:hidden pb-safe overflow-y-auto"
-              style={{ maxHeight: 'calc(100vh - 100px)' }}
-            >
-              <div className="px-4 pb-4 space-y-4">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-lg font-semibold text-white">Now Playing</h3>
-                  <motion.button
-                    onClick={() => setIsExpanded(false)}
-                    whileHover={{ scale: 1.1 }}
-                    whileTap={{ scale: 0.9 }}
-                    className="w-8 h-8 rounded-full bg-white/5 flex items-center justify-center text-gray-400 hover:text-white hover:bg-white/10 transition-all"
-                  >
-                    <ChevronDown size={20} />
-                  </motion.button>
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <motion.button
-                    onClick={() => togglePanel('lyrics')}
-                    whileHover={{ scale: 1.02 }}
-                    whileTap={{ scale: 0.98 }}
-                    className={cn(
-                      "p-4 rounded-2xl liquid-glass text-center transition-all",
-                      showLyrics ? "bg-violet-500/20 border border-violet-500/30" : ""
-                    )}
-                  >
-                    <Mic2 size={24} className="mx-auto mb-2 text-white" />
-                    <span className="text-sm font-medium">Lyrics</span>
-                  </motion.button>
-                  <motion.button
-                    onClick={() => togglePanel('equalizer')}
-                    whileHover={{ scale: 1.02 }}
-                    whileTap={{ scale: 0.98 }}
-                    className={cn(
-                      "p-4 rounded-2xl liquid-glass text-center transition-all",
-                      showEqualizer ? "bg-violet-500/20 border border-violet-500/30" : ""
-                    )}
-                  >
-                    <Sliders size={24} className="mx-auto mb-2 text-white" />
-                    <span className="text-sm font-medium">Equalizer</span>
-                  </motion.button>
-                  <motion.button
-                    onClick={() => togglePanel('queue')}
-                    whileHover={{ scale: 1.02 }}
-                    whileTap={{ scale: 0.98 }}
-                    className={cn(
-                      "p-4 rounded-2xl liquid-glass text-center transition-all",
-                      showQueue ? "bg-violet-500/20 border border-violet-500/30" : ""
-                    )}
-                  >
-                    <ListMusic size={24} className="mx-auto mb-2 text-white" />
-                    <span className="text-sm font-medium">Queue</span>
-                  </motion.button>
-                </div>
-                {showLyrics && <LyricsDisplay />}
-                {showEqualizer && <div className="liquid-glass rounded-2xl p-4"><EqualizerUI /></div>}
-                {showQueue && <div className="liquid-glass rounded-2xl p-4 max-h-96 overflow-auto"><QueuePanel /></div>}
+        {/* Mobile expanded view */}
+        {isExpanded && (
+          <div className="lg:hidden pb-safe overflow-y-auto" style={{ maxHeight: 'calc(100vh - 100px)' }}>
+            <div className="px-4 pb-4 space-y-4">
+              <div className="flex items-center justify-between">
+                <h3 className="text-lg font-semibold text-white">Now Playing</h3>
+                <button
+                  onClick={() => setIsExpanded(false)}
+                  className="w-8 h-8 rounded-full bg-white/5 flex items-center justify-center text-gray-400 hover:text-white hover:bg-white/10 transition-all active:scale-90"
+                >
+                  <ChevronDown size={20} />
+                </button>
               </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
+              <div className="grid grid-cols-2 gap-4">
+                <button
+                  onClick={() => togglePanel('lyrics')}
+                  className={cn(
+                    "p-4 rounded-2xl liquid-glass text-center transition-all active:scale-95",
+                    showLyrics ? "bg-violet-500/20 border border-violet-500/30" : ""
+                  )}
+                >
+                  <Mic2 size={24} className="mx-auto mb-2 text-white" />
+                  <span className="text-sm font-medium">Lyrics</span>
+                </button>
+                <button
+                  onClick={() => togglePanel('equalizer')}
+                  className={cn(
+                    "p-4 rounded-2xl liquid-glass text-center transition-all active:scale-95",
+                    showEqualizer ? "bg-violet-500/20 border border-violet-500/30" : ""
+                  )}
+                >
+                  <Sliders size={24} className="mx-auto mb-2 text-white" />
+                  <span className="text-sm font-medium">Equalizer</span>
+                </button>
+                <button
+                  onClick={() => togglePanel('queue')}
+                  className={cn(
+                    "p-4 rounded-2xl liquid-glass text-center transition-all active:scale-95",
+                    showQueue ? "bg-violet-500/20 border border-violet-500/30" : ""
+                  )}
+                >
+                  <ListMusic size={24} className="mx-auto mb-2 text-white" />
+                  <span className="text-sm font-medium">Queue</span>
+                </button>
+              </div>
+              {showLyrics && <LyricsDisplay />}
+              {showEqualizer && <div className="liquid-glass rounded-2xl p-4"><ErrorBoundary level="section"><EqualizerUI /></ErrorBoundary></div>}
+              {showQueue && <div className="liquid-glass rounded-2xl p-4 max-h-96 overflow-auto"><ErrorBoundary level="section"><QueuePanel /></ErrorBoundary></div>}
+            </div>
+          </div>
+        )}
 
-        <motion.button
+        <button
           onClick={() => setIsExpanded(true)}
           className="lg:hidden w-full h-2 bg-gradient-to-r from-transparent via-violet-500/30 to-transparent rounded-t-2xl"
-          whileHover={{ scaleY: 2 }}
-          whileTap={{ scaleY: 0.5 }}
           aria-label="Expand player"
         >
           <ChevronUp size={16} className="mx-auto text-violet-400" />
-        </motion.button>
+        </button>
       </div>
     </>
   );

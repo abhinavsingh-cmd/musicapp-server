@@ -1,3 +1,6 @@
+const _DEV = import.meta.env.DEV;
+function eqLog(...args: any[]) { if (_DEV) console.log('[Equalizer]', ...args); }
+
 export interface EQBand {
   frequency: number;
   gain: number;
@@ -46,51 +49,121 @@ export class EqualizerService {
   private listeners: Array<() => void> = [];
 
   get supported(): boolean { return this._supported; }
+  get audioContextState(): string {
+    if (!this.audioContext) return 'null';
+    return this.audioContext.state;
+  }
+  get isReady(): boolean {
+    return this.audioContext !== null && this.sourceNode !== null;
+  }
 
   async init(audioElement: HTMLAudioElement): Promise<void> {
-    if (this.audioContext) return;
+    eqLog('init() called — existing context:', this.audioContext ? this.audioContext.state : 'null', 'sourceNode:', !!this.sourceNode);
+
+    // Already fully initialized — just ensure running
+    if (this.audioContext && this.sourceNode) {
+      await this.resume();
+      return;
+    }
+
     if (!this._supported) return;
 
     try {
-      this.audioContext = new AudioContext();
+      // Create AudioContext if needed
+      if (!this.audioContext) {
+        this.audioContext = new AudioContext();
+        eqLog('init() — created AudioContext, state:', this.audioContext.state);
+      }
+
+      // CRITICAL: Resume BEFORE creating MediaElementAudioSourceNode.
+      // If the context is suspended when createMediaElementSource() is called,
+      // the source node captures the audio element but routes through a dead path —
+      // time advances, events fire, but NO SOUND is heard.
       if (this.audioContext.state === 'suspended') {
+        try {
+          await this.audioContext.resume();
+          eqLog('init() — AudioContext resumed to:', this.audioContext.state);
+        } catch (err) {
+          eqLog('init() — AudioContext resume failed:', err);
+          this.setupAutoResume();
+        }
+      }
+
+      // ONLY create source node if context is actually running.
+      // If it's still suspended, audio plays through the default path (no equalizer).
+      // On next init() call (from playHtmlAudio), we'll try again.
+      if (this.audioContext.state === 'running' && !this.sourceNode) {
+        this.sourceNode = this.audioContext.createMediaElementSource(audioElement);
+        eqLog('init() — MediaElementAudioSourceNode created');
+
+        const frequencies = DEFAULT_BANDS.map(b => b.frequency);
+        let prevNode: AudioNode = this.sourceNode;
+
+        for (let i = 0; i < frequencies.length; i++) {
+          const filter = this.audioContext.createBiquadFilter();
+          filter.type = i === 0 ? 'lowshelf' : i === frequencies.length - 1 ? 'highshelf' : 'peaking';
+          filter.frequency.value = frequencies[i];
+          filter.gain.value = 0;
+          filter.Q.value = 1.4;
+          prevNode.connect(filter);
+          prevNode = filter;
+          this.filters.push(filter);
+        }
+
+        prevNode.connect(this.audioContext.destination);
+        eqLog('init() — Equalizer chain connected to destination');
+      } else if (this.audioContext.state !== 'running') {
+        eqLog('init() — AudioContext NOT running, skipping equalizer (audio plays through default path)');
+      }
+    } catch (err) {
+      eqLog('init() — FAILED:', err);
+      // Don't set _supported = false — just skip equalizer for this playback.
+      // Audio will play through the default HTMLAudioElement path (no equalizer).
+    }
+  }
+
+  private autoResumeHandler: (() => void) | null = null;
+
+  private setupAutoResume(): void {
+    if (this.autoResumeHandler) return;
+    this.autoResumeHandler = () => {
+      if (this.audioContext && this.audioContext.state === 'suspended') {
+        eqLog('Auto-resuming AudioContext on user interaction');
         this.audioContext.resume().catch(() => {});
       }
-
-      this.sourceNode = this.audioContext.createMediaElementSource(audioElement);
-
-      const frequencies = DEFAULT_BANDS.map(b => b.frequency);
-      let prevNode: AudioNode = this.sourceNode;
-
-      for (let i = 0; i < frequencies.length; i++) {
-        const filter = this.audioContext.createBiquadFilter();
-        filter.type = i === 0 ? 'lowshelf' : i === frequencies.length - 1 ? 'highshelf' : 'peaking';
-        filter.frequency.value = frequencies[i];
-        filter.gain.value = 0;
-        filter.Q.value = 1.4;
-        prevNode.connect(filter);
-        prevNode = filter;
-        this.filters.push(filter);
+      if (this.audioContext && this.audioContext.state === 'running') {
+        this.removeAutoResume();
       }
-
-      prevNode.connect(this.audioContext.destination);
-    } catch (err) {
-      console.warn('Equalizer init failed:', err);
-      this._supported = false;
+    };
+    const events = ['touchstart', 'click', 'keydown', 'mousedown'];
+    for (const event of events) {
+      try { document.addEventListener(event, this.autoResumeHandler, { once: false, passive: true }); } catch {}
     }
+  }
+
+  private removeAutoResume(): void {
+    if (!this.autoResumeHandler) return;
+    const events = ['touchstart', 'click', 'keydown', 'mousedown'];
+    for (const event of events) {
+      try { document.removeEventListener(event, this.autoResumeHandler); } catch {}
+    }
+    this.autoResumeHandler = null;
   }
 
   async resume(): Promise<void> {
     if (this.audioContext && this.audioContext.state === 'suspended') {
       try {
         await this.audioContext.resume();
+        eqLog('AudioContext resumed successfully');
+        this.removeAutoResume();
       } catch {
-        // Requires user gesture on some platforms
+        this.setupAutoResume();
       }
     }
   }
 
   destroy(): void {
+    this.removeAutoResume();
     if (this.audioContext) {
       try { this.audioContext.close(); } catch {}
       this.audioContext = null;

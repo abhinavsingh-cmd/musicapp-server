@@ -183,6 +183,6 @@ try {
       try { applyTheme(initialColors); } catch {}
     });
   }
-} catch (e) {
-  console.warn('[ThemeStore] Initial theme apply failed:', e);
+} catch {
+  // Silently handle initial theme apply failure
 }

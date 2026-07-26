@@ -1,15 +1,17 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { useGoBack } from '../hooks/useGoBack';
+import { useSongsStore } from '../stores/songsStore';
 import { SongTable } from '../features/library/SongTable';
-import { Song } from '../types/music';
-import { fetchSongs } from '../services/musicApi';
-import { Compass, Sparkles, Flame } from 'lucide-react';
+import { Compass, Sparkles, Flame, ArrowLeft } from 'lucide-react';
 
 export const DiscoverPage: React.FC = () => {
-  const [songs, setSongs] = useState<Song[]>([]);
-  const [loading, setLoading] = useState(true);
+  const goBack = useGoBack();
+  const songs = useSongsStore((s) => s.songs);
+  const loading = useSongsStore((s) => s.loading);
+  const ensureLoaded = useSongsStore((s) => s.ensureLoaded);
   const [selectedGenre, setSelectedGenre] = useState<string | null>(null);
 
-  useEffect(() => { fetchSongs().then(s => { setSongs(s); setLoading(false); }).catch(() => setLoading(false)); }, []);
+  useEffect(() => { ensureLoaded(); }, [ensureLoaded]);
 
   const genres = useMemo(() => {
     const map = new Map<string, number>();
@@ -25,12 +27,45 @@ export const DiscoverPage: React.FC = () => {
     return songs.filter(s => s.genre === selectedGenre);
   }, [songs, selectedGenre]);
 
-  if (loading) return <div className="flex-1 flex items-center justify-center"><div className="animate-spin text-purple-500 text-xl">Loading...</div></div>;
+  if (loading) return (
+    <div className="p-6 space-y-8">
+      <div className="flex items-center gap-3 mb-6">
+        <div className="w-10 h-10 rounded-xl bg-white/5 animate-pulse" />
+        <div className="space-y-2">
+          <div className="h-6 w-32 rounded bg-white/10 animate-pulse" />
+          <div className="h-3 w-20 rounded bg-white/5 animate-pulse" />
+        </div>
+      </div>
+      <div>
+        <div className="h-5 w-24 rounded bg-white/10 animate-pulse mb-4" />
+        <div className="flex flex-wrap gap-2">
+          {Array.from({ length: 8 }).map((_, i) => (
+            <div key={i} className="h-9 w-20 rounded-full bg-white/5 animate-pulse" style={{ animationDelay: `${i * 30}ms` }} />
+          ))}
+        </div>
+      </div>
+      <div>
+        <div className="h-5 w-32 rounded bg-white/10 animate-pulse mb-4" />
+        {Array.from({ length: 6 }).map((_, i) => (
+          <div key={i} className="flex items-center gap-4 py-2 animate-pulse" style={{ animationDelay: `${i * 40}ms` }}>
+            <div className="w-12 h-12 rounded-lg bg-white/10" />
+            <div className="flex-1 space-y-2">
+              <div className="h-4 rounded bg-white/10 w-2/3" />
+              <div className="h-3 rounded bg-white/10 w-1/3" />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 
   return (
     <div className="p-6 space-y-8">
       <div>
         <h2 className="text-2xl font-bold text-white flex items-center gap-3 mb-6">
+          <button onClick={goBack} className="p-2 rounded-xl hover:bg-white/5 transition-colors text-gray-400 hover:text-white" aria-label="Go back">
+            <ArrowLeft size={20} />
+          </button>
           <span className="p-2 rounded-xl bg-indigo-50 dark:bg-indigo-900/20"><Compass size={20} className="text-indigo-500" /></span>
           Discover
         </h2>

@@ -19,29 +19,11 @@ export const useAuth = () => {
   return context;
 };
 
-const demoUsers: User[] = [
-  {
-    id: 'user-1',
-    name: 'Alex Johnson',
-    email: 'alex@example.com',
-    avatar: 'https://picsum.photos/seed/user1/200/200.jpg',
-    plan: 'premium',
-  },
-  {
-    id: 'user-2',
-    name: 'Maria Garcia',
-    email: 'maria@example.com',
-    avatar: 'https://picsum.photos/seed/user2/200/200.jpg',
-    plan: 'free',
-  },
-  {
-    id: 'user-3',
-    name: 'David Chen',
-    email: 'david@example.com',
-    avatar: 'https://picsum.photos/seed/user3/200/200.jpg',
-    plan: 'pro',
-  },
-];
+function generateAvatar(name: string): string {
+  const initials = name.split(/[@.\s]/).filter(Boolean).map(w => w[0]?.toUpperCase() || '').slice(0, 2).join('');
+  const hue = name.split('').reduce((acc, c) => acc + c.charCodeAt(0), 0) % 360;
+  return `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200"><rect width="200" height="200" fill="hsl(${hue},60%,40%)"/><text x="100" y="115" font-family="Arial,sans-serif" font-size="72" font-weight="bold" fill="white" text-anchor="middle">${initials}</text></svg>`)}`;
+}
 
 export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(() => {
@@ -57,8 +39,14 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const isAuthenticated = !!user;
 
   const login = async (email: string, _password: string) => {
-    await new Promise(resolve => setTimeout(resolve, 500));
-    const foundUser = demoUsers.find(u => u.email === email);
+    let savedUsers: User[];
+    try {
+      const parsed = JSON.parse(localStorage.getItem('musicAppUsers') || '[]');
+      savedUsers = Array.isArray(parsed) ? parsed : [];
+    } catch {
+      savedUsers = [];
+    }
+    const foundUser = savedUsers.find(u => u.email === email);
     if (foundUser) {
       setUser(foundUser);
       localStorage.setItem('musicAppUser', JSON.stringify(foundUser));
@@ -67,9 +55,11 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         id: `user-${Date.now()}`,
         name: email.split('@')[0],
         email,
-        avatar: `https://picsum.photos/seed/${encodeURIComponent(email)}/200/200.jpg`,
+        avatar: generateAvatar(email),
         plan: 'free',
       };
+      savedUsers.push(newUser);
+      localStorage.setItem('musicAppUsers', JSON.stringify(savedUsers));
       setUser(newUser);
       localStorage.setItem('musicAppUser', JSON.stringify(newUser));
     }
@@ -85,6 +75,14 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       const updatedUser = { ...user, plan };
       setUser(updatedUser);
       localStorage.setItem('musicAppUser', JSON.stringify(updatedUser));
+      try {
+        const savedUsers = JSON.parse(localStorage.getItem('musicAppUsers') || '[]') as User[];
+        const idx = savedUsers.findIndex(u => u.id === user.id);
+        if (idx >= 0) {
+          savedUsers[idx] = { ...savedUsers[idx], plan };
+          localStorage.setItem('musicAppUsers', JSON.stringify(savedUsers));
+        }
+      } catch {}
     }
   };
 

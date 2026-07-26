@@ -1,13 +1,16 @@
 import { create } from 'zustand';
 import { Song } from '../types/music';
-import { sampleSongs } from '../data/sampleSongs';
-import { api, apiFetch } from '../config/api';
+import { api, apiFetch, NetworkError, TimeoutError, OfflineError } from '../config/api';
+import { youtubeSearch } from '../services/youtubeSearchService';
+import { useSongsStore } from './songsStore';
 
 // ---- Types ----
 
 export type FilterType = 'all' | 'songs' | 'artists' | 'albums' | 'playlists' | 'genres';
 export type SortMode = 'relevance' | 'newest' | 'popular' | 'alpha';
 export type DurationFilter = 'any' | 'short' | 'medium' | 'long';
+
+export type SearchStatus = 'idle' | 'loading' | 'success' | 'empty' | 'error' | 'offline' | 'cancelled';
 
 interface SearchState {
   query: string;
@@ -21,8 +24,8 @@ interface SearchState {
   ytResults: YTSong[];
 
   suggestions: Song[];
-  loading: boolean;
-  ytLoading: boolean;
+  status: SearchStatus;
+  ytStatus: SearchStatus;
   page: number;
   hasMore: boolean;
   error: string | null;
@@ -46,25 +49,10 @@ export interface YTSong {
   duration: number;
   thumbnail: string;
   viewCount: number;
+  album: string;
 }
 
 // ---- Helpers ----
-
-const SKIP_WORDS = [
-  'lyrics video', 'karaoke', 'instrumental', 'cover by', 'live performance',
-  'reaction', 'interview', 'behind the scenes', 'making of', 'tutorial',
-  'how to', 'unboxing', 'vlog', 'compilation', 'top 10', 'best of',
-  'album mix', 'jukebox', 'full album', 'slowed + reverb', 'sped up',
-  'nightcore', 'mashup', 'remix by',
-];
-
-function isMusicResult(r: YTSong): boolean {
-  if (!r || !r.id || !r.title) return false;
-  const lower = (r.title + ' ' + (r.artist || '')).toLowerCase();
-  if (r.duration > 0 && (r.duration < 30 || r.duration > 900)) return false;
-  for (const w of SKIP_WORDS) { if (lower.includes(w)) return false; }
-  return true;
-}
 
 function filterDuration(songs: Song[], filter: DurationFilter): Song[] {
   if (filter === 'any') return songs;
@@ -98,18 +86,28 @@ function extractUnique(songs: Song[], key: keyof Song): string[] {
   return Array.from(set).sort();
 }
 
+function getErrorMessage(err: unknown): string {
+  if (err instanceof OfflineError) return 'You are offline. Check your connection.';
+  if (err instanceof TimeoutError) return 'Search timed out. Try again.';
+  if (err instanceof NetworkError) return 'Network error. Check your connection.';
+  if (err instanceof Error && err.message) return err.message;
+  return 'Search failed. Please try again.';
+}
+
 // ---- API ----
 
+let searchGeneration = 0;
+let searchAbortController: AbortController | null = null;
+
 async function fetchLibrarySearch(query: string): Promise<Song[]> {
-  const q = query.toLowerCase();
   try {
-    const res = await apiFetch(api(`/search?q=${encodeURIComponent(query)}`));
+    const res = await apiFetch(api(`/search?q=${encodeURIComponent(query)}`), { deduplicate: false });
     const contentType = res.headers.get('content-type') || '';
     if (!contentType.includes('application/json')) {
       throw new Error(`Expected JSON, got ${contentType.slice(0, 40) || 'unknown'}`);
     }
     const data = await res.json();
-    const serverSongs = (data.songs || []).map((s: any) => ({
+    return (data.songs || []).map((s: Record<string, unknown>) => ({
       id: String(s.id || ''),
       title: String(s.title || 'Unknown'),
       artist: String(s.artist || 'Unknown'),
@@ -121,58 +119,16 @@ async function fetchLibrarySearch(query: string): Promise<Song[]> {
       youtubeId: String(s.youtubeId || ''),
       releaseYear: Number(s.releaseYear) || 2024,
       isFavorite: false,
-      playCount: Math.floor(Math.random() * 50000),
+      playCount: 0,
     }));
-    const localSongs = sampleSongs.filter(
-      (s) => s.title.toLowerCase().includes(q) || s.artist.toLowerCase().includes(q) || s.genre.toLowerCase().includes(q)
-    );
-    const seen = new Set<string>();
-    const merged: Song[] = [];
-    for (const s of [...localSongs, ...serverSongs]) {
-      if (!s || !s.title) continue;
-      const key = `${s.title.toLowerCase()}|${s.artist.toLowerCase()}`;
-      if (!seen.has(key)) { seen.add(key); merged.push(s); }
-    }
-    return merged;
   } catch {
-    return sampleSongs.filter(
-      (s) => s.title.toLowerCase().includes(q) || s.artist.toLowerCase().includes(q) || s.genre.toLowerCase().includes(q)
-    );
+    return [];
   }
 }
 
-async function fetchYouTubeSearch(query: string, maxRetries = 2): Promise<YTSong[]> {
-  let lastError: Error | null = null;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      const res = await apiFetch(api(`/youtube/search?q=${encodeURIComponent(query)}`), { timeout: 20_000 });
-      if (!res.ok) return [];
-      const contentType = res.headers.get('content-type') || '';
-      if (!contentType.includes('application/json')) {
-        throw new Error(`Expected JSON, got ${contentType.slice(0, 40) || 'unknown'}`);
-      }
-      const data = await res.json();
-      const results = Array.isArray(data.results) ? data.results : [];
-      return results
-        .filter((r: any) => r && r.id)
-        .map((r: any) => ({
-          id: String(r.id),
-          title: String(r.title || 'Unknown'),
-          artist: String(r.artist || r.channel || 'Unknown'),
-          duration: Number(r.duration) || 0,
-          thumbnail: String(r.thumbnail || ''),
-          viewCount: Number(r.viewCount || r.view_count) || 0,
-        }))
-        .filter(isMusicResult);
-    } catch (err: any) {
-      lastError = err;
-      if (attempt < maxRetries) {
-        await new Promise(r => setTimeout(r, 800 * Math.pow(2, attempt)));
-      }
-    }
-  }
-  console.warn('[SearchStore] YouTube search failed after retries:', lastError?.message);
-  return [];
+async function fetchYouTubeSearch(query: string, signal?: AbortSignal): Promise<YTSong[]> {
+  // Client-side search via Invidious (bypasses broken server yt-dlp)
+  return youtubeSearch(query, signal);
 }
 
 // ---- Store ----
@@ -189,8 +145,8 @@ export const useSearchStore = create<SearchState>((set, get) => ({
   ytResults: [],
 
   suggestions: [],
-  loading: false,
-  ytLoading: false,
+  status: 'idle',
+  ytStatus: 'idle',
   page: 1,
   hasMore: true,
   error: null,
@@ -204,85 +160,137 @@ export const useSearchStore = create<SearchState>((set, get) => ({
 
   search: async (query: string) => {
     if (!query || !query.trim()) {
-      set({ libraryResults: [], ytResults: [], suggestions: [], loading: false, ytLoading: false, debouncedQuery: '', error: null });
+      set({
+        libraryResults: [],
+        ytResults: [],
+        suggestions: [],
+        status: 'idle',
+        ytStatus: 'idle',
+        debouncedQuery: '',
+        error: null,
+      });
       return;
     }
 
     const trimmed = query.trim();
-    set({ debouncedQuery: trimmed, loading: true, ytLoading: true, page: 1, hasMore: true, error: null });
+    const gen = ++searchGeneration;
+
+    // Cancel previous search
+    if (searchAbortController) searchAbortController.abort();
+    searchAbortController = new AbortController();
+    const { signal } = searchAbortController;
+
+    set({
+      debouncedQuery: trimmed,
+      status: 'loading',
+      ytStatus: 'loading',
+      page: 1,
+      hasMore: true,
+      error: null,
+    });
+
+    // Instant client-side suggestions from in-memory library (no network)
+    const librarySongs = useSongsStore.getState().songs;
+    const lowerQuery = trimmed.toLowerCase();
+    const instantSuggestions = librarySongs
+      .filter(s => s.title.toLowerCase().includes(lowerQuery) || s.artist.toLowerCase().includes(lowerQuery))
+      .slice(0, 5);
+    if (instantSuggestions.length > 0) {
+      set({ suggestions: instantSuggestions });
+    }
+
+    if (!navigator.onLine) {
+      set({ status: 'offline', ytStatus: 'offline', error: 'You are offline.' });
+      return;
+    }
 
     try {
-      const [libResults, ytResults] = await Promise.all([
+      const [libResult, ytResult] = await Promise.allSettled([
         fetchLibrarySearch(trimmed),
-        fetchYouTubeSearch(trimmed),
+        fetchYouTubeSearch(trimmed, signal),
       ]);
 
+      if (gen !== searchGeneration) return;
+
+      const lib = libResult.status === 'fulfilled' ? (libResult.value || []) : [];
+      const ytRaw = ytResult.status === 'fulfilled' ? (ytResult.value || []) : [];
+      const yt = ytRaw.slice(0, 15);
+
       set({
-        libraryResults: libResults || [],
-        ytResults: (ytResults || []).slice(0, 15),
-        suggestions: (libResults || []).slice(0, 5),
-        loading: false,
-        ytLoading: false,
+        libraryResults: lib,
+        ytResults: yt,
+        suggestions: lib.slice(0, 5),
+        status: lib.length > 0 || yt.length > 0 ? 'success' : 'empty',
+        ytStatus: yt.length > 0 ? 'success' : 'empty',
       });
     } catch (err) {
-      console.error('[SearchStore] search failed:', err);
-      set({ loading: false, ytLoading: false, error: 'Search failed. Please try again.' });
+      if (gen !== searchGeneration) return;
+      const msg = getErrorMessage(err);
+      const isOffline = err instanceof OfflineError;
+      set({
+        status: isOffline ? 'offline' : 'error',
+        ytStatus: 'idle',
+        error: isOffline ? msg : null,
+        libraryResults: [],
+        ytResults: [],
+      });
     }
   },
 
   searchYouTube: async (query: string, page = 1) => {
-    set({ ytLoading: true, error: null });
+    set({ ytStatus: 'loading', error: null });
     try {
       const results = await fetchYouTubeSearch(query);
       const sliced = (results || []).slice(0, page * 15);
       set({
         ytResults: sliced,
-        ytLoading: false,
+        ytStatus: sliced.length > 0 ? 'success' : 'empty',
         page,
         hasMore: (results || []).length > page * 15,
       });
     } catch (err) {
-      console.error('[SearchStore] searchYouTube failed:', err);
-      set({ ytLoading: false });
+      set({ ytStatus: 'error', error: getErrorMessage(err) });
     }
   },
 
   loadMore: async () => {
     const { debouncedQuery, page, hasMore } = get();
     if (!hasMore || !debouncedQuery) return;
-    set({ ytLoading: true, error: null });
+    set({ ytStatus: 'loading', error: null });
     try {
       const results = await fetchYouTubeSearch(debouncedQuery);
       const nextPage = page + 1;
       const sliced = (results || []).slice(0, nextPage * 15);
       set({
         ytResults: sliced,
-        ytLoading: false,
+        ytStatus: sliced.length > 0 ? 'success' : 'empty',
         page: nextPage,
         hasMore: (results || []).length > nextPage * 15,
       });
     } catch (err) {
-      console.error('[SearchStore] loadMore failed:', err);
-      set({ ytLoading: false });
+      set({ ytStatus: 'error', error: getErrorMessage(err) });
     }
   },
 
-  clear: () => set({
-    query: '',
-    debouncedQuery: '',
-    libraryResults: [],
-    ytResults: [],
-    suggestions: [],
-    loading: false,
-    ytLoading: false,
-    page: 1,
-    hasMore: true,
-    filter: 'all',
-    sort: 'relevance',
-    durationFilter: 'any',
-    genreFilter: '',
-    error: null,
-  }),
+  clear: () => {
+    searchGeneration++;
+    set({
+      query: '',
+      debouncedQuery: '',
+      libraryResults: [],
+      ytResults: [],
+      suggestions: [],
+      status: 'idle',
+      ytStatus: 'idle',
+      page: 1,
+      hasMore: true,
+      filter: 'all',
+      sort: 'relevance',
+      durationFilter: 'any',
+      genreFilter: '',
+      error: null,
+    });
+  },
 }));
 
 // ---- Derived selectors ----
