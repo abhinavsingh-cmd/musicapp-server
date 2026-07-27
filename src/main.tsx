@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
 import { ToastProvider } from './contexts/ToastContext'
 import { ErrorBoundary } from './components/ErrorBoundary'
+import { metricsCollector } from './services/metricsCollector'
 import App from './App.tsx'
 import './index.css'
 
@@ -42,7 +43,8 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
 requestAnimationFrame(() => {
   requestAnimationFrame(() => {
     perf.mark('app_raf2');
-    perf.log('Boot → 2nd RAF', 'boot→raf2', 'app_t0', 'app_raf2');
+    const dur = perf.log('Boot → 2nd RAF', 'boot→raf2', 'app_t0', 'app_raf2');
+    if (dur !== undefined) metricsCollector.setStartupTime(dur);
   });
 });
 

@@ -296,6 +296,34 @@ if (!(globalThis as any).__audioStoreInitialized) {
       backgroundPlaybackService.init();
     } catch {}
 
+    // Native MediaSession actions originate in the foreground service, while
+    // playback itself remains owned by the single web audio service. Bridge the
+    // two here so notification, lock-screen, headset, and Bluetooth actions
+    // all use exactly the same queue and state transitions as the UI.
+    backgroundAudio.onMediaAction((event) => {
+      const store = useAudioStore.getState();
+      switch (event.action) {
+        case 'play':
+          store.play();
+          break;
+        case 'pause':
+        case 'stop':
+          store.pause();
+          break;
+        case 'next':
+          store.nextSong();
+          break;
+        case 'previous':
+          store.previousSong();
+          break;
+        case 'seek':
+          if (typeof event.position === 'number' && Number.isFinite(event.position)) {
+            store.seek(event.position);
+          }
+          break;
+      }
+    }).catch(() => {});
+
     try {
       backgroundPlaybackService.onInterruption((type) => {
         if (type === 'headphone-unplug' || type === 'bluetooth-disconnect') {
@@ -379,12 +407,12 @@ function autoSkipNextSong() {
 export const useAudioStore = create<AudioStore>((set, get) => ({
   currentSong: null,
   isPlaying: false,
-  volume: loadVolume(),
+  volume: 0.7,
   isLoading: false,
   error: null,
   progress: 0,
   duration: 0,
-  favorites: loadFavorites(),
+  favorites: [],
 
   loadSong: (song: Song, playlist: Song[], index: number) => {
     clearNextSongRetry();
@@ -563,7 +591,20 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
   },
 }));
 
-if (import.meta.env.DEV) {
+if (typeof window !== 'undefined') {
+  const deferInit = typeof requestIdleCallback === 'function'
+    ? requestIdleCallback
+    : (cb: IdleRequestCallback) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 } as IdleDeadline), 0);
+  deferInit(() => {
+    try {
+      const favorites = loadFavorites();
+      const volume = loadVolume();
+      useAudioStore.setState({ favorites, volume });
+      audioService.setVolume(volume);
+    } catch {}
+  });
+}
+  if (import.meta.env.DEV) {
   try {
     useAudioStore.subscribe((state, prev) => {
       const changes: string[] = [];

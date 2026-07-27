@@ -4,24 +4,9 @@ import { useSongsStore } from '../stores/songsStore';
 import { SongTable } from '../features/library/SongTable';
 import { PlaylistDetail } from '../features/playlist/PlaylistDetail';
 import { Song, Playlist } from '../types/music';
-import { fetchYouTubeTrending } from '../services/musicApi';
+import { fetchYouTubeTrending, getInitialTrending } from '../services/musicApi';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Disc3, TrendingUp, Play, Music, Sparkles, Radio, Zap, Globe, RefreshCw } from 'lucide-react';
-
-// Trending cache: skip refetch if fetched within last 5 minutes
-let lastTrendingFetchTime = 0;
-const TRENDING_CACHE_MS = 30 * 60 * 1000;
-
-// --- Startup perf ---
-if (import.meta.env.DEV) {
-  performance.mark('home_enter');
-  requestAnimationFrame(() => {
-    performance.mark('home_first_frame');
-    performance.measure('home_enter→first_frame', 'home_enter', 'home_first_frame');
-    const m = performance.getEntriesByName('home_enter→first_frame')[0];
-    console.log(`[Perf] Home enter → First Frame: ${m?.duration?.toFixed(0)}ms`);
-  });
-}
 
 const SkeletonBlock: React.FC<{ className?: string }> = ({ className }) => (
   <div className={`animate-pulse rounded-xl bg-white/5 ${className || ''}`} />
@@ -130,84 +115,72 @@ const HeroSection = memo(({ songCount, onPlayAll, onPlayTrending }: { songCount:
 });
 HeroSection.displayName = 'HeroSection';
 
+const initialTrending = getInitialTrending();
+
 export const HomePage: React.FC = () => {
   const songs = useSongsStore((s) => s.songs);
   const ensureLoaded = useSongsStore((s) => s.ensureLoaded);
-  const [trending, setTrending] = useState<Song[]>([]);
-  const [trendingLoading, setTrendingLoading] = useState(true);
-  const [trendingSource, setTrendingSource] = useState<string>('none');
-  const [trendingLastUpdated, setTrendingLastUpdated] = useState<number | null>(null);
-  const [trendingError, setTrendingError] = useState(false);
+  const [trending, setTrending] = useState<Song[]>(initialTrending.songs);
+  const [trendingLoading, setTrendingLoading] = useState(false);
+  const [trendingError, setTrendingError] = useState<string | null>(null);
+  const [trendingSource, setTrendingSource] = useState<string>(initialTrending.source);
+  const [trendingLastUpdated, setTrendingLastUpdated] = useState<number | null>(initialTrending.lastUpdated);
   const [selectedPlaylist, setSelectedPlaylist] = useState<Playlist | null>(null);
   const [selectedArtist, setSelectedArtist] = useState<string | null>(null);
   const loadSong = useAudioStore((s) => s.loadSong);
 
-  // Fire-and-forget: kick off background fetches, never block render
   useEffect(() => {
     let cancelled = false;
 
-    // Safety: force loading off after 10s no matter what
-    const safetyTimer = setTimeout(() => {
-      if (!cancelled) setTrendingLoading(false);
-    }, 10_000);
+    const defer = typeof requestIdleCallback === 'function'
+      ? requestIdleCallback
+      : (cb: IdleRequestCallback) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 } as IdleDeadline), 0);
 
-    // Songs are already loaded from localStorage cache — just ensure API fetch happens in background
-    ensureLoaded().catch(() => {});
-
-    // Trending: defer to idle time so it never competes with first paint
-    const startTrending = () => {
+    defer(() => {
       if (cancelled) return;
-      const now = Date.now();
-      if (now - lastTrendingFetchTime >= TRENDING_CACHE_MS) {
-        fetchYouTubeTrending()
-          .then(result => {
-            if (cancelled) return;
-            lastTrendingFetchTime = Date.now();
-            setTrending(result.songs);
-            setTrendingSource(result.source);
-            setTrendingLastUpdated(result.lastUpdated);
-            setTrendingError(result.songs.length === 0);
+      ensureLoaded().catch(() => {});
+    });
+
+    defer(() => {
+      if (cancelled) return;
+      setTrendingLoading(true);
+      fetchYouTubeTrending()
+        .then(result => {
+          if (cancelled) return;
+          setTrending(result.songs);
+          setTrendingSource(result.source);
+          setTrendingLastUpdated(result.lastUpdated);
+          setTrendingLoading(false);
+          setTrendingError(null);
+        })
+        .catch(() => {
+          if (!cancelled) {
             setTrendingLoading(false);
-          })
-          .catch(() => {
-            if (!cancelled) {
-              setTrendingLoading(false);
-              setTrendingError(true);
-            }
-          });
-      } else {
-        setTrendingLoading(false);
-      }
-    };
+            setTrendingError('Could not load trending songs');
+          }
+        });
+    });
 
-    if (typeof requestIdleCallback === 'function') {
-      requestIdleCallback(startTrending, { timeout: 2000 });
-    } else {
-      setTimeout(startTrending, 500);
-    }
-
-    return () => { cancelled = true; clearTimeout(safetyTimer); };
+    return () => { cancelled = true; };
   }, [ensureLoaded]);
 
   const loadTrending = useCallback(() => {
     let cancelled = false;
     setTrendingLoading(true);
-    setTrendingError(false);
+    setTrendingError(null);
     fetchYouTubeTrending()
       .then(result => {
         if (!cancelled) {
-          lastTrendingFetchTime = Date.now();
           setTrending(result.songs);
           setTrendingSource(result.source);
           setTrendingLastUpdated(result.lastUpdated);
           setTrendingLoading(false);
-          setTrendingError(result.songs.length === 0);
         }
       })
       .catch(() => {
         if (!cancelled) {
           setTrendingLoading(false);
-          setTrendingError(true);
+          setTrendingError('Could not load trending songs');
         }
       });
     return () => { cancelled = true; };
@@ -284,7 +257,6 @@ export const HomePage: React.FC = () => {
 
       <div className="px-4 sm:px-6 space-y-8 sm:space-y-10 mt-6 sm:mt-8">
 
-        {/* Trending section — renders immediately with skeleton, fills in when ready */}
         <section>
           <div className="flex items-center justify-between mb-4 sm:mb-6">
             <h2 className="text-xl sm:text-2xl font-bold text-white flex items-center gap-2 sm:gap-3">
@@ -346,7 +318,6 @@ export const HomePage: React.FC = () => {
           )}
         </section>
 
-        {/* Playlists section — renders when songs load */}
         <section>
           <div className="flex items-center justify-between mb-4 sm:mb-6">
             <h2 className="text-xl sm:text-2xl font-bold text-white flex items-center gap-2 sm:gap-3">
@@ -386,7 +357,6 @@ export const HomePage: React.FC = () => {
           )}
         </section>
 
-        {/* Top Artists section */}
         {topArtists.length > 0 && (
           <section>
             <div className="flex items-center justify-between mb-4 sm:mb-6">
@@ -436,7 +406,6 @@ export const HomePage: React.FC = () => {
           </section>
         )}
 
-        {/* All Songs section */}
         <section>
           <div className="flex items-center justify-between mb-4 sm:mb-6">
             <h2 className="text-xl sm:text-2xl font-bold text-white flex items-center gap-2 sm:gap-3">

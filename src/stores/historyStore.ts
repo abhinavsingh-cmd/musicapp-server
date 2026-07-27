@@ -3,7 +3,7 @@ import { Song } from '../types/music';
 
 export interface HistoryEntry {
   song: Song;
-  playedAt: number; // timestamp
+  playedAt: number;
 }
 
 export interface HistoryStore {
@@ -13,6 +13,7 @@ export interface HistoryStore {
   clearHistory: () => void;
   getRecent: (count?: number) => HistoryEntry[];
   getMostPlayed: (count?: number) => Song[];
+  init: () => Promise<void>;
 }
 
 const STORAGE_KEY = 'listening_history';
@@ -28,8 +29,24 @@ function saveHistory(history: HistoryEntry[]): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(history.slice(0, MAX_HISTORY)));
 }
 
+let initPromise: Promise<void> | null = null;
+
+function initHistoryStore() {
+  if (initPromise) return initPromise;
+  initPromise = (async () => {
+    if (typeof window === 'undefined') return;
+    const history = loadHistory();
+    useHistoryStore.setState({ history });
+  })();
+  return initPromise;
+}
+
 export const useHistoryStore = create<HistoryStore>((set, get) => ({
-  history: loadHistory(),
+  history: [],
+
+  init: async () => {
+    await initHistoryStore();
+  },
 
   addSong: (song: Song) => {
     const { history } = get();
@@ -72,3 +89,10 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
       .map(e => e.song);
   },
 }));
+
+if (typeof window !== 'undefined') {
+  const deferInit = typeof requestIdleCallback === 'function'
+    ? requestIdleCallback
+    : (cb: IdleRequestCallback) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 } as IdleDeadline), 0);
+  deferInit(() => { initHistoryStore().catch(() => {}); });
+}

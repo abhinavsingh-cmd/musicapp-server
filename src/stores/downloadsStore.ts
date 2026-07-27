@@ -7,9 +7,11 @@ import {
   downloadSongWithProgress,
   evictOldCache,
   getCacheSize,
+  clearAllDownloads,
   DownloadedSong,
   DownloadProgress,
 } from '../utils/downloadManager';
+import { metricsCollector } from '../services/metricsCollector';
 
 export type DownloadError = {
   song: Song;
@@ -40,6 +42,7 @@ export interface DownloadsState {
   resolveSongUrl: (song: Song) => Song;
   setOnline: (online: boolean) => void;
   refreshCacheSize: () => Promise<void>;
+  clearDownloads: () => Promise<void>;
 }
 
 // Active abort controllers keyed by youtubeId
@@ -69,7 +72,7 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
     }
   },
 
-  downloadSong: async (song: Song) => {
+  downloadSong: async (song) => {
     if (!song.youtubeId && !song.audioUrl) return;
     const state = get();
     const key = song.youtubeId || song.id;
@@ -86,6 +89,8 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
     activeControllers.set(key, controller);
 
     set({ downloadingIds: new Set([...state.downloadingIds, key]) });
+
+    const dlStartTime = Date.now();
 
     try {
       const entry = await downloadSongWithProgress(
@@ -104,6 +109,17 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
           set((s) => ({
             progressMap: { ...s.progressMap, [key]: progress },
           }));
+
+          // Track download speed
+          if (progress.loaded > 0 && progress.total > 0) {
+            const elapsed = (Date.now() - (dlStartTime || Date.now())) / 1000;
+            if (elapsed > 0.5) {
+              metricsCollector.pushDownloadSpeed({
+                bytesPerSecond: progress.loaded / elapsed,
+                timestamp: Date.now(),
+              });
+            }
+          }
         },
         controller.signal,
       );
@@ -145,7 +161,7 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
     }
   },
 
-  cancelDownload: (youtubeId: string) => {
+  cancelDownload: (youtubeId) => {
     const controller = activeControllers.get(youtubeId);
     if (controller) {
       controller.abort();
@@ -160,7 +176,7 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
     });
   },
 
-  retryDownload: (song: Song) => {
+  retryDownload: (song) => {
     const key = song.youtubeId || song.id;
     set((s) => ({
       failedDownloads: s.failedDownloads.filter(f =>
@@ -170,7 +186,7 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
     get().downloadSong(song);
   },
 
-  removeSong: async (id: string) => {
+  removeSong: async (id) => {
     await removeDownload(id);
     set((s) => {
       const blobUrl = s.blobUrlCache[id];
@@ -182,11 +198,11 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
 
   clearFailed: () => set({ failedDownloads: [] }),
 
-  isDownloaded: (youtubeId: string) => get().downloads.some((d) => d.youtubeId === youtubeId || d.id === youtubeId),
-  isDownloading: (youtubeId: string) => get().downloadingIds.has(youtubeId),
-  getProgress: (youtubeId: string) => get().progressMap[youtubeId] || null,
+  isDownloaded: (youtubeId) => get().downloads.some((d) => d.youtubeId === youtubeId || d.id === youtubeId),
+  isDownloading: (youtubeId) => get().downloadingIds.has(youtubeId),
+  getProgress: (youtubeId) => get().progressMap[youtubeId] || null,
 
-  getBlobUrl: (youtubeId: string) => {
+  getBlobUrl: (youtubeId) => {
     const state = get();
     const download = state.downloads.find((d) => d.youtubeId === youtubeId || d.id === youtubeId);
     if (!download?.audioBlob) return null;
@@ -197,13 +213,13 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
     return url;
   },
 
-  resolveSongUrl: (song: Song) => {
+  resolveSongUrl: (song) => {
     const blobUrl = get().getBlobUrl(song.youtubeId || song.id);
     if (blobUrl) return { ...song, audioUrl: blobUrl };
     return song;
   },
 
-  setOnline: (online: boolean) => set({ isOnline: online }),
+  setOnline: (online) => set({ isOnline: online }),
 
   refreshCacheSize: async () => {
     try {
@@ -213,14 +229,38 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
       console.error('[DownloadsStore] Failed to refresh cache size');
     }
   },
+
+  clearDownloads: async () => {
+    try {
+      await clearAllDownloads();
+      
+      // Clear memory cache and state
+      set({
+        downloads: [],
+        downloadingIds: new Set(),
+        progressMap: {},
+        blobUrlCache: {},
+        failedDownloads: [],
+        cacheSize: 0,
+        loading: false,
+      });
+    } catch (error) {
+      console.error('[DownloadsStore] Failed to clear downloads:', error);
+    }
+  },
 }));
 
-// Wire up online/offline event listeners (runs once at import)
+// Wire up online/offline event listeners (deferred)
 if (typeof window !== 'undefined') {
-  window.addEventListener('online', () => {
-    useDownloadsStore.getState().setOnline(true);
-  });
-  window.addEventListener('offline', () => {
-    useDownloadsStore.getState().setOnline(false);
+  const deferInit = typeof requestIdleCallback === 'function'
+    ? requestIdleCallback
+    : (cb: IdleRequestCallback) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 } as IdleDeadline), 0);
+  deferInit(() => {
+    window.addEventListener('online', () => {
+      useDownloadsStore.getState().setOnline(true);
+    });
+    window.addEventListener('offline', () => {
+      useDownloadsStore.getState().setOnline(false);
+    });
   });
 }

@@ -1,8 +1,9 @@
 import { create } from 'zustand';
 import { Song } from '../types/music';
-import { api, apiFetch, NetworkError, TimeoutError, OfflineError } from '../config/api';
+import { OfflineError, NetworkError, TimeoutError } from '../config/api';
 import { youtubeSearch } from '../services/youtubeSearchService';
 import { useSongsStore } from './songsStore';
+import { metricsCollector } from '../services/metricsCollector';
 
 // ---- Types ----
 
@@ -29,6 +30,8 @@ interface SearchState {
   page: number;
   hasMore: boolean;
   error: string | null;
+  isCancelled: boolean;
+  cancelSearch: () => void;
 
   setQuery: (q: string) => void;
   setFilter: (f: FilterType) => void;
@@ -101,33 +104,6 @@ let searchAbortController: AbortController | null = null;
 let ytGeneration = 0;
 let ytAbortController: AbortController | null = null;
 
-async function fetchLibrarySearch(query: string): Promise<Song[]> {
-  try {
-    const res = await apiFetch(api(`/search?q=${encodeURIComponent(query)}`), { deduplicate: false });
-    const contentType = res.headers.get('content-type') || '';
-    if (!contentType.includes('application/json')) {
-      throw new Error(`Expected JSON, got ${contentType.slice(0, 40) || 'unknown'}`);
-    }
-    const data = await res.json();
-    return (data.songs || []).map((s: Record<string, unknown>) => ({
-      id: String(s.id || ''),
-      title: String(s.title || 'Unknown'),
-      artist: String(s.artist || 'Unknown'),
-      album: String(s.album || s.artist || ''),
-      duration: Number(s.duration) || 0,
-      genre: String(s.genre || 'Pop'),
-      coverArt: String(s.coverArt || ''),
-      audioUrl: s.youtubeId ? '' : String(s.audioUrl || ''),
-      youtubeId: String(s.youtubeId || ''),
-      releaseYear: Number(s.releaseYear) || 2024,
-      isFavorite: false,
-      playCount: 0,
-    }));
-  } catch {
-    return [];
-  }
-}
-
 async function fetchYouTubeSearch(query: string, signal?: AbortSignal): Promise<YTSong[]> {
   // Client-side search via Invidious (bypasses broken server yt-dlp)
   return youtubeSearch(query, signal);
@@ -152,6 +128,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
   page: 1,
   hasMore: true,
   error: null,
+  isCancelled: false,
 
   setQuery: (q) => set({ query: q }),
   setFilter: (f) => set({ filter: f }),
@@ -159,6 +136,11 @@ export const useSearchStore = create<SearchState>((set, get) => ({
   setDurationFilter: (d) => set({ durationFilter: d }),
   setGenreFilter: (g) => set({ genreFilter: g }),
   setSuggestions: (s) => set({ suggestions: s }),
+
+  cancelSearch: () => {
+    searchGeneration++;
+    if (searchAbortController) searchAbortController.abort();
+  },
 
   search: async (query: string) => {
     if (!query || !query.trim()) {
@@ -170,6 +152,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
         ytStatus: 'idle',
         debouncedQuery: '',
         error: null,
+        isCancelled: true,
       });
       return;
     }
@@ -182,24 +165,50 @@ export const useSearchStore = create<SearchState>((set, get) => ({
     searchAbortController = new AbortController();
     const { signal } = searchAbortController;
 
-    set({
-      debouncedQuery: trimmed,
-      status: 'loading',
-      ytStatus: 'loading',
-      page: 1,
-      hasMore: true,
-      error: null,
-    });
-
-    // Instant client-side suggestions from in-memory library (no network)
+    // Instant client-side search from in-memory library (zero network)
     const librarySongs = useSongsStore.getState().songs;
     const lowerQuery = trimmed.toLowerCase();
     const instantSuggestions = librarySongs
       .filter(s => s.title.toLowerCase().includes(lowerQuery) || s.artist.toLowerCase().includes(lowerQuery))
       .slice(0, 5);
-    if (instantSuggestions.length > 0) {
-      set({ suggestions: instantSuggestions });
-    }
+
+    // Search library immediately for library hits
+    const libraryHits = librarySongs
+      .filter(song => {
+        const title = song.title.toLowerCase();
+        const artist = song.artist.toLowerCase();
+        const album = song.album?.toLowerCase() || '';
+
+        if (lowerQuery.includes('official')) {
+          if (title.includes('official') || album.includes('official')) {
+            return true;
+          }
+        }
+
+        return title.includes(lowerQuery) ||
+               artist.includes(lowerQuery) ||
+               album.includes(lowerQuery) ||
+               artist.includes(lowerQuery.split(' ')[0]) ||
+               title === lowerQuery;
+      })
+      .sort((a, b) => {
+        const scoreA = (a.title.toLowerCase() === lowerQuery ? 100 : 0) + (a.artist.toLowerCase() === lowerQuery ? 50 : 0) + (a.album?.toLowerCase() === lowerQuery ? 30 : 0);
+        const scoreB = (b.title.toLowerCase() === lowerQuery ? 100 : 0) + (b.artist.toLowerCase() === lowerQuery ? 50 : 0) + (b.album?.toLowerCase() === lowerQuery ? 30 : 0);
+        return scoreB - scoreA;
+      })
+      .slice(0, 15);
+
+    set({
+      debouncedQuery: trimmed,
+      libraryResults: libraryHits,
+      suggestions: instantSuggestions,
+      status: libraryHits.length > 0 ? 'success' : 'loading',
+      ytStatus: 'loading',
+      page: 1,
+      hasMore: true,
+      error: null,
+      isCancelled: false,
+    });
 
     if (!navigator.onLine) {
       set({ status: 'offline', ytStatus: 'offline', error: 'You are offline.' });
@@ -207,22 +216,23 @@ export const useSearchStore = create<SearchState>((set, get) => ({
     }
 
     try {
-      const [libResult, ytResult] = await Promise.allSettled([
-        fetchLibrarySearch(trimmed),
-        fetchYouTubeSearch(trimmed, signal),
-      ]);
+      const searchStart = performance.now();
+      const ytResult = await fetchYouTubeSearch(trimmed, signal);
 
       if (gen !== searchGeneration) return;
 
-      const lib = libResult.status === 'fulfilled' ? (libResult.value || []) : [];
-      const ytRaw = ytResult.status === 'fulfilled' ? (ytResult.value || []) : [];
-      const yt = ytRaw.slice(0, 15);
+      const yt = ytResult ? ytResult.slice(0, 15) : [];
+
+      metricsCollector.pushSearchLatency({
+        query: trimmed,
+        duration: performance.now() - searchStart,
+        resultCount: yt.length + libraryHits.length,
+        timestamp: Date.now(),
+      });
 
       set({
-        libraryResults: lib,
         ytResults: yt,
-        suggestions: lib.slice(0, 5),
-        status: lib.length > 0 || yt.length > 0 ? 'success' : 'empty',
+        status: yt.length > 0 ? (libraryHits.length > 0 ? 'success' : 'success') : libraryHits.length > 0 ? 'success' : 'empty',
         ytStatus: yt.length > 0 ? 'success' : 'empty',
       });
     } catch (err) {
@@ -240,7 +250,6 @@ export const useSearchStore = create<SearchState>((set, get) => ({
   },
 
   searchYouTube: async (query: string, page = 1) => {
-    // Cancel previous YouTube search
     if (ytAbortController) ytAbortController.abort();
     ytAbortController = new AbortController();
     const { signal } = ytAbortController;
@@ -267,7 +276,6 @@ export const useSearchStore = create<SearchState>((set, get) => ({
     const { debouncedQuery, page, hasMore } = get();
     if (!hasMore || !debouncedQuery) return;
 
-    // Cancel previous loadMore
     if (ytAbortController) ytAbortController.abort();
     ytAbortController = new AbortController();
     const { signal } = ytAbortController;
@@ -291,7 +299,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
     }
   },
 
-  clear: () => {
+    clear: () => {
     searchGeneration++;
     ytGeneration++;
     if (searchAbortController) searchAbortController.abort();
@@ -311,6 +319,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
       durationFilter: 'any',
       genreFilter: '',
       error: null,
+      isCancelled: true,
     });
   },
 }));

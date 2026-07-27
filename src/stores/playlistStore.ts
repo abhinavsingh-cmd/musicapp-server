@@ -3,8 +3,6 @@ import { Playlist, Song } from '../types/music';
 
 const STORAGE_KEY = 'playlists';
 
-// ---- persistence ----
-
 function loadPlaylists(): Playlist[] {
   try {
     return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
@@ -19,44 +17,53 @@ function generateShareToken(): string {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 }
 
-// ---- store ----
-
 interface PlaylistStore {
   playlists: Playlist[];
   loading: boolean;
 
-  // CRUD
   createPlaylist: (data: { name: string; description?: string; coverArt?: string; isPublic?: boolean; collaborative?: boolean; songIds?: string[] }) => Playlist;
   updatePlaylist: (id: string, data: Partial<Playlist>) => void;
   deletePlaylist: (id: string) => void;
   duplicatePlaylist: (id: string) => Playlist | null;
 
-  // Songs
   addSong: (playlistId: string, song: Song) => void;
   addSongs: (playlistId: string, songs: Song[]) => void;
   removeSong: (playlistId: string, songId: string, songDuration?: number) => void;
   reorderSong: (playlistId: string, fromIndex: number, toIndex: number) => void;
 
-  // Toggles
   toggleFavorite: (id: string) => void;
   togglePublic: (id: string) => void;
   toggleCollaborative: (id: string) => void;
 
-  // Share
   generateShareLink: (id: string) => string;
   importPlaylist: (json: string) => boolean;
   exportPlaylist: (id: string) => string | null;
 
-  // Helpers
   getPlaylist: (id: string) => Playlist | undefined;
   getSongs: (id: string, allSongs: Song[]) => Song[];
+
+  init: () => Promise<void>;
+}
+
+let initPromise: Promise<void> | null = null;
+
+function initPlaylistStore() {
+  if (initPromise) return initPromise;
+  initPromise = (async () => {
+    if (typeof window === 'undefined') return;
+    const playlists = loadPlaylists();
+    usePlaylistStore.setState({ playlists });
+  })();
+  return initPromise;
 }
 
 export const usePlaylistStore = create<PlaylistStore>((set, get) => ({
-  playlists: loadPlaylists(),
+  playlists: [],
   loading: false,
 
-  // ---- CRUD ----
+  init: async () => {
+    await initPlaylistStore();
+  },
 
   createPlaylist: (data) => {
     const now = new Date().toISOString();
@@ -121,8 +128,6 @@ export const usePlaylistStore = create<PlaylistStore>((set, get) => ({
     return dup;
   },
 
-  // ---- Songs ----
-
   addSong: (playlistId, song) => {
     set((s) => {
       const updated = s.playlists.map((p) => {
@@ -181,8 +186,6 @@ export const usePlaylistStore = create<PlaylistStore>((set, get) => ({
     });
   },
 
-  // ---- Toggles ----
-
   toggleFavorite: (id) => {
     set((s) => {
       const updated = s.playlists.map((p) =>
@@ -212,8 +215,6 @@ export const usePlaylistStore = create<PlaylistStore>((set, get) => ({
       return { playlists: updated };
     });
   },
-
-  // ---- Share / Export / Import ----
 
   generateShareLink: (id) => {
     const p = get().playlists.find((pl) => pl.id === id);
@@ -260,8 +261,6 @@ export const usePlaylistStore = create<PlaylistStore>((set, get) => ({
     }
   },
 
-  // ---- Helpers ----
-
   getPlaylist: (id) => get().playlists.find((p) => p.id === id),
 
   getSongs: (id, allSongs) => {
@@ -271,3 +270,10 @@ export const usePlaylistStore = create<PlaylistStore>((set, get) => ({
     return p.songIds.map((sid) => songMap.get(sid)).filter(Boolean) as Song[];
   },
 }));
+
+if (typeof window !== 'undefined') {
+  const deferInit = typeof requestIdleCallback === 'function'
+    ? requestIdleCallback
+    : (cb: IdleRequestCallback) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 } as IdleDeadline), 0);
+  deferInit(() => { initPlaylistStore().catch(() => {}); });
+}

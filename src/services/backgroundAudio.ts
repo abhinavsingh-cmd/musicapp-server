@@ -1,10 +1,25 @@
-import { registerPlugin } from '@capacitor/core';
+import { registerPlugin, type PluginListenerHandle } from '@capacitor/core';
+import type { Plugin } from '@capacitor/core';
 
-export interface BackgroundAudioPlugin {
-  startService(options: { title: string; artist: string }): Promise<{ started: boolean }>;
+export type MediaAction = 'play' | 'pause' | 'next' | 'previous' | 'stop' | 'seek' | 'headset';
+
+export interface MediaActionEvent {
+  action: MediaAction;
+  position?: number;
+}
+
+export interface BackgroundAudioPlugin extends Plugin {
+  startService(options: { title: string; artist: string; album?: string }): Promise<{ started: boolean }>;
   stopService(): Promise<void>;
-  updateMetadata(options: { title: string; artist: string }): Promise<void>;
+  updateMetadata(options: { title: string; artist: string; album?: string }): Promise<void>;
   updatePlaybackState(options: { isPlaying: boolean; position: number }): Promise<void>;
+  setShuffle(): Promise<void>;
+  setRepeat(): Promise<void>;
+  getPlaybackState(): Promise<{ isPlaying: boolean; position: number; duration: number }>;
+  addListener(
+    eventName: 'mediaAction',
+    listenerFunc: (event: MediaActionEvent) => void,
+  ): Promise<PluginListenerHandle>;
 }
 
 let BackgroundAudio: BackgroundAudioPlugin | null = null;
@@ -15,7 +30,7 @@ try {
 }
 
 export const backgroundAudio = {
-  startService: async (options: { title: string; artist: string }): Promise<{ started: boolean }> => {
+  startService: async (options: { title: string; artist: string; album?: string }): Promise<{ started: boolean }> => {
     try {
       if (!BackgroundAudio) return { started: false };
       return await BackgroundAudio.startService(options);
@@ -31,7 +46,7 @@ export const backgroundAudio = {
       // Plugin not available on web
     }
   },
-  updateMetadata: async (options: { title: string; artist: string }): Promise<void> => {
+  updateMetadata: async (options: { title: string; artist: string; album?: string }): Promise<void> => {
     try {
       if (!BackgroundAudio) return;
       await BackgroundAudio.updateMetadata(options);
@@ -45,6 +60,38 @@ export const backgroundAudio = {
       await BackgroundAudio.updatePlaybackState(options);
     } catch {
       // ignore
+    }
+  },
+  setShuffle: async (): Promise<void> => {
+    try {
+      if (!BackgroundAudio) return;
+      await BackgroundAudio.setShuffle();
+    } catch {
+      // ignore
+    }
+  },
+  setRepeat: async (): Promise<void> => {
+    try {
+      if (!BackgroundAudio) return;
+      await BackgroundAudio.setRepeat();
+    } catch {
+      // ignore
+    }
+  },
+  getPlaybackState: async (): Promise<{ isPlaying: boolean; position: number; duration: number }> => {
+    try {
+      if (!BackgroundAudio) return { isPlaying: false, position: 0, duration: 0 };
+      return await BackgroundAudio.getPlaybackState();
+    } catch {
+      return { isPlaying: false, position: 0, duration: 0 };
+    }
+  },
+  onMediaAction: async (listener: (event: MediaActionEvent) => void): Promise<PluginListenerHandle | null> => {
+    try {
+      if (!BackgroundAudio) return null;
+      return await BackgroundAudio.addListener('mediaAction', listener);
+    } catch {
+      return null;
     }
   },
 };

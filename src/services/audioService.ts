@@ -5,6 +5,7 @@ import { backgroundAudio } from './backgroundAudio';
 import { youtubePlayerService } from './youtubePlayerService';
 import { showToast } from '../utils/toast';
 import { getPreloadedElement } from './preloadService';
+import { metricsCollector } from './metricsCollector';
 
 function isNativePlatform(): boolean {
   return !!(window as any).Capacitor;
@@ -97,6 +98,8 @@ export class AudioService {
   private lastProgressNotify = 0;
   private consecutiveFailures = 0;
   private progressInterval: ReturnType<typeof setInterval> | null = null;
+  private streamStartTime = 0;
+  private waitingStartTime = 0;
 
   private async getHtmlAudio(): Promise<HTMLAudioElement> {
     if (!this.htmlAudio) {
@@ -165,6 +168,7 @@ export class AudioService {
   };
 
   private handleWaiting = (): void => {
+    this.waitingStartTime = performance.now();
     this.emit('waiting');
   };
 
@@ -178,6 +182,25 @@ export class AudioService {
       this.startProgressTracking();
       this.emit('playing');
       this.emit('play', { song: this.state.currentSong });
+
+      // Push stream latency metric
+      if (this.streamStartTime > 0 && this.state.currentSong) {
+        metricsCollector.pushStreamLatency({
+          songId: this.state.currentSong.id,
+          duration: performance.now() - this.streamStartTime,
+          timestamp: Date.now(),
+        });
+      }
+
+      // Push buffer recovery metric if we were buffering
+      if (this.waitingStartTime > 0 && this.state.currentSong) {
+        metricsCollector.pushBufferSample({
+          songId: this.state.currentSong.id,
+          bufferDuration: performance.now() - this.waitingStartTime,
+          timestamp: Date.now(),
+        });
+        this.waitingStartTime = 0;
+      }
     }
   };
 
@@ -270,6 +293,7 @@ export class AudioService {
   async play(song: Song, playlist: Song[] = [], startIndex: number = 0): Promise<void> {
     const markId = `play_${song.id}_${Date.now()}`;
     performance.mark(markId);
+    this.streamStartTime = performance.now();
     log('▶ play() called:', { title: song.title, youtubeId: song.youtubeId || 'NONE' });
     
     const playbackId = ++this.currentPlaybackId;
@@ -437,7 +461,7 @@ export class AudioService {
         }
 
         log('✓ Playing successfully');
-        logPerf('HTML_Audio_Playing', `${markId}_play`);
+        logPerf('HTML_Audio_Playing', markId);
         this.consecutiveFailures = 0;
 
         if (isNativePlatform()) {
@@ -657,8 +681,13 @@ export class AudioService {
       this.setState({ isPlaying: false });
       this.stopProgressTracking();
       this.emit('pause');
+      // Keep the foreground service and paused notification alive so Android
+      // lock-screen, Bluetooth, and notification controls can resume playback.
       if (isNativePlatform()) {
-        backgroundAudio.stopService().catch(() => {});
+        backgroundAudio.updatePlaybackState({
+          isPlaying: false,
+          position: this.getCurrentTime(),
+        }).catch(() => {});
       }
     }
   }

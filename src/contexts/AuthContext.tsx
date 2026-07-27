@@ -1,9 +1,10 @@
-import { createContext, useContext, useState, type ReactNode } from 'react';
+import { createContext, useContext, useState, useEffect, type ReactNode } from 'react';
 import { User } from '../types/music';
 
 interface AuthContextType {
   user: User | null;
   isAuthenticated: boolean;
+  loading: boolean;
   login: (email: string, password: string) => Promise<void>;
   logout: () => void;
   upgradePlan: (plan: 'premium' | 'pro') => void;
@@ -26,15 +27,26 @@ function generateAvatar(name: string): string {
 }
 
 export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-  const [user, setUser] = useState<User | null>(() => {
-    try {
-      const savedUser = localStorage.getItem('musicAppUser');
-      return savedUser ? JSON.parse(savedUser) : null;
-    } catch {
-      localStorage.removeItem('musicAppUser');
-      return null;
-    }
-  });
+  const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const deferInit = typeof requestIdleCallback === 'function'
+      ? requestIdleCallback
+      : (cb: IdleRequestCallback) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 } as IdleDeadline), 0);
+    deferInit(() => {
+      try {
+        const savedUser = localStorage.getItem('musicAppUser');
+        if (savedUser) {
+          setUser(JSON.parse(savedUser));
+        }
+      } catch {
+        localStorage.removeItem('musicAppUser');
+      } finally {
+        setLoading(false);
+      }
+    });
+  }, []);
 
   const isAuthenticated = !!user;
 
@@ -87,7 +99,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   };
 
   return (
-    <AuthContext.Provider value={{ user, isAuthenticated, login, logout, upgradePlan }}>
+    <AuthContext.Provider value={{ user, isAuthenticated, loading, login, logout, upgradePlan }}>
       {children}
     </AuthContext.Provider>
   );

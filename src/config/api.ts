@@ -1,3 +1,5 @@
+import { metricsCollector } from '../services/metricsCollector';
+
 const API_BASE = import.meta.env.VITE_API_URL || '';
 
 export function api(path: string): string {
@@ -81,7 +83,6 @@ const inFlightRequests = new Map<string, Promise<Response>>();
 
 interface CacheEntry {
   response: Response;
-  bodyPromise: Promise<any>;
   expiresAt: number;
 }
 
@@ -107,21 +108,25 @@ function getCacheTTL(url: string): number {
 
 function getCachedResponse(url: string): Response | null {
   const entry = responseCache.get(url);
-  if (!entry) return null;
-  if (Date.now() > entry.expiresAt) {
-    responseCache.delete(url);
+  if (!entry) {
+    metricsCollector.pushCacheEvent(false, url);
     return null;
   }
+  if (Date.now() > entry.expiresAt) {
+    responseCache.delete(url);
+    metricsCollector.pushCacheEvent(false, url);
+    return null;
+  }
+  metricsCollector.pushCacheEvent(true, url);
   return entry.response.clone();
 }
 
 function setCachedResponse(url: string, response: Response): void {
   const ttl = getCacheTTL(url);
-  // Cache the cloned response + pre-read body so subsequent reads are instant
+  // Store a clone so every consumer receives an unread response body.
   const clone = response.clone();
   responseCache.set(url, {
     response: clone,
-    bodyPromise: clone.clone().text().catch(() => ''),
     expiresAt: Date.now() + ttl,
   });
 }
@@ -171,13 +176,36 @@ export async function apiFetch(
     return inFlightRequests.get(dedupeKey)!.then(r => r.clone());
   }
 
+  const startTime = performance.now();
   const promise = _doFetch(url, { timeout, retries, ...fetchOptions });
 
   if (dedupeKey) {
-    inFlightRequests.set(dedupeKey, promise.finally(() => inFlightRequests.delete(dedupeKey)));
+    const trackedPromise = promise.finally(() => inFlightRequests.delete(dedupeKey));
+    trackedPromise.catch(() => {});
+    inFlightRequests.set(dedupeKey, trackedPromise);
   }
 
-  const response = await promise;
+  let response: Response;
+  try {
+    response = await promise;
+  } catch (err: any) {
+    metricsCollector.pushFailedRequest({
+      url,
+      status: 0,
+      error: err?.message || String(err),
+      timestamp: Date.now(),
+    });
+    throw err;
+  }
+
+  const duration = performance.now() - startTime;
+  metricsCollector.pushApiLatency({
+    url,
+    duration,
+    timestamp: Date.now(),
+    cached: false,
+    ok: response.ok,
+  });
 
   // Cache successful GET responses
   if (method === 'GET' && response.ok && cacheTTL !== 0) {
@@ -191,21 +219,29 @@ async function _doFetch(
   url: string,
   options: { timeout: number; retries: number } & RequestInit,
 ): Promise<Response> {
-  const { timeout, retries, ...fetchOptions } = options;
+  const { timeout, retries, signal: callerSignal, ...fetchOptions } = options;
 
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt <= retries; attempt++) {
+    if (callerSignal?.aborted) {
+      throw new DOMException('Request was aborted', 'AbortError');
+    }
+
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeout);
+    let timedOut = false;
+    const abortFromCaller = () => controller.abort(callerSignal?.reason);
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeout);
+    callerSignal?.addEventListener('abort', abortFromCaller, { once: true });
 
     try {
       const res = await fetch(url, {
         ...fetchOptions,
         signal: controller.signal,
       });
-
-      clearTimeout(timer);
 
       if (res.ok) return res;
 
@@ -225,17 +261,22 @@ async function _doFetch(
         url,
       );
     } catch (err: any) {
-      clearTimeout(timer);
-
       if (err instanceof ApiError) throw err;
 
-      if (err.name === 'AbortError') {
+      // Cancellation belongs to the caller (for example, an outdated search),
+      // not to the retry policy. Let the caller discard it immediately.
+      if (callerSignal?.aborted) throw err;
+
+      if (err.name === 'AbortError' && timedOut) {
         lastError = new TimeoutError(url);
       } else if (!isOnline()) {
         throw new OfflineError();
       } else {
         lastError = new NetworkError(url, err);
       }
+    } finally {
+      clearTimeout(timer);
+      callerSignal?.removeEventListener('abort', abortFromCaller);
     }
 
     if (attempt < retries) {

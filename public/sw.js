@@ -20,7 +20,7 @@ self.addEventListener('install', (event) => {
           const html = await res.text();
           // Extract JS and CSS file paths from the built HTML
           const matches = html.matchAll(/(?:src|href)="(\/assets\/[^"]+)"/g);
-          const assetUrls: string[] = [];
+          const assetUrls = [];
           for (const m of matches) {
             assetUrls.push(m[1]);
           }

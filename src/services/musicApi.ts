@@ -123,29 +123,37 @@ const BUILTIN_TRENDING: TrendingResult = {
   ],
 };
 
-// --- In-memory cache (30 min TTL) ---
+// --- localStorage + in-memory cache ---
+const TRENDING_CACHE_KEY = 'trending_cache_v1';
+const TRENDING_CACHE_TTL = 30 * 60 * 1000;
 let trendingCache: TrendingResult | null = null;
 let trendingCacheTime = 0;
-const TRENDING_CACHE_TTL = 30 * 60 * 1000;
 
-function buildLocalTrending(): TrendingResult {
-  const all = cachedSongs || [];
-  if (all.length === 0) return BUILTIN_TRENDING;
-  const shuffled = [...all].sort(() => Math.random() - 0.5).slice(0, 20);
-  return {
-    songs: shuffled.map(s => ({ ...s, id: 'trending-' + s.id, genre: 'Trending' as const })),
-    source: 'builtin',
-    lastUpdated: Date.now(),
-  };
+function loadTrendingCache(): TrendingResult | null {
+  try {
+    const raw = localStorage.getItem(TRENDING_CACHE_KEY);
+    if (!raw) return null;
+    const entry = JSON.parse(raw);
+    if (!entry.songs || !Array.isArray(entry.songs)) return null;
+    if (Date.now() - entry.cachedAt > TRENDING_CACHE_TTL * 2) return null;
+    return { songs: entry.songs, source: entry.source || 'cache', lastUpdated: entry.lastUpdated || null };
+  } catch { return null; }
 }
 
-export async function fetchYouTubeTrending(): Promise<TrendingResult> {
-  // 1. Return cache if fresh (<30 min)
-  if (trendingCache && Date.now() - trendingCacheTime < TRENDING_CACHE_TTL) {
-    return trendingCache;
-  }
+function saveTrendingCache(result: TrendingResult): void {
+  try {
+    localStorage.setItem(TRENDING_CACHE_KEY, JSON.stringify({
+      songs: result.songs,
+      source: result.source,
+      lastUpdated: result.lastUpdated,
+      cachedAt: Date.now(),
+    }));
+  } catch {}
+}
 
-  // 2. Try server: 5s timeout, up to 2 retries (3 total), hard 8s cap
+let networkFetchInFlight: Promise<void> | null = null;
+
+async function fetchTrendingFromNetwork(): Promise<void> {
   const startTime = Date.now();
   for (let attempt = 0; attempt < 3; attempt++) {
     if (Date.now() - startTime > 8_000) break;
@@ -179,15 +187,40 @@ export async function fetchYouTubeTrending(): Promise<TrendingResult> {
         };
         trendingCache = result;
         trendingCacheTime = Date.now();
-        return result;
+        saveTrendingCache(result);
+        return;
       }
     } catch { /* retry */ }
     if (attempt < 2) await new Promise(r => setTimeout(r, 500));
   }
+}
 
-  // 3. Fallback: local songs → builtin
-  const fallback = buildLocalTrending();
-  trendingCache = fallback;
-  trendingCacheTime = Date.now();
-  return fallback;
+export function getInitialTrending(): TrendingResult {
+  try {
+    if (trendingCache) return trendingCache;
+    const cached = loadTrendingCache();
+    if (cached && cached.songs.length > 0) {
+      trendingCache = cached;
+      trendingCacheTime = Date.now();
+      return cached;
+    }
+  } catch {}
+  return BUILTIN_TRENDING;
+}
+
+export async function fetchYouTubeTrending(): Promise<TrendingResult> {
+  if (!networkFetchInFlight) {
+    networkFetchInFlight = fetchTrendingFromNetwork().finally(() => {
+      networkFetchInFlight = null;
+    });
+  }
+
+  if (trendingCache && Date.now() - trendingCacheTime < TRENDING_CACHE_TTL) {
+    return trendingCache;
+  }
+
+  await networkFetchInFlight;
+
+  const result = getInitialTrending();
+  return result;
 }

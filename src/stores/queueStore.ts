@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { Song } from '../types/music';
+import { preloadNextSongs as preload } from '../services/preloadService';
 
 const QUEUE_KEY = 'playback-queue';
 const MAX_RECENT = 50;
@@ -89,19 +90,43 @@ export interface QueueState {
   ensureQueueSize: () => Promise<void>;
   preloadNextSongs: () => Promise<void>;
   appendRecommendations: (songs: Song[]) => Promise<void>;
+  init: () => Promise<void>;
 }
 
-const saved = loadQueue();
+let initPromise: Promise<void> | null = null;
+
+function initQueueStore() {
+  if (initPromise) return initPromise;
+  initPromise = (async () => {
+    if (typeof window === 'undefined') return;
+    const saved = loadQueue();
+    const recent = loadRecent();
+    useQueueStore.setState({
+      queue: saved.queue,
+      currentIndex: saved.currentIndex,
+      recentlyPlayed: recent,
+      repeatMode: saved.repeatMode,
+      isShuffled: saved.isShuffled,
+      originalQueue: saved.originalQueue,
+      autoplayEnabled: saved.autoplayEnabled,
+    });
+  })();
+  return initPromise;
+}
 
 export const useQueueStore = create<QueueState>((set, get) => ({
-  queue: saved.queue,
-  currentIndex: saved.currentIndex,
-  recentlyPlayed: loadRecent(),
-  repeatMode: saved.repeatMode,
-  isShuffled: saved.isShuffled,
-  originalQueue: saved.originalQueue,
-  autoplayEnabled: saved.autoplayEnabled,
+  queue: [],
+  currentIndex: 0,
+  recentlyPlayed: [],
+  repeatMode: 'off',
+  isShuffled: false,
+  originalQueue: [],
+  autoplayEnabled: true,
   isFetchingRecommendations: false,
+
+  init: async () => {
+    await initQueueStore();
+  },
 
   setQueue: (songs, startIndex = 0) => {
     if (songs.length === 0) return;
@@ -191,7 +216,6 @@ export const useQueueStore = create<QueueState>((set, get) => ({
 
     let prevIndex: number;
     if (isShuffled) {
-      // Go back one position in the shuffled queue
       prevIndex = (currentIndex - 1 + queue.length) % queue.length;
     } else {
       prevIndex = (currentIndex - 1 + queue.length) % queue.length;
@@ -364,7 +388,6 @@ export const useQueueStore = create<QueueState>((set, get) => ({
 
   preloadNextSongs: async () => {
     const { queue, currentIndex } = get();
-    const { preloadNextSongs: preload } = await import('../services/preloadService');
     preload(queue, currentIndex, { count: 3 });
   },
 
@@ -376,9 +399,15 @@ export const useQueueStore = create<QueueState>((set, get) => ({
     if (newSongs.length > 0) {
       set((s) => ({ queue: [...s.queue, ...newSongs] }));
       schedulePersist(get());
-      const { preloadNextSongs: preload } = await import('../services/preloadService');
       const newIdx = get().currentIndex;
       preload(get().queue, newIdx, { count: 3 });
     }
   },
 }));
+
+if (typeof window !== 'undefined') {
+  const deferInit = typeof requestIdleCallback === 'function'
+    ? requestIdleCallback
+    : (cb: IdleRequestCallback) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 } as IdleDeadline), 0);
+  deferInit(() => { initQueueStore().catch(() => {}); });
+}

@@ -88,6 +88,22 @@ function txCount(db: IDBDatabase, store: string): Promise<number> {
   });
 }
 
+async function txClear(db: IDBDatabase, store: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const req = db.transaction(store, 'readwrite').objectStore(store).clear();
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function clearAllDownloads(): Promise<void> {
+  const db = await openDB();
+  await txClear(db, STORE_SONGS);
+  await txClear(db, STORE_THUMBS);
+  await txClear(db, STORE_META);
+  db.close();
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -109,8 +125,19 @@ export interface DownloadedSong {
 export interface CachedThumbnail {
   url: string;
   blob: Blob;
-  blobUrl: string;
   cachedAt: number;
+}
+
+// Object URLs are scoped to a document and cannot be persisted in IndexedDB.
+// Keep the current-document URLs in memory, keyed by the original image URL.
+const thumbnailUrlCache = new Map<string, string>();
+
+function getThumbnailObjectUrl(entry: CachedThumbnail): string {
+  const existing = thumbnailUrlCache.get(entry.url);
+  if (existing) return existing;
+  const objectUrl = URL.createObjectURL(entry.blob);
+  thumbnailUrlCache.set(entry.url, objectUrl);
+  return objectUrl;
 }
 
 export interface CachedMeta {
@@ -177,7 +204,8 @@ export async function downloadSongWithProgress(
     onProgress?.({ loaded: received, total: contentLength || received, percent: contentLength ? Math.round((received / contentLength) * 100) : 0 });
   }
 
-  const blob = new Blob(chunks.map(c => c.buffer as ArrayBuffer), { type: 'audio/mpeg' });
+  const contentType = res.headers.get('content-type')?.split(';', 1)[0] || 'audio/mpeg';
+  const blob = new Blob(chunks, { type: contentType });
 
   // Persist to IndexedDB
   const db = await openDB();
@@ -210,7 +238,10 @@ export async function cacheThumbnail(url: string): Promise<string> {
   if (!url) return '';
   const db = await openDB();
   const existing = await txGet<CachedThumbnail>(db, STORE_THUMBS, url);
-  if (existing?.blobUrl) { db.close(); return existing.blobUrl; }
+  if (existing?.blob) {
+    db.close();
+    return getThumbnailObjectUrl(existing);
+  }
 
   try {
     const controller = new AbortController();
@@ -219,10 +250,9 @@ export async function cacheThumbnail(url: string): Promise<string> {
     clearTimeout(timer);
     if (!res.ok) { db.close(); return url; }
     const blob = await res.blob();
-    const blobUrl = URL.createObjectURL(blob);
-    await txPut(db, STORE_THUMBS, { url, blob, blobUrl, cachedAt: Date.now() });
+    await txPut(db, STORE_THUMBS, { url, blob, cachedAt: Date.now() });
     db.close();
-    return blobUrl;
+    return getThumbnailObjectUrl({ url, blob, cachedAt: Date.now() });
   } catch {
     db.close();
     return url;
@@ -234,7 +264,7 @@ export async function getCachedThumbnail(url: string): Promise<string> {
   const db = await openDB();
   const entry = await txGet<CachedThumbnail>(db, STORE_THUMBS, url);
   db.close();
-  return entry?.blobUrl || url;
+  return entry?.blob ? getThumbnailObjectUrl(entry) : url;
 }
 
 // ---------------------------------------------------------------------------

@@ -103,7 +103,10 @@ export const ChartsPage: React.FC = () => {
   );
 
   useEffect(() => {
-    fetchCharts();
+    const defer = typeof requestIdleCallback === 'function'
+      ? requestIdleCallback
+      : (cb: IdleRequestCallback) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 } as IdleDeadline), 0);
+    defer(() => { fetchCharts(); });
   }, [fetchCharts]);
 
   const charts = useMemo(() =>
@@ -142,6 +145,8 @@ export const ChartsPage: React.FC = () => {
   const visibleCharts = charts.slice(startIndex, startIndex + visibleCount);
 
   const handlePlay = useCallback((song: ChartSong, index: number) => {
+    const filteredChart = charts[index] || charts.find((c) => c.id === song.id);
+    if (!filteredChart) return;
     const songData = {
       id: song.id,
       title: song.title,
@@ -154,7 +159,7 @@ export const ChartsPage: React.FC = () => {
       youtubeId: song.youtubeId,
       releaseYear: new Date().getFullYear(),
     };
-    loadSong(songData, (charts || []).map(c => ({
+    loadSong(songData, (filteredChart ? [filteredChart] : []).map(c => ({
       id: c.id,
       title: c.title,
       artist: c.artist,

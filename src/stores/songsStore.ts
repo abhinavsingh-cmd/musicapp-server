@@ -11,7 +11,6 @@ interface SongsState {
   ensureLoaded: () => Promise<void>;
 }
 
-// --- localStorage cache for instant startup ---
 const SONGS_CACHE_KEY = 'songs_catalog_v1';
 
 interface SongsCacheEntry {
@@ -94,35 +93,42 @@ async function fetchWithTimeout(): Promise<Song[]> {
   return inflight;
 }
 
-/**
- * On cold start, immediately try to load songs from IndexedDB in background.
- * This fills the store quickly on first visit (before API responds).
- * IndexedDB is async so it never blocks the first render.
- */
-const initialSongs = loadCachedSongs();
-if (!initialSongs || initialSongs.length === 0) {
-  getAllCachedMetadata()
-    .then(meta => {
-      if (meta.length === 0) return;
-      const current = useSongsStore.getState();
-      if (current.fetched) return; // API already responded, don't overwrite
-      const songs = meta.map(cachedMetaToSong);
-      if (songs.length > 0) {
-        useSongsStore.setState({ songs });
-        saveCachedSongs(songs);
+let initPromise: Promise<void> | null = null;
+
+function initSongsStore() {
+  if (initPromise) return initPromise;
+  initPromise = (async () => {
+    if (typeof window === 'undefined') return;
+    const cached = loadCachedSongs();
+    if (cached && cached.length > 0) {
+      useSongsStore.setState({ songs: cached });
+    }
+    try {
+      const meta = await getAllCachedMetadata();
+      if (meta.length > 0) {
+        const current = useSongsStore.getState();
+        if (!current.fetched) {
+          const songs = meta.map(cachedMetaToSong);
+          if (songs.length > 0) {
+            useSongsStore.setState({ songs });
+            saveCachedSongs(songs);
+          }
+        }
       }
-    })
-    .catch(() => {});
+    } catch {}
+  })();
+  return initPromise;
 }
 
 export const useSongsStore = create<SongsState>((set, get) => ({
-  songs: initialSongs || [],
+  songs: [],
   loading: false,
   error: false,
   fetched: false,
 
   ensureLoaded: async () => {
     if (get().fetched) return;
+    await initSongsStore();
     set({ loading: true, error: false });
 
     try {
@@ -134,7 +140,6 @@ export const useSongsStore = create<SongsState>((set, get) => ({
         set({ loading: false, fetched: true });
       }
     } catch {
-      // Network failed — try IndexedDB as fallback
       try {
         const cachedMeta = await getAllCachedMetadata();
         if (cachedMeta.length > 0) {
@@ -147,3 +152,10 @@ export const useSongsStore = create<SongsState>((set, get) => ({
     }
   },
 }));
+
+if (typeof window !== 'undefined') {
+  const deferInit = typeof requestIdleCallback === 'function'
+    ? requestIdleCallback
+    : (cb: IdleRequestCallback) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 } as IdleDeadline), 0);
+  deferInit(() => { initSongsStore().catch(() => {}); });
+}

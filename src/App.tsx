@@ -20,6 +20,7 @@ const DownloadsPage = lazy(() => import('./pages/DownloadsPage'));
 const ChartsPage = lazy(() => import('./pages/ChartsPage'));
 const HistoryPage = lazy(() => import('./pages/HistoryPage'));
 const SettingsPage = lazy(() => import('./pages/SettingsPage'));
+const DevPage = lazy(() => import('./pages/DevPage'));
 
 const PageSpinner = () => (
   <div className="flex-1 p-6 space-y-4">
@@ -106,6 +107,9 @@ const App: React.FC = () => {
                   } />
                   <Route path="/settings" element={
                     <ErrorBoundary level="page"><Suspense fallback={<PageSpinner />}><SettingsPage /></Suspense></ErrorBoundary>
+                  } />
+                  <Route path="/dev" element={
+                    <ErrorBoundary level="page"><Suspense fallback={<PageSpinner />}><DevPage /></Suspense></ErrorBoundary>
                   } />
                   <Route path="*" element={
                     <ErrorBoundary level="page"><Suspense fallback={<PageSpinner />}><NotFoundPage /></Suspense></ErrorBoundary>
