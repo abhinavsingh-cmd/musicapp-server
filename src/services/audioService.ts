@@ -28,7 +28,6 @@ interface AudioState {
 }
 
 type AudioEventType = 'play' | 'pause' | 'ended' | 'progress' | 'loaded' | 'error' | 'timeupdate' | 'waiting' | 'canplay' | 'playing';
-
 type AudioEventHandler = (event: AudioEventType, data?: any) => void;
 
 function log(...args: any[]) {
@@ -106,12 +105,8 @@ export class AudioService {
       log('Creating new HTMLAudioElement');
       this.htmlAudio = new Audio();
       this.htmlAudio.preload = 'auto';
-      // NOTE: Do NOT set crossOrigin here. It can cause CORS tainting with
-      // blob URLs on some WebViews, preventing MediaElementAudioSourceNode
-      // from producing output. Cross-origin URLs are handled by the server.
       backgroundPlaybackService.registerAudioElement(this.htmlAudio);
       this.attachHtmlAudioListeners();
-      // Init equalizer — await it so we know the AudioContext state before playback
       await equalizerService.init(this.htmlAudio);
     }
     return this.htmlAudio;
@@ -182,8 +177,6 @@ export class AudioService {
       this.startProgressTracking();
       this.emit('playing');
       this.emit('play', { song: this.state.currentSong });
-
-      // Push stream latency metric
       if (this.streamStartTime > 0 && this.state.currentSong) {
         metricsCollector.pushStreamLatency({
           songId: this.state.currentSong.id,
@@ -191,8 +184,6 @@ export class AudioService {
           timestamp: Date.now(),
         });
       }
-
-      // Push buffer recovery metric if we were buffering
       if (this.waitingStartTime > 0 && this.state.currentSong) {
         metricsCollector.pushBufferSample({
           songId: this.state.currentSong.id,
@@ -223,10 +214,6 @@ export class AudioService {
     }
   };
 
-  /**
-   * Wait for the audio element to reach readyState >= 3 (HAVE_FUTURE_DATA).
-   * Returns true if canplay fired, false on timeout or error.
-   */
   private waitForCanPlay(audio: HTMLAudioElement, timeoutMs: number): Promise<boolean> {
     return new Promise((resolve) => {
       if (audio.readyState >= 3) {
@@ -251,9 +238,6 @@ export class AudioService {
     });
   }
 
-  /**
-   * Emit error + ended events and show a toast. Centralizes failure handling.
-   */
   private emitPlaybackError(song: Song, message: string): void {
     logError('✗ PLAYBACK FAILED:', { title: song.title, message });
     this.consecutiveFailures++;
@@ -269,7 +253,7 @@ export class AudioService {
 
   private emit(event: AudioEventType, data?: any): void {
     this.listeners.forEach(cb => {
-      try { cb(event, data); } catch { /* listener error */ }
+      try { cb(event, data); } catch { }
     });
   }
 
@@ -282,14 +266,6 @@ export class AudioService {
     return this.state;
   }
 
-  /**
-   * Main entry point: play a song.
-   * Pipeline:
-   *  1. Abort previous playback immediately
-   *  2. Detect path (audioUrl → HTML audio, youtubeId → YouTube IFrame)
-   *  3. Load + play with timeout
-   *  4. Emit events for store
-   */
   async play(song: Song, playlist: Song[] = [], startIndex: number = 0): Promise<void> {
     const markId = `play_${song.id}_${Date.now()}`;
     performance.mark(markId);
@@ -309,9 +285,7 @@ export class AudioService {
     });
     this.emit('loaded', { song, playlist, index: startIndex });
     
-    // --- Path detection ---
     if (song.audioUrl && song.audioUrl.trim()) {
-      // PATH 1: Direct audio (downloaded songs, blob URLs)
       log('PATH 1: HTML audio via audioUrl');
       this.useYoutubePlayer = false;
       this.playHtmlAudio(song, playbackId, markId);
@@ -319,7 +293,6 @@ export class AudioService {
     }
     
     if (song.youtubeId && isValidYouTubeId(song.youtubeId)) {
-      // PATH 2: YouTube — go straight to IFrame API (server stream is broken on Render)
       log('PATH 2: YouTube IFrame (direct)', { youtubeId: song.youtubeId });
       preconnectYouTube();
       this.useYoutubePlayer = true;
@@ -327,18 +300,12 @@ export class AudioService {
       return;
     }
     
-    // No source
     logError('NO AUDIO SOURCE for:', song.title);
     this.setState({ error: 'No audio source available', isLoading: false });
     this.emit('error', 'No audio source available');
     this.emit('ended');
   }
 
-  /**
-   * HTML Audio playback (audioUrl songs).
-   * Key: reuse existing HTMLAudioElement, don't destroy/recreate.
-   * Pipeline: reset → init equalizer (ensure AudioContext running) → set src → wait canplay → play → retry.
-   */
   private async playHtmlAudio(song: Song, playbackId: number, markId: string): Promise<void> {
     const MAX_RETRIES = 3;
     const CANPLAY_TIMEOUT_MS = 3_000;
@@ -360,9 +327,7 @@ export class AudioService {
       const preloaded = getPreloadedElement(song);
       if (preloaded && preloaded !== audio) {
         log('Adopting preloaded audio element data');
-        try {
-          preloaded.pause();
-        } catch {}
+        try { preloaded.pause(); } catch {}
       }
 
       // Reset the element
@@ -370,11 +335,6 @@ export class AudioService {
       audio.removeAttribute('src');
       try { audio.load(); } catch {}
 
-      // CRITICAL: Init/resume the equalizer's AudioContext BEFORE assigning src.
-      // If the AudioContext is suspended when createMediaElementSource() runs,
-      // the source node captures the audio element but routes through a dead path —
-      // time advances, events fire, but NO SOUND is heard.
-      // Skip re-init if equalizer is already connected to this element and AudioContext is running.
       if (!equalizerService.isReady || equalizerService.audioContextState !== 'running') {
         try {
           await equalizerService.init(audio);
@@ -389,7 +349,6 @@ export class AudioService {
       // Assign source AFTER equalizer is ready
       audio.src = song.audioUrl!;
 
-      // Verify volume is not zero
       if (audio.volume === 0 || Number.isNaN(audio.volume)) {
         const safe = this.state.volume || 0.7;
         log(`⚠ Volume was ${audio.volume}, resetting to ${safe}`);
@@ -398,13 +357,11 @@ export class AudioService {
         audio.volume = this.state.volume;
       }
 
-      // Verify not muted
       if (audio.muted) {
         log('⚠ Audio was muted — unmuting');
         audio.muted = false;
       }
 
-      // Verify playbackRate
       if (audio.playbackRate !== 1) {
         log(`⚠ playbackRate was ${audio.playbackRate} — resetting to 1`);
         audio.playbackRate = 1;
@@ -433,27 +390,13 @@ export class AudioService {
         return;
       }
 
-      log('canplay ✓ — calling play()...', {
-        currentTime: audio.currentTime,
-        duration: audio.duration,
-        readyState: audio.readyState,
-        networkState: audio.networkState,
-        paused: audio.paused,
-        volume: audio.volume,
-        muted: audio.muted,
-        playbackRate: audio.playbackRate,
-        eqState: equalizerService.audioContextState,
-        eqReady: equalizerService.isReady,
-      });
+      log('canplay ✓ — calling play()...');
 
       try {
         await audio.play();
 
         if (this.currentPlaybackId !== playbackId) return;
 
-        // CRITICAL: After play() succeeds, verify audio is actually audible.
-        // On some WebViews, the AudioContext can silently suspend even after resume().
-        // If so, try one more resume to unblock audio output.
         if (equalizerService.audioContextState !== 'running') {
           log('⚠ AudioContext NOT running after play() — attempting emergency resume');
           await equalizerService.resume();
@@ -494,14 +437,6 @@ export class AudioService {
     }
   }
 
-  /**
-   * YouTube IFrame playback with retry loop.
-   * Pipeline:
-   *  1. Stop any current playback
-   *  2. Subscribe to player events
-   *  3. Load video — if it fails, destroy player and retry (up to 3x)
-   *  4. On success, mark stream working and emit loaded
-   */
   private async playYouTube(song: Song, playbackId: number, markId: string): Promise<void> {
     const MAX_YT_RETRIES = 3;
 
@@ -573,7 +508,6 @@ export class AudioService {
               this.consecutiveFailures++;
               this.setState({ error: `Playback error: ${data}`, isLoading: false, isPlaying: false });
               this.emit('error', `Playback error: ${data}`);
-              // Non-retryable errors: skip immediately
               const nonRetryable = typeof data === 'number' && [100, 101, 103, 150].includes(data);
               if (nonRetryable || this.consecutiveFailures >= 2) {
                 this.emit('ended');
@@ -587,13 +521,12 @@ export class AudioService {
 
         if (this.currentPlaybackId !== playbackId) return;
 
-        // Stream confirmed working — mark for future fast loads
         if (song.youtubeId) youtubePlayerService.markStreamWorking(song.youtubeId);
 
         logPerf('YouTube_Loaded', markId);
         this.setState({ isLoading: false, duration: song.duration });
         this.emit('loaded', { song });
-        return; // Success — exit retry loop
+        return;
       } catch (err) {
         if (this.currentPlaybackId !== playbackId) return;
 
@@ -602,14 +535,12 @@ export class AudioService {
 
         if (attempt < MAX_YT_RETRIES) {
           log(`Retrying in ${500 * attempt}ms...`);
-          // Destroy player to force fresh initialization on next attempt
           this.stopYouTubePlayer();
           youtubePlayerService.destroy();
           await new Promise(r => setTimeout(r, 500 * attempt));
           continue;
         }
 
-        // All retries exhausted
         clearBufferingTimeout();
         this.emitPlaybackError(song, `Cannot play "${song.title}": ${msg}`);
       }
@@ -634,8 +565,6 @@ export class AudioService {
   private stopHtmlAudio(): void {
     if (this.htmlAudio) {
       this.htmlAudio.pause();
-      // Don't destroy — just stop. The element stays alive for reuse.
-      // Only clear source if we're switching to YouTube
       if (this.useYoutubePlayer) {
         try { this.htmlAudio.currentTime = 0; } catch {}
         this.htmlAudio.removeAttribute('src');
@@ -681,8 +610,6 @@ export class AudioService {
       this.setState({ isPlaying: false });
       this.stopProgressTracking();
       this.emit('pause');
-      // Keep the foreground service and paused notification alive so Android
-      // lock-screen, Bluetooth, and notification controls can resume playback.
       if (isNativePlatform()) {
         backgroundAudio.updatePlaybackState({
           isPlaying: false,
@@ -704,28 +631,23 @@ export class AudioService {
       const playbackId = this.currentPlaybackId;
       log('resume() — verifying audio state...');
 
-      // Init/resume equalizer AudioContext (blocks output if suspended)
       try {
         await equalizerService.init(this.htmlAudio);
       } catch {}
       if (this.currentPlaybackId !== playbackId) return;
 
-      // Verify volume
       if (this.htmlAudio.volume === 0 || Number.isNaN(this.htmlAudio.volume)) {
         this.htmlAudio.volume = this.state.volume || 0.7;
       }
 
-      // Verify not muted
       if (this.htmlAudio.muted) {
         this.htmlAudio.muted = false;
       }
 
-      // Verify playbackRate
       if (this.htmlAudio.playbackRate !== 1) {
         this.htmlAudio.playbackRate = 1;
       }
 
-      // Wait for canplay if audio isn't ready
       if (this.htmlAudio.readyState < 3) {
         log('resume() — waiting for canplay...');
         await this.waitForCanPlay(this.htmlAudio, 3_000);
@@ -829,3 +751,5 @@ export class AudioService {
     this.consecutiveFailures = 0;
   }
 }
+
+export const audioService = new AudioService();
