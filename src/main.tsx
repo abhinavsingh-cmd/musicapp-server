@@ -27,17 +27,34 @@ const perf = {
 // Mark the very first frame
 perf.mark('app_t0');
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <ErrorBoundary level="app">
-      <BrowserRouter>
-        <ToastProvider>
-          <App />
-        </ToastProvider>
-      </BrowserRouter>
-    </ErrorBoundary>
-  </React.StrictMode>
-);
+// Immediate render with cached data
+const initialRender = () => {
+  ReactDOM.createRoot(document.getElementById('root')!).render(
+    <React.StrictMode>
+      <ErrorBoundary level="app">
+        <BrowserRouter>
+          <ToastProvider>
+            <App />
+          </ToastProvider>
+        </BrowserRouter>
+      </ErrorBoundary>
+    </React.StrictMode>
+  );
+};
+
+// Show the app immediately - no blocking
+initialRender();
+
+// Preload critical resources in background
+if (typeof window !== 'undefined') {
+  const defer = typeof requestIdleCallback === 'function'
+    ? requestIdleCallback
+    : (cb: IdleRequestCallback) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 } as IdleDeadline), 0);
+  
+  import('./services/preloadService').then(module => {
+    defer(() => module.preloadCriticalResources().catch(() => {}));
+  }).catch(() => {});
+}
 
 // Measure after first render + paint
 requestAnimationFrame(() => {
