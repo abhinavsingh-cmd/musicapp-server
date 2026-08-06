@@ -412,7 +412,7 @@ const SONGS = [
   ["lgT1AidzRWM","Beautiful","Eminem","Hip Hop",360],
   ["nddTokI9hHY","Thank You For Loving Me","Bon Jovi","Rock",280],
   ["Um7pMggPnug","Chained To The Rhythm","Katy Perry","Pop",240],
-  ["v2H4l9RpkwM","Breaking The Habit","Linkin Park","Rock",220],
+  ["v2H4l9RpkwM","Breaking The Habit","Linkin Park","Rock",225],
   ["dMOhDyB_o4Q","Run Away With Me","Carly Rae Jepsen","Pop",240],
   ["4YFu4dvMHHY","Dumb","Nirvana","Rock",145],
   ["8SbUC-UaAxE","November Rain","Guns N Roses","Rock",330],
@@ -932,11 +932,12 @@ app.get("/api/youtube/search", (req, res) => {
   attemptSearch();
 });
 
-// YouTube Music Trending endpoint - fetches real trending music
+// ── Trending system ───────────────────────────────────────────────────────
 let trendingCache = null;
 let trendingCacheTime = 0;
 let trendingSource = 'none';
 let pendingTrendingFetch = null;
+let lastTrendingAttempt = 0;
 
 const TRENDING_YT_QUERIES = [
   "youtube music trending",
@@ -955,6 +956,8 @@ const CHARTS_QUERIES = [
   "indian top 10 songs",
   "bollywood top hits",
 ];
+
+const CHARTS_CACHE_TTL = 30 * 60 * 1000;
 
 function runYtDlpSearch(query, maxResults = 8) {
   return new Promise((resolve) => {
@@ -1067,108 +1070,121 @@ function getBuiltInFallback() {
   }));
 }
 
-app.get("/api/youtube/trending", (req, res) => {
+async function doFetchTrending() {
+  const startMs = Date.now();
+  console.log("[Trending] Starting live fetch...");
+
+  try {
+    console.log("[Trending] Step 1: Fetching live YouTube Music trending...");
+    const liveResults = await fetchLiveTrending();
+    console.log("[Trending] Step 1 got", liveResults.length, "results");
+    if (liveResults.length >= 10) {
+      const elapsed = Date.now() - startMs;
+      console.log("[Trending] LIVE SUCCESS: Got", liveResults.length, "results in", elapsed, "ms");
+      return { results: liveResults, source: 'youtube_music' };
+    }
+
+    console.log("[Trending] Step 2: Fetching official charts...");
+    const chartResults = await fetchOfficialCharts();
+    console.log("[Trending] Step 2 got", chartResults.length, "chart results");
+    const merged = [...liveResults, ...chartResults];
+    const deduped = [];
+    const seen = new Set();
+    for (const r of merged) {
+      if (!seen.has(r.id)) {
+        seen.add(r.id);
+        deduped.push(r);
+      }
+    }
+    console.log("[Trending] Merged:", deduped.length, "deduplicated results");
+    if (deduped.length >= 5) {
+      const elapsed = Date.now() - startMs;
+      console.log("[Trending] CHARTS SUCCESS: Got", deduped.length, "results in", elapsed, "ms");
+      return { results: deduped, source: 'charts' };
+    }
+
+    console.log("[Trending] Step 3: Checking cache...");
+    if (trendingCache && trendingCache.length > 0) {
+      console.log("[Trending] CACHE HIT:", trendingCache.length, "songs from", trendingSource);
+      return { results: trendingCache, source: 'cache' };
+    }
+
+    console.log("[Trending] Step 4: Using built-in fallback");
+    return { results: getBuiltInFallback(), source: 'builtin' };
+  } catch (err) {
+    console.error("[Trending] Error:", err.message);
+    if (trendingCache && trendingCache.length > 0) {
+      console.log("[Trending] ERROR FALLBACK: Using cache:", trendingCache.length, "songs");
+      return { results: trendingCache, source: 'cache' };
+    }
+    return { results: getBuiltInFallback(), source: 'builtin' };
+  }
+}
+
+/**
+ * Ensure trending cache is populated. If stale/missing, kicks off a background
+ * fetch and returns the best available data immediately.
+ */
+async function ensureTrending(res) {
   const now = Date.now();
-  res.setHeader("Cache-Control", "public, max-age=300, stale-while-revalidate=600");
+  const cacheFresh = trendingCache && trendingCache.length > 0 && (now - trendingCacheTime) < CHARTS_CACHE_TTL;
 
-  if (trendingCache && trendingCache.length > 0 && (now - trendingCacheTime) < 600000) {
-    return ok(res, { results: trendingCache, source: trendingSource, lastUpdated: trendingCacheTime }, "Trending from cache");
+  if (cacheFresh) {
+    return { results: trendingCache, source: trendingSource, lastUpdated: trendingCacheTime, fresh: true };
   }
 
-  console.log("[Trending] Fetching fresh trending data...");
-  let responded = false;
-
-  const respond = (results, source) => {
-    if (responded) return;
-    responded = true;
-
-    if (results && results.length > 0) {
-      trendingCache = results.slice(0, 40);
-      trendingCacheTime = Date.now();
-      trendingSource = source;
-      console.log("[Trending] Cached", trendingCache.length, "results from", source);
-      return ok(res, { results: trendingCache, source, lastUpdated: trendingCacheTime }, `Trending fetched from ${source}`);
-    } else {
-      console.log("[Trending] No live results, using built-in fallback");
-      const fallback = getBuiltInFallback();
-      trendingCache = fallback;
-      trendingCacheTime = Date.now();
-      trendingSource = 'builtin';
-      return ok(res, { results: fallback, source: 'builtin', lastUpdated: trendingCacheTime }, "Trending fallback (built-in)");
-    }
-  };
-
-  // Deduplicate concurrent requests — only one fetch runs at a time
   if (!pendingTrendingFetch) {
-    pendingTrendingFetch = (async () => {
-      try {
-        console.log("[Trending] Step 1: Fetching live YouTube Music trending...");
-        const liveResults = await fetchLiveTrending();
-        if (liveResults.length >= 10) {
-          return { results: liveResults, source: 'youtube_music' };
-        }
-        console.log("[Trending] Step 1 got", liveResults.length, "results, need more...");
-
-        console.log("[Trending] Step 2: Fetching official charts...");
-        const chartResults = await fetchOfficialCharts();
-        const merged = [...liveResults, ...chartResults];
-        const deduped = [];
-        const seen = new Set();
-        for (const r of merged) {
-          if (!seen.has(r.id)) {
-            seen.add(r.id);
-            deduped.push(r);
-          }
-        }
-        if (deduped.length >= 5) {
-          return { results: deduped, source: 'charts' };
-        }
-        console.log("[Trending] Step 2 got", deduped.length, "total results");
-
-        console.log("[Trending] Step 3: Checking cache...");
-        if (trendingCache && trendingCache.length > 0) {
-          return { results: trendingCache, source: 'cache' };
-        }
-
-        console.log("[Trending] Step 4: Using built-in fallback");
-        return { results: getBuiltInFallback(), source: 'builtin' };
-      } catch (err) {
-        console.error("[Trending] Error:", err.message);
-        if (trendingCache && trendingCache.length > 0) {
-          return { results: trendingCache, source: 'cache' };
-        }
-        return { results: getBuiltInFallback(), source: 'builtin' };
-      }
-    })().finally(() => { pendingTrendingFetch = null; });
+    lastTrendingAttempt = now;
+    pendingTrendingFetch = doFetchTrending()
+      .then(result => {
+        trendingCache = result.results.slice(0, 40);
+        trendingCacheTime = Date.now();
+        trendingSource = result.source;
+        return result;
+      })
+      .finally(() => { pendingTrendingFetch = null; });
   }
 
-  pendingTrendingFetch.then(({ results, source }) => respond(results, source));
-
-  setTimeout(() => {
-    if (!responded) {
-      console.log("[Trending] Safety timeout, responding with partial results");
-      if (trendingCache && trendingCache.length > 0) {
-        respond(trendingCache, 'cache');
-      } else {
-        respond(getBuiltInFallback(), 'builtin');
-      }
+  try {
+    const result = await pendingTrendingFetch;
+    return { results: result.results, source: result.source, lastUpdated: trendingCacheTime, fresh: true };
+  } catch {
+    if (trendingCache && trendingCache.length > 0) {
+      return { results: trendingCache, source: trendingSource, lastUpdated: trendingCacheTime, fresh: false };
     }
-  }, 25000);
+    return { results: getBuiltInFallback(), source: 'builtin', lastUpdated: Date.now(), fresh: false };
+  }
+}
+
+// ── Shared trending endpoint (used by both /api/youtube/trending and /api/charts/trending.json) ──
+app.get("/api/youtube/trending", async (req, res) => {
+  res.setHeader("Cache-Control", "public, max-age=300, stale-while-revalidate=600");
+  try {
+    const data = await ensureTrending(res);
+    return ok(res, { results: data.results, source: data.source, lastUpdated: data.lastUpdated }, `Trending from ${data.source}`);
+  } catch (err) {
+    console.error("[Trending] Endpoint error:", err.message);
+    const fallback = getBuiltInFallback();
+    return ok(res, { results: fallback, source: 'builtin', lastUpdated: Date.now() }, "Trending fallback (error)");
+  }
 });
 
-// Fast cached trending endpoint — returns cache immediately without waiting for yt-dlp
-app.get("/api/charts/trending.json", (req, res) => {
+// Fast endpoint — returns cache immediately, triggers background fetch if stale
+app.get("/api/charts/trending.json", async (req, res) => {
   console.log("[Charts] GET /api/charts/trending.json — cache:", trendingCache ? trendingCache.length : 0, "source:", trendingSource);
   res.setHeader("Cache-Control", "public, max-age=300, stale-while-revalidate=600");
-  if (trendingCache && trendingCache.length > 0) {
-    return ok(res, { results: trendingCache, source: trendingSource, lastUpdated: trendingCacheTime }, "Cached trending data");
+
+  try {
+    const data = await ensureTrending(res);
+    return ok(res, { results: data.results, source: data.source, lastUpdated: data.lastUpdated }, `Trending from ${data.source}`);
+  } catch (err) {
+    console.error("[Charts] Endpoint error:", err.message);
+    const fallback = getBuiltInFallback();
+    trendingCache = fallback;
+    trendingCacheTime = Date.now();
+    trendingSource = 'builtin';
+    return ok(res, { results: fallback, source: 'builtin', lastUpdated: trendingCacheTime }, "Builtin trending fallback");
   }
-  // No cache yet — return builtin fallback immediately
-  const fallback = getBuiltInFallback();
-  trendingCache = fallback;
-  trendingCacheTime = Date.now();
-  trendingSource = 'builtin';
-  return ok(res, { results: fallback, source: 'builtin', lastUpdated: trendingCacheTime }, "Builtin trending fallback");
 });
 
 app.get("/api/health", (req, res) => {
@@ -1528,7 +1544,18 @@ app.use((err, _req, res, _next) => {
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, "0.0.0.0", () => {
-  console.log("Server: " + songs.length + " songs on http://localhost:" + PORT);
+  console.log("[Server] " + songs.length + " songs on http://localhost:" + PORT);
+  console.log("[Server] Starting background trending fetch...");
+  doFetchTrending()
+    .then(result => {
+      trendingCache = result.results.slice(0, 40);
+      trendingCacheTime = Date.now();
+      trendingSource = result.source;
+      console.log("[Server] Startup trending:", result.source, "-", trendingCache.length, "songs");
+    })
+    .catch(err => {
+      console.error("[Server] Startup trending fetch failed:", err.message);
+    });
   autoScrapeTrending().catch((err) => {
     console.error("[Auto-Scrape] Fatal error:", err.message || err);
   });

@@ -1,8 +1,8 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, memo } from 'react';
 import { useAudioStore } from '../../stores/audioStore';
 import { useReducedMotion } from 'framer-motion';
 
-export const AlbumArtBackground: React.FC = () => {
+export const AlbumArtBackground: React.FC = memo(() => {
   const currentSong = useAudioStore((s) => s.currentSong);
   const shouldReduceMotion = useReducedMotion();
   const [active, setActive] = useState<'a' | 'b'>('a');
@@ -42,9 +42,10 @@ export const AlbumArtBackground: React.FC = () => {
   }), [active, transitionDuration]);
 
   const imageStyle = useMemo(() => ({
-    filter: 'blur(80px) saturate(150%) brightness(0.4)',
-    transform: 'scale(1.1)',
+    filter: 'blur(20px) saturate(120%) brightness(0.6)',
+    transform: 'scale(1.05)',
     animation: shouldReduceMotion ? 'none' : `album-zoom ${zoomDuration} ease-in-out infinite alternate`,
+    willChange: 'transform, opacity',
   }), [shouldReduceMotion, zoomDuration]);
 
   return (
@@ -106,4 +107,5 @@ export const AlbumArtBackground: React.FC = () => {
       <div className="absolute inset-0 bg-black/40" />
     </div>
   );
-};
+});
+AlbumArtBackground.displayName = 'AlbumArtBackground';

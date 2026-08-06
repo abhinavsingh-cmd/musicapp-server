@@ -4,7 +4,7 @@ import { useAudioStore } from '../../stores/audioStore';
 import { useDownloadsStore } from '../../stores/downloadsStore';
 import { Song } from '../../types/music';
 import { cn } from '../../utils/cn';
-import { Heart, Play, Pause, Clock, Download, Check, X } from 'lucide-react';
+import { Heart, Play, Pause, Clock, Download, Check, X, AlertTriangle } from 'lucide-react';
 import CachedImage from '../../components/CachedImage';
 import { useSongContextMenu } from '../../components/SongContextMenu';
 
@@ -87,6 +87,17 @@ const SongRow = memo(({ song, index, isActive, isCurrentlyPlaying, isLoading, on
 });
 SongRow.displayName = 'SongRow';
 
+interface RetryState {
+  lastRetryTime: number;
+  retryCount: number;
+  isRetrying: boolean;
+  error: string | null;
+  timeout: number;
+}
+
+const RETRY_TIMEOUT_MS = 30_000;
+const MAX_RETRY_ATTEMPTS = 3;
+
 export const SongTable: React.FC<SongTableProps> = memo(({ songs, className }) => {
   const navigate = useNavigate();
   const currentSongId = useAudioStore((s) => s.currentSong?.id ?? null);
@@ -103,6 +114,14 @@ export const SongTable: React.FC<SongTableProps> = memo(({ songs, className }) =
   const [scrollTop, setScrollTop] = useState(0);
   const [containerHeight, setContainerHeight] = useState(600);
   const rafRef = useRef<number>(0);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retryStateRef = useRef<RetryState>({
+    lastRetryTime: 0,
+    retryCount: 0,
+    isRetrying: false,
+    error: null,
+    timeout: RETRY_TIMEOUT_MS
+  });
 
   const { handleContextMenu, handleLongPress, ContextMenu } = useSongContextMenu(
     (artist) => navigate(`/search?q=${encodeURIComponent(artist)}`),
@@ -141,7 +160,7 @@ export const SongTable: React.FC<SongTableProps> = memo(({ songs, className }) =
       }
       rafRef.current = 0;
     });
-  }, []);
+  }, [containerRef]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -157,25 +176,136 @@ export const SongTable: React.FC<SongTableProps> = memo(({ songs, className }) =
       el.removeEventListener('scroll', handleScroll);
       observer.disconnect();
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
     };
-  }, [handleScroll]);
+  }, [handleScroll, containerRef]);
 
-  const startIndex = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - BUFFER);
-  const visibleCount = Math.min(songs.length - startIndex, Math.ceil(containerHeight / ROW_HEIGHT) + BUFFER * 2);
-  const visibleSongs = songs.slice(startIndex, startIndex + visibleCount);
+  useEffect(() => {
+    if (isLoading && songs.length === 0) {
+      retryStateRef.current = {
+        ...retryStateRef.current,
+        lastRetryTime: Date.now(),
+        error: null,
+        isRetrying: false
+      };
+    }
+  }, [isLoading, songs.length]);
+
+  const shouldShowRetry = useMemo(() => {
+    const state = retryStateRef.current;
+    const now = Date.now();
+    const timeSinceLastRetry = now - state.lastRetryTime;
+    const isTimeout = timeSinceLastRetry >= state.timeout;
+    const maxRetriesReached = state.retryCount >= MAX_RETRY_ATTEMPTS;
+    
+    return songs.length === 0 && isLoading && (isTimeout || maxRetriesReached);
+  }, [songs.length, isLoading]);
+
+  const handleRetry = useCallback(() => {
+    retryStateRef.current = {
+      ...retryStateRef.current,
+      isRetrying: true,
+      error: null
+    };
+    
+    timeoutRef.current = setTimeout(() => {
+      retryStateRef.current = {
+        ...retryStateRef.current,
+        isRetrying: false,
+        retryCount: retryStateRef.current.retryCount + 1,
+        lastRetryTime: Date.now()
+      };
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('retry-library'));
+      }
+    }, 1000);
+  }, []);
+
+  const handleTimeout = useCallback(() => {
+    retryStateRef.current = {
+      ...retryStateRef.current,
+      error: `Loading timed out after ${RETRY_TIMEOUT_MS / 1000}s. Unable to load your library.`,
+      isRetrying: false
+    };
+    
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+  }, []);
+
+  useEffect(() => {
+    if (shouldShowRetry && !retryStateRef.current.isRetrying) {
+      handleTimeout();
+    }
+  }, [shouldShowRetry, handleTimeout]);
+
+  const startIndex = useMemo(() => {
+    return Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - BUFFER);
+  }, [scrollTop]);
+
+  const visibleCount = useMemo(() => {
+    return Math.min(songs.length - startIndex, Math.ceil(containerHeight / ROW_HEIGHT) + BUFFER * 2);
+  }, [songs.length, startIndex, containerHeight]);
+
+  const visibleSongs = useMemo(() => {
+    return songs.slice(startIndex, startIndex + visibleCount);
+  }, [songs, startIndex, visibleCount]);
 
   const handleRowClick = useCallback((song: Song, index: number) => {
     if (currentSongId === song.id) { togglePlayPause(); }
     else {
       const dl = downloadsMap.get(song.youtubeId ?? '');
       const songToPlay = dl ? { ...song, audioUrl: dl } : song;
-      const playlist = songs.map(s => {
-        const audio = downloadsMap.get(s.youtubeId ?? '');
-        return audio ? { ...s, audioUrl: audio } : s;
-      });
-      loadSong(songToPlay, playlist, index);
+      loadSong(songToPlay, songs, index);
     }
-  }, [currentSongId, loadSong, togglePlayPause, songs, downloadsMap]);
+  }, [currentSongId, loadSong, togglePlayPause, songs]);
+
+  if (songs.length === 0 && isLoading && !shouldShowRetry) {
+    return (
+      <div className={cn("w-full flex items-center justify-center py-16", className)}>
+        <div className="text-center space-y-4">
+          <div className="w-12 h-12 rounded-full border-4 border-violet-500 border-t-transparent animate-spin mx-auto" />
+          <p className="text-gray-400">Loading your library...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (songs.length === 0 && retryStateRef.current.error && !retryStateRef.current.isRetrying) {
+    return (
+      <div className={cn("w-full flex items-center justify-center py-16", className)}>
+        <div className="max-w-md w-full text-center space-y-4">
+          <div className="w-16 h-16 rounded-2xl bg-red-500/10 flex items-center justify-center mx-auto">
+            <AlertTriangle className="w-8 h-8 text-red-400" />
+          </div>
+          <div>
+            <h3 className="text-lg font-semibold text-white mb-2">Failed to load library</h3>
+            <p className="text-gray-400 text-sm mb-4">{retryStateRef.current.error}</p>
+          </div>
+          <div className="flex items-center justify-center gap-3">
+            <button
+              onClick={handleRetry}
+              disabled={retryStateRef.current.isRetrying}
+              className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-violet-500/10 hover:bg-violet-500/20 text-violet-400 text-sm font-medium transition-all disabled:opacity-50"
+            >
+              {retryStateRef.current.isRetrying ? (
+                <div className="w-4 h-4 border-2 border-violet-400 border-t-transparent rounded-full animate-spin" />
+              ) : (
+                "Try Again"
+              )}
+            </button>
+            <button
+              onClick={() => window.location.reload()}
+              className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 text-white text-sm font-medium transition-all"
+            >
+              Reload App
+            </button>
+          </div>
+          <p className="text-gray-600 text-xs">
+            Retry attempts: {retryStateRef.current.retryCount}/{MAX_RETRY_ATTEMPTS}
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className={cn("w-full", className)}>

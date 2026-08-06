@@ -7,6 +7,13 @@ class LRUCacheNode<T> {
   accessedAt: number;
   prev: LRUCacheNode<T> | null = null;
   next: LRUCacheNode<T> | null = null;
+
+  constructor(key: string, value: T, timestamp: number, accessedAt: number) {
+    this.key = key;
+    this.value = value;
+    this.timestamp = timestamp;
+    this.accessedAt = accessedAt;
+  }
 }
 
 class LRUCache<K, V> {
@@ -15,21 +22,19 @@ class LRUCache<K, V> {
   private size = 0;
   private maxSize: number;
   private ttl: number;
-  private readonly defaultTTL: number;
   
   constructor(maxSize: number = 100, defaultTTL: number = 5 * 60 * 1000) {
     this.maxSize = maxSize;
-    this.defaultTTL = defaultTTL;
     this.ttl = defaultTTL;
   }
 
   set(key: K, value: V, ttl?: number): boolean {
     const now = Date.now();
-    const ttlToUse = ttl !== undefined ? ttl : this.ttl;
+    this.ttl = ttl !== undefined ? ttl : this.ttl;
     
     let node: LRUCacheNode<V>;
     if (this.head) {
-      node = new LRUCacheNode<V>();
+      node = new LRUCacheNode<V>(key as string, value, now, now);
       node.key = key as string;
       node.value = value;
       node.timestamp = now;
@@ -40,7 +45,7 @@ class LRUCache<K, V> {
       this.head = node;
       this.size++;
     } else {
-      node = new LRUCacheNode<V>();
+      node = new LRUCacheNode<V>(key as string, value, now, now);
       node.key = key as string;
       node.value = value;
       node.timestamp = now;
@@ -146,16 +151,6 @@ class LRUCache<K, V> {
 export class CacheManager {
   private static instance: CacheManager;
 
-  // Cache instances
-  private searchCache: LRUCache<string, any>;
-  private trendingCache: LRUCache<string, any>;
-  private artworkCache: LRUCache<string, string>;
-  private albumsCache: LRUCache<string, any>;
-  private artistsCache: LRUCache<string, any>;
-  private lyricsCache: LRUCache<string, string>;
-  private streamUrlCache: LRUCache<string, string>;
-  private metadataCache: LRUCache<string, any>;
-
   // Cache TTLs (in milliseconds)
   private readonly SEARCH_TTL = 2 * 60 * 1000; // 2 minutes
   private readonly TRENDING_TTL = 5 * 60 * 1000; // 5 minutes
@@ -165,6 +160,17 @@ export class CacheManager {
   private readonly LYRICS_TTL = 1 * 60 * 1000; // 1 minute
   private readonly STREAM_TTL = 24 * 60 * 60 * 1000; // 24 hours
   private readonly METADATA_TTL = 30 * 60 * 1000; // 30 minutes
+  private readonly defaultTTL = 30 * 60 * 1000; // 30 minutes
+
+  // Cache instances
+  private searchCache = new LRUCache<string, any>(200, this.SEARCH_TTL);
+  private trendingCache = new LRUCache<string, any>(50, this.TRENDING_TTL);
+  private artworkCache = new LRUCache<string, string>(500, this.ARTWORK_TTL);
+  private albumsCache = new LRUCache<string, any>(200, this.ALBUMS_TTL);
+  private artistsCache = new LRUCache<string, any>(200, this.ARTISTS_TTL);
+  private lyricsCache = new LRUCache<string, string>(200, this.LYRICS_TTL);
+  private streamUrlCache = new LRUCache<string, string>(500, this.STREAM_TTL);
+  private metadataCache = new LRUCache<string, any>(200, this.METADATA_TTL);
 
   // Offline storage
   private offlineDb: IDBFactory | null = null;
@@ -494,7 +500,7 @@ export class CacheManager {
         const store = tx.objectStore('cache');
         const all = store.getAll();
         
-        all.onsuccess = (e) => {
+        all.onsuccess = (e: any) => {
           const items: any[] = [];
           const results = (e.target as IDBRequest).result;
           for (const item of results) {
@@ -555,4 +561,4 @@ export class CacheManager {
 }
 
 // Global cache instance
-export const cacheManager = new CacheManager();
+export const cacheManager = CacheManager.getInstance();

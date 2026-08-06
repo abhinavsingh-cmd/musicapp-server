@@ -19,7 +19,6 @@ function generateShareToken(): string {
 
 interface PlaylistStore {
   playlists: Playlist[];
-  loading: boolean;
 
   createPlaylist: (data: { name: string; description?: string; coverArt?: string; isPublic?: boolean; collaborative?: boolean; songIds?: string[] }) => Playlist;
   updatePlaylist: (id: string, data: Partial<Playlist>) => void;
@@ -59,7 +58,6 @@ function initPlaylistStore() {
 
 export const usePlaylistStore = create<PlaylistStore>((set, get) => ({
   playlists: [],
-  loading: false,
 
   init: async () => {
     await initPlaylistStore();

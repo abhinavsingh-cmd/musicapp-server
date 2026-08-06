@@ -113,10 +113,11 @@ public class BackgroundAudioPlugin extends Plugin {
         String title = call.getString("title", "MusicApp");
         String artist = call.getString("artist", "Playing music");
         String album = call.getString("album", "MusicApp Album");
+        String albumArt = call.getString("albumArt", null);
 
         MusicForegroundService service = getService();
         if (service != null) {
-            service.updateNotification(title, artist, album);
+            service.updateNotification(title, artist, album, albumArt);
         }
         call.resolve();
     }
@@ -125,10 +126,11 @@ public class BackgroundAudioPlugin extends Plugin {
     public void updatePlaybackState(PluginCall call) {
         boolean isPlaying = call.getBoolean("isPlaying", false);
         double position = call.getDouble("position", 0.0);
+        double duration = call.getDouble("duration", 0.0);
 
         MusicForegroundService service = getService();
         if (service != null) {
-            service.updatePlaybackState(isPlaying, (long) position);
+            service.updatePlaybackState(isPlaying, (long) position, (long) duration);
         }
         call.resolve();
     }

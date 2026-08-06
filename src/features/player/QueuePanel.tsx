@@ -2,6 +2,7 @@ import React, { useState, useMemo, useCallback, memo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQueueStore } from '../../stores/queueStore';
 import { useAudioStore } from '../../stores/audioStore';
+import { useShallow } from 'zustand/react/shallow';
 import { useSongContextMenu } from '../../components/SongContextMenu';
 import { cn } from '../../utils/cn';
 import { ErrorBoundary } from '../../components/ErrorBoundary';
@@ -153,16 +154,18 @@ SortableSongRow.displayName = 'SortableSongRow';
 
 export const QueuePanel: React.FC = memo(() => {
   const navigate = useNavigate();
-  const queue = useQueueStore((s) => s.queue);
-  const currentIndex = useQueueStore((s) => s.currentIndex);
-  const recentlyPlayed = useQueueStore((s) => s.recentlyPlayed);
-  const repeatMode = useQueueStore((s) => s.repeatMode);
-  const isShuffled = useQueueStore((s) => s.isShuffled);
-  const reorderQueue = useQueueStore((s) => s.reorderQueue);
-  const clearQueue = useQueueStore((s) => s.clearQueue);
-  const toggleShuffle = useQueueStore((s) => s.toggleShuffle);
-  const cycleRepeat = useQueueStore((s) => s.cycleRepeat);
-  const clearRecent = useQueueStore((s) => s.clearRecent);
+  const { queue, currentIndex, recentlyPlayed, repeatMode, isShuffled, reorderQueue, clearQueue, toggleShuffle, cycleRepeat, clearRecent } = useQueueStore(useShallow((s) => ({
+    queue: s.queue,
+    currentIndex: s.currentIndex,
+    recentlyPlayed: s.recentlyPlayed,
+    repeatMode: s.repeatMode,
+    isShuffled: s.isShuffled,
+    reorderQueue: s.reorderQueue,
+    clearQueue: s.clearQueue,
+    toggleShuffle: s.toggleShuffle,
+    cycleRepeat: s.cycleRepeat,
+    clearRecent: s.clearRecent,
+  })));
   const currentSongId = useAudioStore((s) => s.currentSong?.id ?? null);
   const isPlaying = useAudioStore((s) => s.isPlaying);
   const [tab, setTab] = useState<'queue' | 'recent'>('queue');

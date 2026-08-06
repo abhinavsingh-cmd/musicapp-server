@@ -2,8 +2,8 @@ import { create } from 'zustand';
 import { Song } from '../types/music';
 import { OfflineError, NetworkError, TimeoutError } from '../config/api';
 import { youtubeSearch } from '../services/youtubeSearchService';
-import { useSongsStore } from './songsStore';
 import { metricsCollector } from '../services/metricsCollector';
+import { librarySearchIndex, initLibrarySearchIndex } from '../services/librarySearchIndex';
 
 // ---- Types ----
 
@@ -109,7 +109,37 @@ async function fetchYouTubeSearch(query: string, signal?: AbortSignal): Promise<
   return youtubeSearch(query, signal);
 }
 
+// ---- In-memory YouTube result cache (repeat queries / paging are instant) ----
+
+const YT_CACHE_TTL_MS = 60_000;
+const YT_CACHE_MAX = 30;
+const ytResultCache = new Map<string, { results: YTSong[]; cachedAt: number }>();
+
+function getYtCache(query: string): YTSong[] | null {
+  const entry = ytResultCache.get(query);
+  if (!entry) return null;
+  if (Date.now() - entry.cachedAt > YT_CACHE_TTL_MS) {
+    ytResultCache.delete(query);
+    return null;
+  }
+  ytResultCache.delete(query);
+  ytResultCache.set(query, entry);
+  return entry.results;
+}
+
+function setYtCache(query: string, results: YTSong[]): void {
+  ytResultCache.delete(query);
+  ytResultCache.set(query, { results, cachedAt: Date.now() });
+  while (ytResultCache.size > YT_CACHE_MAX) {
+    const oldest = ytResultCache.keys().next().value;
+    if (oldest === undefined) break;
+    ytResultCache.delete(oldest);
+  }
+}
+
 // ---- Store ----
+
+initLibrarySearchIndex();
 
 export const useSearchStore = create<SearchState>((set, get) => ({
   query: '',
@@ -165,43 +195,24 @@ export const useSearchStore = create<SearchState>((set, get) => ({
     searchAbortController = new AbortController();
     const { signal } = searchAbortController;
 
-    // Instant client-side search from in-memory library (zero network)
-    const librarySongs = useSongsStore.getState().songs;
-    const lowerQuery = trimmed.toLowerCase();
-    const instantSuggestions = librarySongs
-      .filter(s => s.title.toLowerCase().includes(lowerQuery) || s.artist.toLowerCase().includes(lowerQuery))
-      .slice(0, 5);
+    const shouldCancel = () => gen !== searchGeneration;
 
-    // Search library immediately for library hits
-    const libraryHits = librarySongs
-      .filter(song => {
-        const title = song.title.toLowerCase();
-        const artist = song.artist.toLowerCase();
-        const album = song.album?.toLowerCase() || '';
+    // Start both searches in parallel — library is instant (in-memory index),
+    // YouTube is a network fetch.
+    const libraryPromise = librarySearchIndex.search(trimmed, { limit: 15, shouldCancel });
+    const suggestionsPromise = librarySearchIndex.suggest(trimmed, { limit: 5, shouldCancel });
 
-        if (lowerQuery.includes('official')) {
-          if (title.includes('official') || album.includes('official')) {
-            return true;
-          }
-        }
-
-        return title.includes(lowerQuery) ||
-               artist.includes(lowerQuery) ||
-               album.includes(lowerQuery) ||
-               artist.includes(lowerQuery.split(' ')[0]) ||
-               title === lowerQuery;
-      })
-      .sort((a, b) => {
-        const scoreA = (a.title.toLowerCase() === lowerQuery ? 100 : 0) + (a.artist.toLowerCase() === lowerQuery ? 50 : 0) + (a.album?.toLowerCase() === lowerQuery ? 30 : 0);
-        const scoreB = (b.title.toLowerCase() === lowerQuery ? 100 : 0) + (b.artist.toLowerCase() === lowerQuery ? 50 : 0) + (b.album?.toLowerCase() === lowerQuery ? 30 : 0);
-        return scoreB - scoreA;
-      })
-      .slice(0, 15);
+    // Show library results the instant they're ready (usually < 1ms)
+    const [libraryHits, instantSuggestions] = await Promise.all([
+      libraryPromise,
+      suggestionsPromise,
+    ]);
+    if (shouldCancel()) return;
 
     set({
       debouncedQuery: trimmed,
-      libraryResults: libraryHits,
-      suggestions: instantSuggestions,
+      libraryResults: libraryHits.map((h) => h.song),
+      suggestions: instantSuggestions.map((h) => h.song),
       status: libraryHits.length > 0 ? 'success' : 'loading',
       ytStatus: 'loading',
       page: 1,
@@ -210,29 +221,38 @@ export const useSearchStore = create<SearchState>((set, get) => ({
       isCancelled: false,
     });
 
+    // YouTube search runs in parallel — results stream in when ready
     if (!navigator.onLine) {
       set({ status: 'offline', ytStatus: 'offline', error: 'You are offline.' });
       return;
     }
 
     try {
-      const searchStart = performance.now();
-      const ytResult = await fetchYouTubeSearch(trimmed, signal);
+      const cachedYt = getYtCache(trimmed);
+      let yt: YTSong[] = [];
+      if (cachedYt) {
+        yt = cachedYt.slice(0, 15);
+      } else {
+        const searchStart = performance.now();
+        const ytResult = await fetchYouTubeSearch(trimmed, signal);
 
-      if (gen !== searchGeneration) return;
+        if (gen !== searchGeneration) return;
 
-      const yt = ytResult ? ytResult.slice(0, 15) : [];
+        const fullYt = ytResult || [];
+        setYtCache(trimmed, fullYt);
+        yt = fullYt.slice(0, 15);
 
-      metricsCollector.pushSearchLatency({
-        query: trimmed,
-        duration: performance.now() - searchStart,
-        resultCount: yt.length + libraryHits.length,
-        timestamp: Date.now(),
-      });
+        metricsCollector.pushSearchLatency({
+          query: trimmed,
+          duration: performance.now() - searchStart,
+          resultCount: yt.length + libraryHits.length,
+          timestamp: Date.now(),
+        });
+      }
 
       set({
         ytResults: yt,
-        status: yt.length > 0 ? (libraryHits.length > 0 ? 'success' : 'success') : libraryHits.length > 0 ? 'success' : 'empty',
+        status: yt.length > 0 || libraryHits.length > 0 ? 'success' : 'empty',
         ytStatus: yt.length > 0 ? 'success' : 'empty',
       });
     } catch (err) {
@@ -257,14 +277,19 @@ export const useSearchStore = create<SearchState>((set, get) => ({
 
     set({ ytStatus: 'loading', error: null });
     try {
-      const results = await fetchYouTubeSearch(query, signal);
-      if (gen !== ytGeneration) return;
-      const sliced = (results || []).slice(0, page * 15);
+      let full = getYtCache(query);
+      if (!full) {
+        const results = await fetchYouTubeSearch(query, signal);
+        if (gen !== ytGeneration) return;
+        full = results || [];
+        setYtCache(query, full);
+      }
+      const sliced = full.slice(0, page * 15);
       set({
         ytResults: sliced,
         ytStatus: sliced.length > 0 ? 'success' : 'empty',
         page,
-        hasMore: (results || []).length > page * 15,
+        hasMore: full.length > page * 15,
       });
     } catch (err) {
       if (gen !== ytGeneration) return;
@@ -283,15 +308,20 @@ export const useSearchStore = create<SearchState>((set, get) => ({
 
     set({ ytStatus: 'loading', error: null });
     try {
-      const results = await fetchYouTubeSearch(debouncedQuery, signal);
-      if (gen !== ytGeneration) return;
+      let full = getYtCache(debouncedQuery);
+      if (!full) {
+        const results = await fetchYouTubeSearch(debouncedQuery, signal);
+        if (gen !== ytGeneration) return;
+        full = results || [];
+        setYtCache(debouncedQuery, full);
+      }
       const nextPage = page + 1;
-      const sliced = (results || []).slice(0, nextPage * 15);
+      const sliced = full.slice(0, nextPage * 15);
       set({
         ytResults: sliced,
         ytStatus: sliced.length > 0 ? 'success' : 'empty',
         page: nextPage,
-        hasMore: (results || []).length > nextPage * 15,
+        hasMore: full.length > nextPage * 15,
       });
     } catch (err) {
       if (gen !== ytGeneration) return;
@@ -302,6 +332,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
     clear: () => {
     searchGeneration++;
     ytGeneration++;
+    ytResultCache.clear();
     if (searchAbortController) searchAbortController.abort();
     if (ytAbortController) ytAbortController.abort();
     set({

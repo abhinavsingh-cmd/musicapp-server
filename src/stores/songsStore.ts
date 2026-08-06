@@ -8,7 +8,9 @@ interface SongsState {
   loading: boolean;
   error: boolean;
   fetched: boolean;
+  lastSuccessfulFetch: number;
   ensureLoaded: () => Promise<void>;
+  hydrate: () => Promise<void>;
 }
 
 const SONGS_CACHE_KEY = 'songs_catalog_v1';
@@ -23,7 +25,7 @@ function loadCachedSongs(): Song[] | null {
     const raw = localStorage.getItem(SONGS_CACHE_KEY);
     if (!raw) return null;
     const entry: SongsCacheEntry = JSON.parse(raw);
-    if (!Array.isArray(entry.songs) || entry.songs.length === 0) return null;
+    if (!Array.isArray(entry.songs)) return null;
     return entry.songs;
   } catch {
     return null;
@@ -56,12 +58,13 @@ function cachedMetaToSong(meta: Awaited<ReturnType<typeof getAllCachedMetadata>>
   };
 }
 
-let inflight: Promise<Song[]> | null = null;
+let inflightFetch: Promise<Song[]> | null = null;
+let isInitialized = false;
 
-async function fetchWithTimeout(): Promise<Song[]> {
-  if (inflight) return inflight;
+function fetchWithTimeout(): Promise<Song[]> {
+  if (inflightFetch) return inflightFetch;
 
-  inflight = new Promise<Song[]>((resolve, reject) => {
+  inflightFetch = new Promise<Song[]>((resolve) => {
     let settled = false;
 
     fetchSongs()
@@ -69,14 +72,12 @@ async function fetchWithTimeout(): Promise<Song[]> {
         if (!settled) {
           settled = true;
           resolve(songs);
-        } else {
-          try { useSongsStore.setState({ songs, fetched: true, error: false }); } catch {}
         }
       })
-      .catch(err => {
+      .catch(() => {
         if (!settled) {
           settled = true;
-          reject(err);
+          resolve([]);
         }
       });
 
@@ -87,69 +88,116 @@ async function fetchWithTimeout(): Promise<Song[]> {
       }
     }, 5_000);
   }).finally(() => {
-    inflight = null;
+    inflightFetch = null;
   });
 
-  return inflight;
+  return inflightFetch;
 }
 
-let initPromise: Promise<void> | null = null;
+async function initSongsStore(): Promise<void> {
+  if (isInitialized) return;
+  if (typeof window === 'undefined') return;
 
-function initSongsStore() {
-  if (initPromise) return initPromise;
-  initPromise = (async () => {
-    if (typeof window === 'undefined') return;
-    const cached = loadCachedSongs();
-    if (cached && cached.length > 0) {
-      useSongsStore.setState({ songs: cached });
-    }
-    try {
-      const meta = await getAllCachedMetadata();
-      if (meta.length > 0) {
-        const current = useSongsStore.getState();
-        if (!current.fetched) {
-          const songs = meta.map(cachedMetaToSong);
-          if (songs.length > 0) {
-            useSongsStore.setState({ songs });
-            saveCachedSongs(songs);
-          }
+  const cached = loadCachedSongs();
+  if (cached && cached.length > 0) {
+    useSongsStore.setState({ 
+      songs: cached, 
+      lastSuccessfulFetch: Date.now(),
+      fetched: true,
+      error: false,
+    });
+    console.log('[songsStore] Loaded', cached.length, 'songs from localStorage cache');
+  }
+
+  try {
+    const meta = await getAllCachedMetadata();
+    if (meta.length > 0) {
+      const current = useSongsStore.getState();
+      if (current.songs.length === 0) {
+        const songs = meta.map(cachedMetaToSong);
+        if (songs.length > 0) {
+          useSongsStore.setState({ songs, fetched: true, error: false });
+          saveCachedSongs(songs);
+          console.log('[songsStore] Loaded', songs.length, 'songs from IndexedDB metadata');
         }
       }
-    } catch {}
-  })();
-  return initPromise;
+    }
+  } catch {}
+
+  isInitialized = true;
 }
 
-export const useSongsStore = create<SongsState>((set, get) => ({
+async function hydrateSongsStore(): Promise<void> {
+  console.log('[songsStore] hydrateSongsStore started');
+
+  await initSongsStore();
+
+  const state = useSongsStore.getState();
+  if (state.fetched && state.songs.length > 0) {
+    console.log('[songsStore] Library already hydrated with', state.songs.length, 'songs, skipping fetch');
+    return;
+  }
+
+  // If we have songs but fetched is false (shouldn't happen now), don't overwrite
+  if (state.songs.length > 0) {
+    console.log('[songsStore] Has', state.songs.length, 'songs but fetched=false, marking as fetched');
+    useSongsStore.setState({ fetched: true, error: false });
+    return;
+  }
+
+  console.log('[songsStore] Starting library fetch');
+  useSongsStore.setState({ loading: true, error: false });
+
+  try {
+    console.log('[songsStore] Fetching songs from API');
+    const songs = await fetchWithTimeout();
+    
+    if (songs.length > 0) {
+      console.log(`[songsStore] Fetched ${songs.length} songs successfully`);
+      useSongsStore.setState({ 
+        songs, 
+        loading: false, 
+        fetched: true, 
+        error: false,
+        lastSuccessfulFetch: Date.now(),
+      });
+      saveCachedSongs(songs);
+    } else {
+      const current = useSongsStore.getState();
+      if (current.songs.length > 0) {
+        console.log('[songsStore] API returned empty, keeping existing songs');
+        useSongsStore.setState({ loading: false, fetched: true, error: false });
+      } else {
+        console.log('[songsStore] API returned empty and no existing songs, showing error state');
+        useSongsStore.setState({ loading: false, fetched: true, error: true });
+      }
+    }
+  } catch (error) {
+    console.error('[songsStore] Failed to fetch songs:', error);
+    const current = useSongsStore.getState();
+    if (current.songs.length > 0) {
+      console.log('[songsStore] API failed but existing songs available, using them');
+      useSongsStore.setState({ loading: false, fetched: true, error: false });
+    } else {
+      console.log('[songsStore] API failed and no existing songs available, showing error state');
+      useSongsStore.setState({ loading: false, error: true, fetched: true });
+    }
+  }
+}
+
+export const useSongsStore = create<SongsState>(() => ({
   songs: [],
   loading: false,
   error: false,
   fetched: false,
+  lastSuccessfulFetch: 0,
 
   ensureLoaded: async () => {
-    if (get().fetched) return;
-    await initSongsStore();
-    set({ loading: true, error: false });
+    await hydrateSongsStore();
+  },
 
-    try {
-      const songs = await fetchWithTimeout();
-      if (songs.length > 0) {
-        set({ songs, loading: false, fetched: true });
-        saveCachedSongs(songs);
-      } else {
-        set({ loading: false, fetched: true });
-      }
-    } catch {
-      try {
-        const cachedMeta = await getAllCachedMetadata();
-        if (cachedMeta.length > 0) {
-          const offlineSongs = cachedMeta.map(cachedMetaToSong);
-          set({ songs: offlineSongs, loading: false, fetched: true, error: false });
-          return;
-        }
-      } catch {}
-      set({ loading: false, error: true, fetched: true });
-    }
+  hydrate: async () => {
+    await hydrateSongsStore();
   },
 }));
 
@@ -157,5 +205,5 @@ if (typeof window !== 'undefined') {
   const deferInit = typeof requestIdleCallback === 'function'
     ? requestIdleCallback
     : (cb: IdleRequestCallback) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 } as IdleDeadline), 0);
-  deferInit(() => { initSongsStore().catch(() => {}); });
+  deferInit(() => { hydrateSongsStore().catch(() => {}); });
 }

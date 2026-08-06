@@ -49,10 +49,16 @@ function loadRecent(): Song[] {
   } catch { return []; }
 }
 
-function persistRecent(songs: Song[]): void {
-  try {
-    localStorage.setItem('recently-played', JSON.stringify(songs.slice(0, MAX_RECENT)));
-  } catch { }
+let recentPersistTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleRecentPersist(songs: Song[]): void {
+  if (recentPersistTimer) clearTimeout(recentPersistTimer);
+  recentPersistTimer = setTimeout(() => {
+    try {
+      localStorage.setItem('recently-played', JSON.stringify(songs.slice(0, MAX_RECENT)));
+    } catch { }
+    recentPersistTimer = null;
+  }, 500);
 }
 
 export type RepeatMode = 'off' | 'all' | 'one';
@@ -68,6 +74,7 @@ export interface QueueState {
   isFetchingRecommendations: boolean;
 
   setQueue: (songs: Song[], startIndex?: number) => void;
+  restoreQueue: (saved: { queue: Song[]; currentIndex: number; repeatMode: RepeatMode; isShuffled: boolean; originalQueue: Song[]; autoplayEnabled: boolean }) => void;
   playAtIndex: (index: number) => void;
   nextSong: () => Promise<Song | null>;
   previousSong: () => Promise<Song | null>;
@@ -142,13 +149,24 @@ export const useQueueStore = create<QueueState>((set, get) => ({
     if (song) get().addRecent(song);
   },
 
-  playAtIndex: (index) => {
+  restoreQueue: (saved) => {
+    set({
+      queue: saved.queue,
+      currentIndex: Math.max(0, Math.min(saved.currentIndex, Math.max(0, saved.queue.length - 1))),
+      repeatMode: saved.repeatMode,
+      isShuffled: saved.isShuffled,
+      originalQueue: saved.originalQueue,
+      autoplayEnabled: saved.autoplayEnabled,
+    });
+    schedulePersist(get());
+  },
+
+  playAtIndex: async (index) => {
     const { queue } = get();
     if (index < 0 || index >= queue.length) return;
     const song = queue[index];
-    set({ currentIndex: index });
-    schedulePersist(get());
-    get().addRecent(song);
+    const { useAudioStore } = await import('./audioStore');
+    useAudioStore.getState().loadSong(song, queue, index);
   },
 
   nextSong: async () => {
@@ -246,6 +264,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
   removeFromQueue: (index) => {
     const { queue, currentIndex } = get();
     if (index < 0 || index >= queue.length) return;
+    const removedSong = queue[index];
     const newQueue = queue.filter((_, i) => i !== index);
     let newIndex = currentIndex;
     if (index < currentIndex) {
@@ -255,6 +274,21 @@ export const useQueueStore = create<QueueState>((set, get) => ({
     }
     set({ queue: newQueue, currentIndex: Math.max(0, newIndex) });
     schedulePersist(get());
+
+    // Keep playback in sync: if the removed song is the currently loaded one,
+    // re-load the new current song so the audible track and queue agree.
+    if (index === currentIndex && removedSong) {
+      const newCurrent = newQueue[Math.max(0, newIndex)];
+      if (newCurrent) {
+        void (async () => {
+          const { useAudioStore } = await import('./audioStore');
+          const audioStore = useAudioStore.getState();
+          if (audioStore.currentSong?.id === removedSong.id && audioStore.isPlaying) {
+            audioStore.loadSong(newCurrent, newQueue, Math.max(0, newIndex));
+          }
+        })();
+      }
+    }
   },
 
   reorderQueue: (fromIndex, toIndex) => {
@@ -340,14 +374,14 @@ export const useQueueStore = create<QueueState>((set, get) => ({
     set((s) => {
       const filtered = s.recentlyPlayed.filter((r) => r.id !== song.id);
       const updated = [song, ...filtered].slice(0, MAX_RECENT);
-      persistRecent(updated);
+      scheduleRecentPersist(updated);
       return { recentlyPlayed: updated };
     });
   },
 
   clearRecent: () => {
     set({ recentlyPlayed: [] });
-    localStorage.removeItem('recently-played');
+    try { localStorage.removeItem('recently-played'); } catch {}
   },
 
   ensureQueueSize: async () => {

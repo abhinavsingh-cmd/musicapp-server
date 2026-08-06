@@ -10,7 +10,7 @@ import { backgroundAudio } from '../services/backgroundAudio';
 import { useHistoryStore } from './historyStore';
 import { preloadNextSongs, prewarmOnFirstInteraction } from '../services/preloadService';
 
-const LOADING_TIMEOUT_MS = 10_000;
+const LOADING_TIMEOUT_MS = 30_000;
 let loadingTimeoutId: ReturnType<typeof setTimeout> | null = null;
 
 function startLoadingTimeout() {
@@ -43,6 +43,7 @@ export interface AudioStore {
   favorites: string[];
 
   loadSong: (song: Song, playlist: Song[], index: number) => void;
+  retry: () => void;
   play: () => void;
   pause: () => void;
   togglePlayPause: () => void;
@@ -128,16 +129,46 @@ function persistPlaybackState() {
     volume: audioState.volume,
     isShuffled: queueState.isShuffled,
     repeatMode: queueState.repeatMode,
+    originalQueue: queueState.originalQueue,
   });
 }
 
 let audioServiceUnsub: (() => void) | null = null;
 let lastMediaUpdate = 0;
 let lastProgressUpdate = 0;
+let lastProgressPersist = 0;
 const PROGRESS_THROTTLE_MS = 250;
 const MAX_CONSECUTIVE_FAILURES = 5;
 let consecutivePlayFailures = 0;
 let nextSongRetryTimeout: ReturnType<typeof setTimeout> | null = null;
+let pendingResumePosition: number | null = null;
+let lastHistorySongId: string | null = null;
+let volumePersistTimer: ReturnType<typeof setTimeout> | null = null;
+let advanceChain: Promise<void> = Promise.resolve();
+let serviceRequestedPlay = false;
+
+function scheduleVolumePersist(vol: number) {
+  if (volumePersistTimer) clearTimeout(volumePersistTimer);
+  volumePersistTimer = setTimeout(() => {
+    saveVolume(vol);
+    volumePersistTimer = null;
+  }, 300);
+}
+
+function chainAdvance(fn: () => Promise<void>): Promise<void> {
+  const next = advanceChain.then(fn, fn);
+  advanceChain = next.then(() => {}, () => {});
+  return next;
+}
+
+function syncMediaSessionEnded() {
+  try {
+    mediaSessionService.updatePlaybackState(false, 0, 0);
+  } catch {}
+  try {
+    backgroundAudio.updatePlaybackState({ isPlaying: false, position: 0, duration: 0 }).catch(() => {});
+  } catch {}
+}
 
 function clearNextSongRetry() {
   if (nextSongRetryTimeout) {
@@ -169,12 +200,27 @@ function initAudioServiceHandler() {
         if (data?.song) {
           mediaSessionService.updateMetadata(data.song);
           mediaSessionService.updatePlaybackState(true, audioService.getCurrentTime(), audioService.getDuration());
-          backgroundAudio.updateMetadata({ title: data.song.title, artist: data.song.artist }).catch(() => {});
-          backgroundAudio.updatePlaybackState({ isPlaying: true, position: audioService.getCurrentTime() }).catch(() => {});
-          useHistoryStore.getState().addSong(data.song);
-          // Preload next songs in background
-          const qs = useQueueStore.getState();
-          preloadNextSongs(qs.queue, qs.currentIndex, { count: 3 }).catch(() => {});
+          backgroundAudio.updateMetadata({
+            title: data.song.title,
+            artist: data.song.artist,
+            album: data.song.album || 'MusicApp',
+            albumArt: data.song.coverArt,
+          }).catch(() => {});
+          backgroundAudio.updatePlaybackState({
+            isPlaying: true,
+            position: audioService.getCurrentTime(),
+            duration: audioService.getDuration(),
+          }).catch(() => {});
+          if (data?.song) {
+            const songId = data.song.id || '';
+            if (songId !== lastHistorySongId) {
+              lastHistorySongId = songId;
+              useHistoryStore.getState().addSong(data.song);
+            }
+            // Preload next songs in background
+            const qs = useQueueStore.getState();
+            preloadNextSongs(qs.queue, qs.currentIndex, { count: 3 }).catch(() => {});
+          }
         }
         break;
       }
@@ -222,7 +268,13 @@ function initAudioServiceHandler() {
           backgroundAudio.updatePlaybackState({
             isPlaying: useAudioStore.getState().isPlaying,
             position: data,
+            duration: audioService.getDuration(),
           }).catch(() => {});
+        }
+        // Persist position every 5s while playing (throttled)
+        if (now - lastProgressPersist > 5_000) {
+          lastProgressPersist = now;
+          persistPlaybackState();
         }
         break;
       }
@@ -304,10 +356,17 @@ if (!(globalThis as any).__audioStoreInitialized) {
       const store = useAudioStore.getState();
       switch (event.action) {
         case 'play':
+          // If state isn't restored yet (process recreation), flag it for
+          // auto-play after restoreFromPersistence completes.
+          if (!store.currentSong) {
+            serviceRequestedPlay = true;
+            return;
+          }
           store.play();
           break;
         case 'pause':
         case 'stop':
+          serviceRequestedPlay = false;
           store.pause();
           break;
         case 'next':
@@ -359,7 +418,7 @@ if (!(globalThis as any).__audioStoreInitialized) {
             persistPlaybackState();
           }
         } catch {}
-      }, 30000);
+      }, 10_000); // Persist every 10s while playing (was 30s)
       // Store for HMR cleanup
       if ((globalThis as any).__audioPersistInterval) {
         clearInterval((globalThis as any).__audioPersistInterval);
@@ -417,15 +476,22 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
   loadSong: (song: Song, playlist: Song[], index: number) => {
     clearNextSongRetry();
     const { currentSong, isPlaying } = get();
-    
+
+    // A different song was chosen — any restored resume position no longer applies.
+    if (currentSong?.id !== song.id) pendingResumePosition = null;
+
     if (currentSong?.id === song.id) {
       if (isPlaying) {
         audioService.pause();
         set({ isPlaying: false });
-      } else {
-        audioService.resume();
+        return;
       }
-      return;
+      if (audioService.isLoaded()) {
+        audioService.resume();
+        return;
+      }
+      // Song was restored from persistence after a process restart but no audio
+      // is actually loaded — fall through to a full play() below.
     }
 
     // Ensure audio service handler is wired up (may not have run yet if deferred)
@@ -433,6 +499,8 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
       try { initAudioServiceHandler(); } catch {}
     }
 
+    const resumeAt = currentSong?.id === song.id ? pendingResumePosition : null;
+    if (resumeAt !== null) pendingResumePosition = null;
     const resolvedSong = resolveDownloadUrl(song);
     const resolvedQueue = resolveQueueDownloads(playlist);
 
@@ -448,9 +516,31 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
     });
     startLoadingTimeout();
     
-    audioService.play(resolvedSong, resolvedQueue, index).catch(err => {
+    audioService.play(resolvedSong, resolvedQueue, index, resumeAt ?? undefined).catch(err => {
       const msg = err instanceof Error ? err.message : 'Playback failed';
       console.error('[AudioStore] loadSong play() failed:', msg);
+      clearLoadingTimeout();
+      set({ error: msg, isLoading: false, isPlaying: false });
+      autoSkipNextSong();
+    });
+  },
+
+  retry: () => {
+    clearNextSongRetry();
+    const { currentSong } = get();
+    if (!currentSong) return;
+    pendingResumePosition = null;
+    const qs = useQueueStore.getState();
+    const queue = qs.queue.length > 0 ? qs.queue : [currentSong];
+    const index = Math.min(qs.currentIndex, queue.length - 1);
+    const resolvedQueue = resolveQueueDownloads(queue);
+    const song = resolvedQueue[index] || resolveDownloadUrl(currentSong);
+    set({ currentSong: song, isLoading: true, error: null, progress: 0 });
+    startLoadingTimeout();
+    audioService.pause();
+    audioService.play(song, resolvedQueue, index).catch(err => {
+      const msg = err instanceof Error ? err.message : 'Playback failed';
+      console.error('[AudioStore] retry play() failed:', msg);
       clearLoadingTimeout();
       set({ error: msg, isLoading: false, isPlaying: false });
       autoSkipNextSong();
@@ -460,6 +550,25 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
   play: () => {
     const { currentSong } = get();
     if (!currentSong) return;
+    if (!audioService.isLoaded()) {
+      // Restored session (e.g. after process recreation) — no audio loaded yet.
+      // Rebuild playback from the persisted queue and resume the saved position.
+      const qs = useQueueStore.getState();
+      const queue = qs.queue.length > 0 ? qs.queue : [currentSong];
+      const resolvedQueue = resolveQueueDownloads(queue);
+      const resumeAt = pendingResumePosition;
+      pendingResumePosition = null;
+      set({ isLoading: true, error: null });
+      startLoadingTimeout();
+      audioService.play(resolvedQueue[qs.currentIndex] || currentSong, resolvedQueue, qs.currentIndex, resumeAt ?? undefined).catch(err => {
+        const msg = err instanceof Error ? err.message : 'Playback failed';
+        console.error('[AudioStore] play() restore failed:', msg);
+        clearLoadingTimeout();
+        set({ error: msg, isLoading: false, isPlaying: false });
+        autoSkipNextSong();
+      });
+      return;
+    }
     audioService.resume();
   },
 
@@ -472,70 +581,80 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
     if (!currentSong) return;
     if (isPlaying) {
       audioService.pause();
-    } else {
+    } else if (audioService.isLoaded()) {
       audioService.resume();
+    } else {
+      get().play();
     }
   },
 
-  nextSong: async () => {
+  nextSong: () => {
     clearNextSongRetry();
-    const song = await useQueueStore.getState().nextSong();
-    if (song) {
-      const resolved = resolveDownloadUrl(song);
-      // Read queue + index synchronously right after nextSong() set them
-      const qs = useQueueStore.getState();
-      const resolvedQueue = resolveQueueDownloads(qs.queue);
-      set({
-        currentSong: resolved,
-        progress: 0,
-        isLoading: true,
-        duration: resolved.duration,
-        error: null,
-      });
-      startLoadingTimeout();
-      audioService.play(resolved, resolvedQueue, qs.currentIndex).catch(err => {
-        const msg = err instanceof Error ? err.message : 'Playback failed';
-        console.error('[AudioStore] nextSong play() failed:', msg);
+    pendingResumePosition = null;
+    return chainAdvance(async () => {
+      const song = await useQueueStore.getState().nextSong();
+      if (song) {
+        const resolved = resolveDownloadUrl(song);
+        // Read queue + index synchronously right after nextSong() set them
+        const qs = useQueueStore.getState();
+        const resolvedQueue = resolveQueueDownloads(qs.queue);
+        set({
+          currentSong: resolved,
+          progress: 0,
+          isLoading: true,
+          duration: resolved.duration,
+          error: null,
+        });
+        startLoadingTimeout();
+        audioService.play(resolved, resolvedQueue, qs.currentIndex).catch(err => {
+          const msg = err instanceof Error ? err.message : 'Playback failed';
+          console.error('[AudioStore] nextSong play() failed:', msg);
+          clearLoadingTimeout();
+          set({ error: msg, isLoading: false, isPlaying: false });
+          autoSkipNextSong();
+        });
+      } else {
+        clearNextSongRetry();
         clearLoadingTimeout();
-        set({ error: msg, isLoading: false, isPlaying: false });
-        autoSkipNextSong();
-      });
-    } else {
-      clearNextSongRetry();
-      clearLoadingTimeout();
-      set({ isPlaying: false, progress: 0, isLoading: false });
-    }
+        set({ isPlaying: false, progress: 0, isLoading: false });
+        syncMediaSessionEnded();
+      }
+    });
   },
 
-  previousSong: async () => {
+  previousSong: () => {
     clearNextSongRetry();
-    const song = await useQueueStore.getState().previousSong();
-    if (song) {
-      const resolved = resolveDownloadUrl(song);
-      const qs = useQueueStore.getState();
-      const resolvedQueue = resolveQueueDownloads(qs.queue);
-      set({
-        currentSong: resolved,
-        progress: 0,
-        isLoading: true,
-        duration: resolved.duration,
-        error: null,
-      });
-      startLoadingTimeout();
-      audioService.play(resolved, resolvedQueue, qs.currentIndex).catch(err => {
-        const msg = err instanceof Error ? err.message : 'Playback failed';
-        console.error('[AudioStore] previousSong play() failed:', msg);
+    pendingResumePosition = null;
+    return chainAdvance(async () => {
+      const song = await useQueueStore.getState().previousSong();
+      if (song) {
+        const resolved = resolveDownloadUrl(song);
+        const qs = useQueueStore.getState();
+        const resolvedQueue = resolveQueueDownloads(qs.queue);
+        set({
+          currentSong: resolved,
+          progress: 0,
+          isLoading: true,
+          duration: resolved.duration,
+          error: null,
+        });
+        startLoadingTimeout();
+        audioService.play(resolved, resolvedQueue, qs.currentIndex).catch(err => {
+          const msg = err instanceof Error ? err.message : 'Playback failed';
+          console.error('[AudioStore] previousSong play() failed:', msg);
+          clearLoadingTimeout();
+          set({ error: msg, isLoading: false, isPlaying: false });
+          autoSkipNextSong();
+        });
+      } else {
         clearLoadingTimeout();
-        set({ error: msg, isLoading: false, isPlaying: false });
-        autoSkipNextSong();
-      });
-    } else {
-      clearLoadingTimeout();
-      set({ isLoading: false });
-    }
+        set({ isLoading: false });
+      }
+    });
   },
 
   seek: (time: number) => {
+    pendingResumePosition = null;
     audioService.seek(time);
     set({ progress: time });
   },
@@ -544,7 +663,7 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
     const clamped = Math.max(0, Math.min(1, volume));
     audioService.setVolume(clamped);
     set({ volume: clamped });
-    saveVolume(clamped);
+    scheduleVolumePersist(clamped);
   },
 
   toggleShuffle: () => {
@@ -573,21 +692,47 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
 
     const qs = useQueueStore.getState();
     if (saved.queue.length > 0) {
-      qs.setQueue(saved.queue, saved.currentIndex || 0);
-      if (saved.isShuffled !== qs.isShuffled) qs.toggleShuffle();
-      if (saved.repeatMode !== qs.repeatMode) {
-        while (useQueueStore.getState().repeatMode !== saved.repeatMode) {
-          qs.cycleRepeat();
-        }
-      }
+      qs.restoreQueue({
+        queue: saved.queue,
+        currentIndex: saved.currentIndex || 0,
+        repeatMode: saved.repeatMode || 'off',
+        isShuffled: !!saved.isShuffled,
+        originalQueue: saved.originalQueue || [],
+        autoplayEnabled: true,
+      });
     }
 
-    // Only restore volume and queue — do NOT restore currentSong.
-    // Audio isn't loaded, so showing the song in the player would be misleading.
-    // User presses play → loadSong starts fresh playback.
+    // Restore the song + position so the player UI reflects reality after a
+    // process restart. Audio is NOT loaded yet — the next play action re-loads
+    // it and resumes from this position.
+    const dur = saved.duration && saved.duration > 0
+      ? saved.duration
+      : (saved.currentSong.duration || 0);
+    const resumeAt = saved.progress && saved.progress > 3 && saved.progress < (dur > 0 ? dur - 2 : 0)
+      ? saved.progress
+      : null;
+    pendingResumePosition = resumeAt;
+
+    const resolved = resolveDownloadUrl(saved.currentSong);
     set({
       volume: vol,
+      currentSong: resolved,
+      duration: dur,
+      progress: resumeAt ?? 0,
+      isPlaying: false,
+      isLoading: false,
+      error: null,
     });
+
+    // If the foreground service requested playback before state was restored
+    // (process recreation), auto-resume now that state is available.
+    if (serviceRequestedPlay) {
+      serviceRequestedPlay = false;
+      const store = useAudioStore.getState();
+      if (store.currentSong) {
+        store.play();
+      }
+    }
   },
 }));
 

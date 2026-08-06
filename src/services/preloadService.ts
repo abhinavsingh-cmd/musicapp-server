@@ -140,3 +140,16 @@ export function prewarmOnFirstInteraction(): void {
   document.addEventListener('click', handler, { once: false, passive: true });
   document.addEventListener('touchstart', handler, { once: false, passive: true });
 }
+
+/**
+ * Preload critical resources in the background after startup:
+ * DNS prefetching for YouTube and the music API plus connection warmup,
+ * so first playback / first fetch feels instant.
+ */
+export async function preloadCriticalResources(): Promise<void> {
+  try {
+    prefetchYouTubeDNS();
+    prefetchServerDNS();
+  } catch {}
+  await Promise.resolve();
+}

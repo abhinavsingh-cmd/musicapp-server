@@ -104,6 +104,10 @@ class MetricsCollector {
   // Download speed
   private _downloadSpeedSamples: DownloadSpeedSample[] = [];
 
+  // Data load / preload events
+  private _dataLoadEvents: any[] = [];
+  private _preloadEvents: any[] = [];
+
   // Caps
   private static MAX_SAMPLES = 200;
   private static MAX_FAILURES = 100;
@@ -178,6 +182,22 @@ class MetricsCollector {
     this.emit();
   }
 
+  pushDataLoadEvent(event: any) {
+    this._dataLoadEvents.push(event);
+    if (this._dataLoadEvents.length > MetricsCollector.MAX_SAMPLES) {
+      this._dataLoadEvents = this._dataLoadEvents.slice(-MetricsCollector.MAX_SAMPLES);
+    }
+    this.emit();
+  }
+
+  pushPreloadEvent(event: any) {
+    this._preloadEvents.push(event);
+    if (this._preloadEvents.length > MetricsCollector.MAX_SAMPLES) {
+      this._preloadEvents = this._preloadEvents.slice(-MetricsCollector.MAX_SAMPLES);
+    }
+    this.emit();
+  }
+
   // ---- Snapshot ----
 
   getSnapshot(): MetricsSnapshot {
@@ -197,6 +217,22 @@ class MetricsCollector {
       downloadSpeedSamples: this._downloadSpeedSamples,
       totalApiCalls: this._totalApiCalls,
       totalCacheEvents: this._totalCacheEvents,
+    };
+  }
+
+  /**
+   * Dev-dashboard-friendly snapshot. Exposes the field names the
+   * DevPage consumes directly.
+   */
+  getStats() {
+    const snapshot = this.getSnapshot();
+    return {
+      ...snapshot,
+      startupTime: snapshot.startupTimeMs,
+      apiLatencyEvents: snapshot.apiLatencies,
+      streamLatencyEvents: snapshot.streamLatencies,
+      dataLoadEvents: this._dataLoadEvents,
+      preloadEvents: this._preloadEvents,
     };
   }
 

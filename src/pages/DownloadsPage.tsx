@@ -1,12 +1,18 @@
-import React, { useEffect, useMemo, useCallback } from 'react';
+import React, { useEffect, useMemo, useCallback, useState } from 'react';
 import { useGoBack } from '../hooks/useGoBack';
 import { useDownloadsStore } from '../stores/downloadsStore';
 import { useAudioStore } from '../stores/audioStore';
 import { Song } from '../types/music';
-import { Download, Trash2, Play, HardDrive, Loader2, WifiOff, ArrowLeft, X, RotateCcw, AlertCircle } from 'lucide-react';
+import {
+  Download, Trash2, Play, HardDrive, Loader2, WifiOff, ArrowLeft, X, RotateCcw,
+  AlertCircle, Pause, PlayCircle, ChevronUp, Database, Image, Info,
+  Trash,
+} from 'lucide-react';
 
 function formatSize(bytes: number): string {
-  return bytes >= 1048576 ? (bytes / 1048576).toFixed(1) + ' MB' : (bytes / 1024).toFixed(0) + ' KB';
+  if (bytes >= 1073741824) return (bytes / 1073741824).toFixed(1) + ' GB';
+  if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + ' MB';
+  return (bytes / 1024).toFixed(0) + ' KB';
 }
 
 function formatDuration(s: number): string {
@@ -24,6 +30,8 @@ const DownloadsPage: React.FC = () => {
   const loadDownloads = useDownloadsStore((s) => s.loadDownloads);
   const removeSong = useDownloadsStore((s) => s.removeSong);
   const cancelDownload = useDownloadsStore((s) => s.cancelDownload);
+  const pauseDownloadAction = useDownloadsStore((s) => s.pauseDownloadAction);
+  const resumeDownloadAction = useDownloadsStore((s) => s.resumeDownloadAction);
   const retryDownload = useDownloadsStore((s) => s.retryDownload);
   const failedDownloads = useDownloadsStore((s) => s.failedDownloads);
   const clearFailed = useDownloadsStore((s) => s.clearFailed);
@@ -31,11 +39,23 @@ const DownloadsPage: React.FC = () => {
   const cacheSize = useDownloadsStore((s) => s.cacheSize);
   const progressMap = useDownloadsStore((s) => s.progressMap) ?? EMPTY_MAP;
   const downloadingIds = useDownloadsStore((s) => s.downloadingIds) ?? EMPTY_SET;
+  const pausedIds = useDownloadsStore((s) => s.pausedIds) ?? EMPTY_SET;
+  const downloadQueue = useDownloadsStore((s) => s.downloadQueue);
+  const storageBreakdown = useDownloadsStore((s) => s.storageBreakdown);
+  const refreshStorageBreakdown = useDownloadsStore((s) => s.refreshStorageBreakdown);
+  const clearDownloads = useDownloadsStore((s) => s.clearDownloads);
+  const clearThumbnailCacheAction = useDownloadsStore((s) => s.clearThumbnailCacheAction);
   const loadSong = useAudioStore((s) => s.loadSong);
   const currentSong = useAudioStore((s) => s.currentSong);
   const isPlaying = useAudioStore((s) => s.isPlaying);
 
-  useEffect(() => { loadDownloads(); }, [loadDownloads]);
+  const [showStorage, setShowStorage] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
+
+  useEffect(() => {
+    loadDownloads();
+    refreshStorageBreakdown();
+  }, [loadDownloads, refreshStorageBreakdown]);
 
   const handlePlay = useCallback((d: typeof downloads[0]) => {
     const song: Song = {
@@ -58,8 +78,12 @@ const DownloadsPage: React.FC = () => {
   const totalSize = useMemo(() => downloads.reduce((acc, d) => acc + d.size, 0), [downloads]);
 
   const activeDownloads = useMemo(() =>
-    Array.from(downloadingIds).map(ytId => ({ youtubeId: ytId, progress: progressMap[ytId] })),
-    [downloadingIds, progressMap]
+    Array.from(downloadingIds).map(ytId => ({
+      youtubeId: ytId,
+      progress: progressMap[ytId],
+      isPaused: pausedIds.has(ytId),
+    })),
+    [downloadingIds, progressMap, pausedIds]
   );
 
   const currentSongId = currentSong?.id;
@@ -81,21 +105,140 @@ const DownloadsPage: React.FC = () => {
             {downloads.length} songs · {formatSize(totalSize || cacheSize)}
           </p>
         </div>
-        {!isOnline && (
-          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-amber-500/10 border border-amber-500/20">
-            <WifiOff size={12} className="text-amber-400" />
-            <span className="text-xs font-medium text-amber-300">Offline</span>
-          </div>
-        )}
+        <div className="flex items-center gap-2">
+          {!isOnline && (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-amber-500/10 border border-amber-500/20">
+              <WifiOff size={12} className="text-amber-400" />
+              <span className="text-xs font-medium text-amber-300">Offline</span>
+            </div>
+          )}
+          <button
+            onClick={() => setShowStorage(!showStorage)}
+            className="p-2 rounded-xl hover:bg-white/5 transition-colors text-gray-400 hover:text-white"
+            title="Storage management"
+          >
+            <Database size={18} />
+          </button>
+        </div>
       </div>
 
+      {/* Storage Management Panel */}
+      {showStorage && (
+        <div className="claymorphism rounded-2xl p-5 space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+              <HardDrive size={14} /> Storage Management
+            </h3>
+            <button onClick={() => setShowStorage(false)} className="text-gray-500 hover:text-white">
+              <ChevronUp size={14} />
+            </button>
+          </div>
+
+          {storageBreakdown && (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between text-sm">
+                <span className="text-gray-400">Songs</span>
+                <span className="text-white font-medium">{formatSize(storageBreakdown.songs)}</span>
+              </div>
+              <div className="flex items-center justify-between text-sm">
+                <span className="text-gray-400">Thumbnails</span>
+                <span className="text-white font-medium">{formatSize(storageBreakdown.thumbnails)}</span>
+              </div>
+              <div className="h-px bg-white/5" />
+              <div className="flex items-center justify-between text-sm">
+                <span className="text-gray-400 font-medium">Total</span>
+                <span className="text-white font-bold">{formatSize(storageBreakdown.total)}</span>
+              </div>
+
+              {/* Usage bar */}
+              <div className="h-2 rounded-full bg-white/5 overflow-hidden">
+                <div className="h-full flex">
+                  <div
+                    className="bg-gradient-to-r from-violet-500 to-fuchsia-500"
+                    style={{ width: `${storageBreakdown.total > 0 ? (storageBreakdown.songs / storageBreakdown.total) * 100 : 0}%` }}
+                  />
+                  <div
+                    className="bg-gradient-to-r from-blue-500 to-cyan-500"
+                    style={{ width: `${storageBreakdown.total > 0 ? (storageBreakdown.thumbnails / storageBreakdown.total) * 100 : 0}%` }}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="flex gap-2">
+            <button
+              onClick={clearThumbnailCacheAction}
+              className="flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-gray-300 text-xs font-medium transition-all"
+            >
+              <Image size={12} /> Clear Thumbnails
+            </button>
+            <button
+              onClick={() => setConfirmClear(true)}
+              className="flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-red-500/10 hover:bg-red-500/20 text-red-400 text-xs font-medium transition-all"
+            >
+              <Trash size={12} /> Clear All
+            </button>
+          </div>
+
+          {confirmClear && (
+            <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/20 text-center space-y-2">
+              <p className="text-xs text-red-300">Delete all downloads? This cannot be undone.</p>
+              <div className="flex gap-2 justify-center">
+                <button
+                  onClick={() => { clearDownloads(); setConfirmClear(false); }}
+                  className="px-3 py-1.5 rounded-lg bg-red-500/20 text-red-300 text-xs font-medium hover:bg-red-500/30"
+                >
+                  Yes, delete all
+                </button>
+                <button
+                  onClick={() => setConfirmClear(false)}
+                  className="px-3 py-1.5 rounded-lg bg-white/5 text-gray-400 text-xs font-medium hover:bg-white/10"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Download Queue */}
+      {downloadQueue.length > 0 && (
+        <div className="space-y-2">
+          <div className="flex items-center gap-2 text-xs font-medium text-violet-400">
+            <Info size={12} />
+            Download Queue ({downloadQueue.length} waiting)
+          </div>
+          {downloadQueue.map((item, i) => (
+            <div key={`${item.song.id}-${i}`} className="flex items-center gap-3 p-3 rounded-xl bg-violet-500/5 border border-violet-500/10">
+              <div className="w-5 text-center text-xs text-gray-500">{i + 1}</div>
+              <div className="flex-1 min-w-0">
+                <div className="text-xs text-white truncate">{item.song.title}</div>
+                <div className="text-[10px] text-gray-500 truncate">{item.song.artist}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Active Downloads */}
       {activeDownloads.length > 0 && (
         <div className="space-y-2">
-          {activeDownloads.map(({ youtubeId, progress }) => (
+          <div className="text-xs font-medium text-violet-400">
+            Downloading ({activeDownloads.filter(d => !d.isPaused).length} active, {activeDownloads.filter(d => d.isPaused).length} paused)
+          </div>
+          {activeDownloads.map(({ youtubeId, progress, isPaused }) => (
             <div key={youtubeId} className="flex items-center gap-3 p-3 rounded-xl bg-violet-500/5 border border-violet-500/10">
-              <Loader2 size={16} className="animate-spin text-violet-400 flex-shrink-0" />
+              {isPaused ? (
+                <Pause size={16} className="text-amber-400 flex-shrink-0" />
+              ) : (
+                <Loader2 size={16} className="animate-spin text-violet-400 flex-shrink-0" />
+              )}
               <div className="flex-1 min-w-0">
-                <div className="text-xs text-gray-400 truncate">Downloading...</div>
+                <div className="text-xs text-gray-400 truncate">
+                  {isPaused ? 'Paused' : 'Downloading...'}
+                </div>
                 <div className="mt-1.5 h-1.5 rounded-full bg-white/10 overflow-hidden">
                   <div
                     className="h-full rounded-full bg-gradient-to-r from-violet-500 to-fuchsia-500"
@@ -103,7 +246,14 @@ const DownloadsPage: React.FC = () => {
                   />
                 </div>
               </div>
-              <span className="text-xs text-gray-500 flex-shrink-0">{progress?.percent || 0}%</span>
+              <span className="text-xs text-gray-500 flex-shrink-0 w-10 text-right">{progress?.percent || 0}%</span>
+              <button
+                onClick={() => isPaused ? resumeDownloadAction(youtubeId) : pauseDownloadAction(youtubeId)}
+                className="p-1.5 rounded-lg text-gray-500 hover:text-amber-400 hover:bg-amber-500/10 transition-all flex-shrink-0"
+                title={isPaused ? 'Resume' : 'Pause'}
+              >
+                {isPaused ? <PlayCircle size={14} /> : <Pause size={14} />}
+              </button>
               <button
                 onClick={() => cancelDownload(youtubeId)}
                 className="p-1.5 rounded-lg text-gray-500 hover:text-red-400 hover:bg-red-500/10 transition-all flex-shrink-0"
@@ -116,6 +266,7 @@ const DownloadsPage: React.FC = () => {
         </div>
       )}
 
+      {/* Failed Downloads */}
       {failedDownloads.length > 0 && (
         <div className="space-y-2">
           <div className="flex items-center justify-between">
@@ -148,6 +299,7 @@ const DownloadsPage: React.FC = () => {
         </div>
       )}
 
+      {/* Downloaded List */}
       {loading ? (
         <div className="flex items-center justify-center gap-3 text-gray-400 py-12">
           <Loader2 size={20} className="animate-spin text-violet-400" />
@@ -165,6 +317,9 @@ const DownloadsPage: React.FC = () => {
         </div>
       ) : (
         <div className="space-y-2">
+          <div className="text-xs font-medium text-gray-500">
+            {downloads.length} downloaded songs
+          </div>
           {downloads.map((d) => {
             const isActive = currentSongId === d.id;
             return (

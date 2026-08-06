@@ -1,10 +1,9 @@
 import { Song } from '../types/music';
 import { backgroundPlaybackService } from './backgroundPlaybackService';
-import { equalizerService } from './equalizerService';
+import { audioEffectsService } from './audioEffectsService';
 import { backgroundAudio } from './backgroundAudio';
 import { youtubePlayerService } from './youtubePlayerService';
 import { showToast } from '../utils/toast';
-import { getPreloadedElement } from './preloadService';
 import { metricsCollector } from './metricsCollector';
 
 function isNativePlatform(): boolean {
@@ -99,6 +98,7 @@ export class AudioService {
   private progressInterval: ReturnType<typeof setInterval> | null = null;
   private streamStartTime = 0;
   private waitingStartTime = 0;
+  private pendingStartTime = 0;
 
   private async getHtmlAudio(): Promise<HTMLAudioElement> {
     if (!this.htmlAudio) {
@@ -107,7 +107,7 @@ export class AudioService {
       this.htmlAudio.preload = 'auto';
       backgroundPlaybackService.registerAudioElement(this.htmlAudio);
       this.attachHtmlAudioListeners();
-      await equalizerService.init(this.htmlAudio);
+      await audioEffectsService.init(this.htmlAudio);
     }
     return this.htmlAudio;
   }
@@ -266,11 +266,19 @@ export class AudioService {
     return this.state;
   }
 
-  async play(song: Song, playlist: Song[] = [], startIndex: number = 0): Promise<void> {
+  async play(song: Song, playlist: Song[] = [], startIndex: number = 0, startTime?: number): Promise<void> {
     const markId = `play_${song.id}_${Date.now()}`;
     performance.mark(markId);
     this.streamStartTime = performance.now();
-    log('▶ play() called:', { title: song.title, youtubeId: song.youtubeId || 'NONE' });
+    this.pendingStartTime = startTime && isFinite(startTime) && startTime > 0 ? startTime : 0;
+    log('▶ play() called:', { title: song.title, youtubeId: song.youtubeId || 'NONE', startTime: this.pendingStartTime });
+    
+    // Start foreground service immediately when a song is loaded — not after
+    // playback succeeds. This ensures the notification appears instantly and the
+    // service is alive before the audio element starts.
+    if (isNativePlatform()) {
+      backgroundAudio.startService({ title: song.title, artist: song.artist }).catch(() => {});
+    }
     
     const playbackId = ++this.currentPlaybackId;
     this.stopCurrentPlayback();
@@ -323,27 +331,48 @@ export class AudioService {
         volume: this.state.volume,
       });
 
-      // If this song was preloaded, adopt the preloaded data into the main element
-      const preloaded = getPreloadedElement(song);
-      if (preloaded && preloaded !== audio) {
-        log('Adopting preloaded audio element data');
-        try { preloaded.pause(); } catch {}
+      // CRITICAL: Always attempt to ensure AudioContext is running before equalizer init
+      if (audioEffectsService.audioContextState !== 'running') {
+        log('AudioContext not running, attempting to resume...');
+        try {
+          await audioEffectsService.resume();
+          log('AudioContext resumed to:', audioEffectsService.audioContextState);
+        } catch (err) {
+          logError('AudioContext resume failed:', err);
+          // Continue - audio may still play without equalizer
+        }
       }
 
-      // Reset the element
-      audio.pause();
-      audio.removeAttribute('src');
-      try { audio.load(); } catch {}
-
-      if (!equalizerService.isReady || equalizerService.audioContextState !== 'running') {
-        try {
-          await equalizerService.init(audio);
-          log('AudioContext state after init:', equalizerService.audioContextState);
-        } catch (err) {
-          logError('equalizer init failed:', err);
+      // CRITICAL: If AudioContext is now running, ensure equalizer is initialized with this audio element
+      // If equalizer is already initialized with a different audio element, it needs to be re-initialized
+      if (audioEffectsService.audioContextState === 'running') {
+        if (!audioEffectsService.isReady ||
+            (audioEffectsService.getAudioElement() && audioEffectsService.getAudioElement() !== audio)) {
+          log('Initializing/Re-initializing equalizer for new audio element');
+          try {
+            await audioEffectsService.init(audio);
+            log('Equalizer initialized successfully, state:', audioEffectsService.audioContextState);
+          } catch (err) {
+            logError('Equalizer initialization failed:', err);
+            // Continue - audio may still play without equalizer
+          }
+        } else {
+          log('Equalizer already ready and configured for current audio element');
         }
       } else {
-        log('Equalizer already ready, skipping re-init');
+        log('AudioContext still not running, equalizer will not be available');
+      }
+
+      // If equalizer is ready and enabled, apply the current gains to ensure instant effect
+      if (audioEffectsService.isReady && audioEffectsService.enabled) {
+        const currentGains = audioEffectsService.gains;
+        const eqFilters = audioEffectsService.getFilters();
+        for (let i = 0; i < currentGains.length && i < eqFilters.length; i++) {
+          if (Math.abs(eqFilters[i].gain.value - currentGains[i]) > 0.1) {
+            eqFilters[i].gain.value = currentGains[i];
+          }
+        }
+        log('Applied current equalizer gains for instant effect');
       }
 
       // Assign source AFTER equalizer is ready
@@ -373,7 +402,7 @@ export class AudioService {
         muted: audio.muted,
         playbackRate: audio.playbackRate,
         readyState: audio.readyState,
-        eqState: equalizerService.audioContextState,
+        eqState: audioEffectsService.audioContextState,
       });
 
       const canplayOk = await this.waitForCanPlay(audio, CANPLAY_TIMEOUT_MS);
@@ -392,15 +421,26 @@ export class AudioService {
 
       log('canplay ✓ — calling play()...');
 
+      if (this.pendingStartTime > 0) {
+        try {
+          const target = Math.min(this.pendingStartTime, audio.duration || this.pendingStartTime);
+          audio.currentTime = target;
+          log(`⏯ Resuming from saved position: ${target}s`);
+        } catch (err) {
+          logError('Failed to seek to saved position:', err);
+        }
+      }
+
       try {
         await audio.play();
 
         if (this.currentPlaybackId !== playbackId) return;
+        this.pendingStartTime = 0;
 
-        if (equalizerService.audioContextState !== 'running') {
+        if (audioEffectsService.audioContextState !== 'running') {
           log('⚠ AudioContext NOT running after play() — attempting emergency resume');
-          await equalizerService.resume();
-          log('AudioContext state after emergency resume:', equalizerService.audioContextState);
+          await audioEffectsService.resume();
+          log('AudioContext state after emergency resume:', audioEffectsService.audioContextState);
         }
 
         log('✓ Playing successfully');
@@ -523,6 +563,16 @@ export class AudioService {
 
         if (song.youtubeId) youtubePlayerService.markStreamWorking(song.youtubeId);
 
+        if (this.pendingStartTime > 0) {
+          try {
+            youtubePlayerService.seek(this.pendingStartTime);
+            log(`⏯ YouTube resuming from saved position: ${this.pendingStartTime}s`);
+          } catch (err) {
+            logError('Failed to seek YouTube player:', err);
+          }
+          this.pendingStartTime = 0;
+        }
+
         logPerf('YouTube_Loaded', markId);
         this.setState({ isLoading: false, duration: song.duration });
         this.emit('loaded', { song });
@@ -565,11 +615,9 @@ export class AudioService {
   private stopHtmlAudio(): void {
     if (this.htmlAudio) {
       this.htmlAudio.pause();
-      if (this.useYoutubePlayer) {
-        try { this.htmlAudio.currentTime = 0; } catch {}
-        this.htmlAudio.removeAttribute('src');
-        try { this.htmlAudio.load(); } catch {}
-      }
+      try { this.htmlAudio.currentTime = 0; } catch {}
+      this.htmlAudio.removeAttribute('src');
+      try { this.htmlAudio.load(); } catch {}
     }
   }
 
@@ -614,6 +662,7 @@ export class AudioService {
         backgroundAudio.updatePlaybackState({
           isPlaying: false,
           position: this.getCurrentTime(),
+          duration: this.getDuration(),
         }).catch(() => {});
       }
     }
@@ -632,7 +681,7 @@ export class AudioService {
       log('resume() — verifying audio state...');
 
       try {
-        await equalizerService.init(this.htmlAudio);
+        await audioEffectsService.init(this.htmlAudio);
       } catch {}
       if (this.currentPlaybackId !== playbackId) return;
 
@@ -659,7 +708,7 @@ export class AudioService {
         volume: this.htmlAudio.volume,
         muted: this.htmlAudio.muted,
         readyState: this.htmlAudio.readyState,
-        eqState: equalizerService.audioContextState,
+        eqState: audioEffectsService.audioContextState,
       });
 
       try {
@@ -730,13 +779,20 @@ export class AudioService {
   getIsPlaying(): boolean { return this.state.isPlaying; }
   getCurrentSong(): Song | null { return this.state.currentSong; }
   getVolume(): number { return this.state.volume; }
+  /** True when an actual media source is loaded and playable. */
+  isLoaded(): boolean {
+    if (this.useYoutubePlayer) {
+      return youtubePlayerService.getCurrentSongId() !== null;
+    }
+    return !!(this.htmlAudio && this.htmlAudio.src && this.htmlAudio.readyState > 0);
+  }
   getConsecutiveFailures(): number { return this.consecutiveFailures; }
   resetConsecutiveFailures(): void { this.consecutiveFailures = 0; }
 
   destroy(): void {
     this.currentPlaybackId++;
     this.stopCurrentPlayback();
-    equalizerService.destroy();
+    audioEffectsService.destroy();
     if (this.htmlAudio) {
       this.detachHtmlAudioListeners();
       backgroundPlaybackService.unregisterAudioElement(this.htmlAudio);

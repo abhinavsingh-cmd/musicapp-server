@@ -21,6 +21,7 @@ export interface PlaybackState {
   volume: number;
   isShuffled: boolean;
   repeatMode: 'off' | 'all' | 'one';
+  originalQueue: Song[];
   savedAt: number; // timestamp
 }
 

@@ -25,7 +25,6 @@ export const LyricsDisplay: React.FC = memo(() => {
   const loading = useLyricsStore((s) => s.loading);
   const fetchLyrics = useLyricsStore((s) => s.fetchLyrics);
   const currentSong = useAudioStore((s) => s.currentSong);
-  const progress = useAudioStore((s) => s.progress);
   const containerRef = useRef<HTMLDivElement>(null);
   const lineRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const lastUpdateRef = useRef(0);
@@ -37,12 +36,21 @@ export const LyricsDisplay: React.FC = memo(() => {
     lineRefs.current.clear();
   }, [currentSong, fetchLyrics]);
 
+  // Throttled progress sync — reads from store directly to avoid re-renders
   useEffect(() => {
-    const now = Date.now();
-    if (now - lastUpdateRef.current < 500) return;
-    lastUpdateRef.current = now;
-    useLyricsStore.getState().updateCurrentLine(progress);
-  }, [progress]);
+    let rafId: number;
+    const tick = () => {
+      const now = Date.now();
+      if (now - lastUpdateRef.current >= 500) {
+        lastUpdateRef.current = now;
+        const { progress } = useAudioStore.getState();
+        useLyricsStore.getState().updateCurrentLine(progress);
+      }
+      rafId = requestAnimationFrame(tick);
+    };
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+  }, []);
 
   useEffect(() => {
     if (currentLine >= 0 && lineRefs.current.has(currentLine)) {

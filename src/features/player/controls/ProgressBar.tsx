@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, memo, useEffect } from 'react';
 import { useAudioStore } from '../../../stores/audioStore';
 import { cn } from '../../../utils/cn';
 
@@ -12,30 +12,72 @@ const formatTime = (seconds: number) => {
   return `${mins}:${secs.toString().padStart(2, '0')}`;
 };
 
-export const ProgressBar: React.FC<ProgressBarProps> = ({ className }) => {
-  const progress = useAudioStore((s) => s.progress);
-  const duration = useAudioStore((s) => s.duration);
+const ProgressFill = memo(({ pct, hasSong }: { pct: number; hasSong: boolean }) => (
+  <div
+    className="absolute top-0 left-0 h-full bg-gradient-to-r from-purple-500 to-pink-500 rounded-full"
+    style={{ width: hasSong ? `${pct}%` : '0%', willChange: 'width' }}
+  />
+));
+ProgressFill.displayName = 'ProgressFill';
+
+const TimeDisplay = memo(({ progress, duration, hasSong }: { progress: number; duration: number; hasSong: boolean }) => (
+  <div className="flex justify-between mt-0.5">
+    <span className="text-[10px] text-gray-400 dark:text-gray-500 font-mono">
+      {hasSong ? formatTime(progress) : '0:00'}
+    </span>
+    <span className="text-[10px] text-gray-400 dark:text-gray-500 font-mono">
+      {hasSong ? formatTime(duration) : '0:00'}
+    </span>
+  </div>
+));
+TimeDisplay.displayName = 'TimeDisplay';
+
+export const ProgressBar: React.FC<ProgressBarProps> = memo(({ className }) => {
   const seek = useAudioStore((s) => s.seek);
   const hasSong = useAudioStore((s) => s.currentSong !== null);
   const [isHovering, setIsHovering] = useState(false);
   const barRef = useRef<HTMLDivElement>(null);
   const isDragging = useRef(false);
+  const pctRef = useRef(0);
+  const [, forceUpdate] = useState(0);
+
+  // Subscribe to progress via interval to avoid 4x/sec re-renders
+  useEffect(() => {
+    let rafId: number;
+    const tick = () => {
+      const { progress, duration } = useAudioStore.getState();
+      const newPct = duration > 0 ? (progress / duration) * 100 : 0;
+      if (Math.abs(newPct - pctRef.current) > 0.1) {
+        pctRef.current = newPct;
+        forceUpdate(c => c + 1);
+      }
+      rafId = requestAnimationFrame(tick);
+    };
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+  }, []);
 
   const handleSeek = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    if (!barRef.current || !duration) return;
+    if (!barRef.current) return;
+    const { duration } = useAudioStore.getState();
+    if (!duration) return;
     const rect = barRef.current.getBoundingClientRect();
     const pos = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
     seek(pos * duration);
-  }, [duration, seek]);
+  }, [seek]);
 
   const handleMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    if (!barRef.current || !duration || !isDragging.current) return;
+    if (!barRef.current || !isDragging.current) return;
+    const { duration } = useAudioStore.getState();
+    if (!duration) return;
     const rect = barRef.current.getBoundingClientRect();
     const pos = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
     seek(pos * duration);
-  }, [duration, seek]);
+  }, [seek]);
 
-  const pct = duration > 0 ? (progress / duration) * 100 : 0;
+  const pct = pctRef.current;
+  const progress = useAudioStore((s) => s.progress);
+  const duration = useAudioStore((s) => s.duration);
 
   return (
     <div className={cn("px-4", className)}>
@@ -49,10 +91,7 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({ className }) => {
         onMouseEnter={() => setIsHovering(true)}
         onMouseLeave={() => { setIsHovering(false); isDragging.current = false; }}
       >
-        <div
-          className="absolute top-0 left-0 h-full bg-gradient-to-r from-purple-500 to-pink-500 rounded-full"
-          style={{ width: hasSong ? `${pct}%` : '0%', willChange: 'width' }}
-        />
+        <ProgressFill pct={pct} hasSong={hasSong} />
         {hasSong && (
           <div
             className={cn(
@@ -63,15 +102,8 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({ className }) => {
           />
         )}
       </div>
-      <div className="flex justify-between mt-0.5">
-        <span className="text-[10px] text-gray-400 dark:text-gray-500 font-mono">
-          {hasSong ? formatTime(progress) : '0:00'}
-        </span>
-        <span className="text-[10px] text-gray-400 dark:text-gray-500 font-mono">
-          {hasSong ? formatTime(duration) : '0:00'}
-        </span>
-      </div>
+      <TimeDisplay progress={progress} duration={duration} hasSong={hasSong} />
     </div>
   );
-};
+});
 ProgressBar.displayName = 'ProgressBar';

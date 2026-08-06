@@ -9,6 +9,8 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
@@ -16,10 +18,18 @@ import android.media.MediaMetadata;
 import android.media.session.MediaSession;
 import android.media.session.PlaybackState;
 import android.os.Build;
+import android.os.Bundle;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.os.PowerManager;
+import android.os.ResultReceiver;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
+
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 
     public class MusicForegroundService extends Service {
         private static final String CHANNEL_ID = "music_playback";
@@ -47,6 +57,9 @@ import android.os.Vibrator;
         private String currentAlbum = "MusicApp Album";
         private boolean isPlaying = false;
         private boolean hasHeadphonesConnected = false;
+        private long duration = 0;
+        private Bitmap albumArtBitmap = null;
+        private String lastAlbumArtUrl = null;
         private int streamVolume = 0;
 
         @Override
@@ -62,13 +75,6 @@ import android.os.Vibrator;
         }
 
         private void initMediaSession() {
-            MediaSession.Token token;
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR2) {
-                token = new MediaSession.Token();
-            } else {
-                token = new MediaSession.Token();
-            }
-            
             mediaSession = new MediaSession(this, "MusicAppSession");
             mediaSession.setActive(true);
             mediaSession.setFlags(
@@ -167,6 +173,17 @@ import android.os.Vibrator;
                     } else if (ACTION_USER_PRESENT.equals(action)) {
                         // Screen turned on - reduce wake lock usage
                         releaseWakeLock();
+                    } else if ("android.bluetooth.adapter.action.CONNECTION_STATE_CHANGED".equals(action)) {
+                        // Bluetooth headset connected/disconnected
+                        int state = intent.getIntExtra("android.bluetooth.adapter.extra.CONNECTION_STATE", -1);
+                        if (state == 2) { // STATE_CONNECTED
+                            dispatchMediaAction(ACTION_PLAY, -1);
+                        } else if (state == 0) { // STATE_DISCONNECTED
+                            dispatchMediaAction(ACTION_PAUSE, -1);
+                        }
+                    } else if ("android.intent.action.MEDIA_BUTTON".equals(action)) {
+                        // Car mode / Bluetooth media button
+                        dispatchMediaAction(ACTION_PLAY, -1);
                     }
                 }
             };
@@ -175,6 +192,8 @@ import android.os.Vibrator;
             filter.addAction(ACTION_HEADSET_PLUG);
             filter.addAction(ACTION_SCREEN_OFF);
             filter.addAction(ACTION_USER_PRESENT);
+            filter.addAction("android.bluetooth.adapter.action.CONNECTION_STATE_CHANGED");
+            filter.addAction("android.intent.action.MEDIA_BUTTON");
             
             registerReceiver(headsetPlugReceiver, filter);
         }
@@ -250,6 +269,15 @@ import android.os.Vibrator;
             return START_STICKY;
         }
 
+        // Service recreated by OS (START_STICKY) — re-acquire audio focus,
+        // show notification, and notify JS so it can resume playback.
+        if (intent == null && instance != null) {
+            // Already running — just re-acquire focus and rebuild notification.
+            requestAudioFocus();
+            rebuildNotification();
+            return START_STICKY;
+        }
+
         String title = "MusicApp";
         String artist = "Playing music";
         String album = "MusicApp Album";
@@ -268,6 +296,9 @@ import android.os.Vibrator;
 
         Notification notification = buildNotification(title, artist, album);
         startForeground(NOTIFICATION_ID, notification);
+
+        // Notify JS that the service started so it can resume if needed.
+        BackgroundAudioPlugin.notifyMediaAction("play", -1);
 
         return START_STICKY;
     }
@@ -291,7 +322,7 @@ import android.os.Vibrator;
                 .setContentText(artist)
                 .setSubText(album)
                 .setSmallIcon(android.R.drawable.ic_media_play)
-                .setLargeIcon(getAlbumArtIcon(artist))
+                .setLargeIcon(albumArtBitmap != null ? albumArtBitmap : getAlbumArtIcon(artist))
                 .setContentIntent(pendingIntent)
                 .setOngoing(true)
                 .setVisibility(Notification.VISIBILITY_PUBLIC)
@@ -404,18 +435,27 @@ import android.os.Vibrator;
         BackgroundAudioPlugin.notifyMediaAction(eventAction, position);
     }
 
-    private void updateMediaSessionMetadata(String title, String artist) {
+    private void updateMediaSessionMetadata(String title, String artist, String album, long duration) {
         if (mediaSession == null) return;
         MediaMetadata.Builder metaBuilder = new MediaMetadata.Builder();
         metaBuilder.putString(MediaMetadata.METADATA_KEY_TITLE, title);
         metaBuilder.putString(MediaMetadata.METADATA_KEY_ARTIST, artist);
-        metaBuilder.putString(MediaMetadata.METADATA_KEY_ALBUM, "MusicApp");
+        metaBuilder.putString(MediaMetadata.METADATA_KEY_ALBUM, album);
+        if (duration > 0) {
+            metaBuilder.putLong(MediaMetadata.METADATA_KEY_DURATION, duration);
+        }
         mediaSession.setMetadata(metaBuilder.build());
     }
 
-    public void updatePlaybackState(boolean isPlaying, long position) {
+    private void updateMediaSessionMetadata(String title, String artist) {
+        updateMediaSessionMetadata(title, artist, currentAlbum, duration);
+    }
+
+    public void updatePlaybackState(boolean isPlaying, long position, long duration) {
         if (mediaSession == null) return;
+        boolean stateChanged = this.isPlaying != isPlaying;
         this.isPlaying = isPlaying;
+        this.duration = duration;
         int state = isPlaying ? PlaybackState.STATE_PLAYING : PlaybackState.STATE_PAUSED;
         PlaybackState.Builder stateBuilder = new PlaybackState.Builder()
                 .setActions(
@@ -434,23 +474,76 @@ import android.os.Vibrator;
         } else {
             releaseWakeLock();
         }
-        if (notificationManager != null) {
-            notificationManager.notify(NOTIFICATION_ID, buildNotification(currentTitle, currentArtist, currentAlbum));
+        // Only rebuild the notification when the play/pause state flips or when
+        // album art still needs loading — avoids PendingIntent churn every second.
+        if (stateChanged || albumArtBitmap == null) {
+            updateMediaSessionMetadata(currentTitle, currentArtist, currentAlbum, duration);
+            rebuildNotification();
         }
     }
 
-    public void updateNotification(String title, String artist, String album) {
+    public void updateNotification(String title, String artist, String album, String albumArt) {
         if (notificationManager == null) return;
         currentTitle = title;
         currentArtist = artist;
         currentAlbum = album;
-        updateMediaSessionMetadata(title, artist);
-        Notification notification = buildNotification(title, artist, album);
-        notificationManager.notify(NOTIFICATION_ID, notification);
+        if (albumArt != null && !albumArt.isEmpty()) {
+            loadAlbumArtAsync(albumArt);
+        }
+        updateMediaSessionMetadata(title, artist, album, duration);
+        rebuildNotification();
+    }
+
+    public void updateNotification(String title, String artist, String album) {
+        updateNotification(title, artist, album, null);
     }
 
     public void updateNotification(String title, String artist) {
-        updateNotification(title, artist, "MusicApp Album");
+        updateNotification(title, artist, "MusicApp Album", null);
+    }
+
+    private void rebuildNotification() {
+        if (notificationManager == null) return;
+        Notification notification = buildNotification(currentTitle, currentArtist, currentAlbum);
+        notificationManager.notify(NOTIFICATION_ID, notification);
+    }
+
+    private void loadAlbumArtAsync(final String url) {
+        if (url == null || url.equals(lastAlbumArtUrl)) return;
+        lastAlbumArtUrl = url;
+        new Thread(() -> {
+            HttpURLConnection conn = null;
+            try {
+                conn = (HttpURLConnection) new URL(url).openConnection();
+                conn.setConnectTimeout(5000);
+                conn.setReadTimeout(5000);
+                conn.setDoInput(true);
+                conn.connect();
+                InputStream input = conn.getInputStream();
+                final Bitmap bmp = BitmapFactory.decodeStream(input);
+                input.close();
+                if (bmp != null) {
+                    final Bitmap scaled = scaleBitmap(bmp, 256);
+                    new Handler(Looper.getMainLooper()).post(() -> {
+                        albumArtBitmap = scaled;
+                        rebuildNotification();
+                    });
+                }
+            } catch (Exception ignored) {
+            } finally {
+                if (conn != null) conn.disconnect();
+            }
+        }).start();
+    }
+
+    private Bitmap scaleBitmap(Bitmap src, int maxSize) {
+        int w = src.getWidth();
+        int h = src.getHeight();
+        if (w <= maxSize && h <= maxSize) return src;
+        float ratio = Math.max((float) w / maxSize, (float) h / maxSize);
+        int nw = Math.round(w / ratio);
+        int nh = Math.round(h / ratio);
+        return Bitmap.createScaledBitmap(src, nw, nh, true);
     }
 
     public MediaSession getMediaSession() {

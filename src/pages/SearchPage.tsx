@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useGoBack } from '../hooks/useGoBack';
 import {
@@ -73,7 +73,7 @@ const fmtViews = (n: number) => {
   return num.toString();
 };
 
-export const SearchPage: React.FC = () => {
+export const SearchPage: React.FC = memo(() => {
   const navigate = useNavigate();
   const goBack = useGoBack();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -81,7 +81,7 @@ export const SearchPage: React.FC = () => {
   const [query, setQuery] = useState('');
   const [showFilters, setShowFilters] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(false);
-  const debouncedQuery = useDebounce(query, 300);
+  const debouncedQuery = useDebounce(query, 100);
 
   // Delayed focus to let layout stabilize first (avoids Android keyboard shift)
   useEffect(() => {
@@ -112,6 +112,10 @@ export const SearchPage: React.FC = () => {
   const search = useSearchStore((s) => s.search);
   const loadMore = useSearchStore((s) => s.loadMore);
   const clear = useSearchStore((s) => s.clear);
+  const cancelSearch = useSearchStore((s) => s.cancelSearch);
+
+  // Cancel any in-flight search when unmounting
+  useEffect(() => () => cancelSearch(), [cancelSearch]);
 
   const filteredLibrary = useMemo(
     () => selectFilteredLibrary({ libraryResults, filter, sort, durationFilter, genreFilter } as any),
@@ -510,6 +514,7 @@ export const SearchPage: React.FC = () => {
       <ContextMenu />
     </div>
   );
-};
+});
+SearchPage.displayName = 'SearchPage';
 
 export default SearchPage;

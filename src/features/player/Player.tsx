@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, memo } from 'react';
 import { PlayerControls } from './controls/PlayerControls';
 import { ProgressBar } from './controls/ProgressBar';
 import { SongInfo } from './controls/SongInfo';
@@ -14,20 +14,20 @@ interface PlayerProps {
   className?: string;
 }
 
-export const Player: React.FC<PlayerProps> = ({ className }) => {
+export const Player: React.FC<PlayerProps> = memo(({ className }) => {
   const [showLyrics, setShowLyrics] = useState(false);
   const [showEqualizer, setShowEqualizer] = useState(false);
   const [showQueue, setShowQueue] = useState(false);
   const [isExpanded, setIsExpanded] = useState(false);
   const error = useAudioStore((s) => s.error);
   const currentSong = useAudioStore((s) => s.currentSong);
-  const loadSong = useAudioStore((s) => s.loadSong);
+  const retry = useAudioStore((s) => s.retry);
 
   const handleRetry = useCallback(() => {
     if (currentSong) {
-      loadSong(currentSong, [currentSong], 0);
+      retry();
     }
-  }, [currentSong, loadSong]);
+  }, [currentSong, retry]);
 
   const togglePanel = useCallback((panel: 'lyrics' | 'equalizer' | 'queue') => {
     if (panel === 'lyrics') {
@@ -284,4 +284,5 @@ export const Player: React.FC<PlayerProps> = ({ className }) => {
       </div>
     </>
   );
-};
+});
+Player.displayName = 'Player';

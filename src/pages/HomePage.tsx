@@ -4,9 +4,13 @@ import { useSongsStore } from '../stores/songsStore';
 import { SongTable } from '../features/library/SongTable';
 import { PlaylistDetail } from '../features/playlist/PlaylistDetail';
 import { Song, Playlist } from '../types/music';
-import { fetchYouTubeTrending, getInitialTrending } from '../services/musicApi';
+import { trendingService, getInitialTrending, fetchYouTubeTrending } from '../services/trendingService';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Disc3, TrendingUp, Play, Music, Sparkles, Radio, Zap, Globe, RefreshCw } from 'lucide-react';
+import { performanceMonitor } from '../utils/performanceMonitor';
+import { renderMonitor } from '../utils/renderMonitor';
+
+const INITIAL_DEFER_MS = 1500;
 
 const SkeletonBlock: React.FC<{ className?: string }> = ({ className }) => (
   <div className={`animate-pulse rounded-xl bg-white/5 ${className || ''}`} />
@@ -43,22 +47,24 @@ const HeroSection = memo(({ songCount, onPlayAll, onPlayTrending }: { songCount:
       <div className="absolute inset-0 bg-gradient-to-b from-black/20 via-transparent to-black/40" />
       
       <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute top-10 left-10 w-40 h-40 rounded-full bg-white/10 blur-2xl" />
-        <div className="absolute bottom-10 right-20 w-56 h-56 rounded-full bg-white/5 blur-3xl" />
-        <div className="absolute top-1/2 left-1/2 w-32 h-32 rounded-full bg-violet-500/20 blur-2xl" />
+        <div className="absolute top-10 left-10 w-40 h-40 rounded-full bg-white/10 blur-2xl will-transform" />
+        <div className="absolute bottom-10 right-20 w-56 h-56 rounded-full bg-white/5 blur-3xl will-transform" />
+        <div className="absolute top-1/2 left-1/2 w-32 h-32 rounded-full bg-violet-500/20 blur-2xl will-transform" />
       </div>
       
       <motion.div 
         initial={{ opacity: 0, y: 30 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.8, delay: 0.2 }}
-        className="relative z-10 px-4 sm:px-8 py-12 sm:py-16 max-w-2xl"
+        className="relative z-10 px-4 sm:px-8 py-12 sm:py-16 max-w-2xl will-transform"
       >
         <motion.div 
           initial={{ opacity: 0, scale: 0.9 }}
           animate={{ opacity: 1, scale: 1 }}
           transition={{ delay: 0.3 }}
-          className="inline-flex items-center gap-2 px-4 py-2 rounded-full liquid-glass text-white/90 text-sm font-medium mb-4 sm:mb-6"
+          className="inline-flex items-center gap-2 px-4 py-2 rounded-full liquid-glass text-white/90 text-sm font-medium mb-4 sm:mb-6 will-transform"
+          whileHover={{ scale: 1.05 }}
+          whileTap={{ scale: 0.95 }}
         >
           <Sparkles size={14} className="text-violet-300" />
           <span>{songCount} songs + live YouTube trending</span>
@@ -68,7 +74,7 @@ const HeroSection = memo(({ songCount, onPlayAll, onPlayTrending }: { songCount:
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.4 }}
-          className="text-3xl sm:text-5xl font-black text-white mb-3 sm:mb-4 leading-tight"
+          className="text-3xl sm:text-5xl font-black text-white mb-3 sm:mb-4 leading-tight will-transform"
         >
           Your Music,<br />
           <span className="text-gradient-aurora">Your Mood</span>
@@ -78,7 +84,7 @@ const HeroSection = memo(({ songCount, onPlayAll, onPlayTrending }: { songCount:
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.5 }}
-          className="text-white/70 text-sm sm:text-lg mb-6 sm:mb-8 max-w-md"
+          className="text-white/70 text-sm sm:text-lg mb-6 sm:mb-8 max-w-md will-transform"
         >
           Stream trending hits from YouTube, discover new artists, create playlists.
         </motion.p>
@@ -87,13 +93,13 @@ const HeroSection = memo(({ songCount, onPlayAll, onPlayTrending }: { songCount:
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.6 }}
-          className="flex gap-3"
+          className="flex gap-3 will-transform"
         >
           <motion.button
             whileHover={{ scale: 1.05, boxShadow: '0 20px 40px rgba(255, 255, 255, 0.2)' }}
             whileTap={{ scale: 0.95 }}
             onClick={onPlayAll}
-            className="flex items-center gap-2 px-6 sm:px-8 py-3 sm:py-3.5 rounded-full bg-white text-gray-900 font-bold text-sm sm:text-base transition-all duration-300"
+            className="flex items-center gap-2 px-6 sm:px-8 py-3 sm:py-3.5 rounded-full bg-white text-gray-900 font-bold text-sm sm:text-base transition-all duration-300 will-transform"
           >
             <Play size={18} fill="currentColor" />
             Play All
@@ -103,7 +109,7 @@ const HeroSection = memo(({ songCount, onPlayAll, onPlayTrending }: { songCount:
             whileHover={{ scale: 1.05 }}
             whileTap={{ scale: 0.95 }}
             onClick={onPlayTrending}
-            className="flex items-center gap-2 px-6 sm:px-8 py-3 sm:py-3.5 rounded-full liquid-glass text-white font-bold text-sm sm:text-base transition-all duration-300"
+            className="flex items-center gap-2 px-6 sm:px-8 py-3 sm:py-3.5 rounded-full liquid-glass text-white font-bold text-sm sm:text-base transition-all duration-300 will-transform"
           >
             <Zap size={18} />
             Trending
@@ -117,57 +123,68 @@ HeroSection.displayName = 'HeroSection';
 
 const initialTrending = getInitialTrending();
 
-export const HomePage: React.FC = () => {
+export const HomePage: React.FC = memo(() => {
+  const renderStart = performance.now();
+
+  useEffect(() => {
+    performanceMonitor.trackRender('HomePage', performance.now() - renderStart);
+    renderMonitor.trackRender('HomePage', performance.now() - renderStart);
+  });
   const songs = useSongsStore((s) => s.songs);
-  const ensureLoaded = useSongsStore((s) => s.ensureLoaded);
   const [trending, setTrending] = useState<Song[]>(initialTrending.songs);
   const [trendingLoading, setTrendingLoading] = useState(false);
-  const [trendingError, setTrendingError] = useState<string | null>(null);
   const [trendingSource, setTrendingSource] = useState<string>(initialTrending.source);
   const [trendingLastUpdated, setTrendingLastUpdated] = useState<number | null>(initialTrending.lastUpdated);
   const [selectedPlaylist, setSelectedPlaylist] = useState<Playlist | null>(null);
   const [selectedArtist, setSelectedArtist] = useState<string | null>(null);
   const loadSong = useAudioStore((s) => s.loadSong);
 
+  // Initialize trending service and start background refresh
+  useEffect(() => {
+    trendingService.init();
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
+    let timeoutId: ReturnType<typeof setTimeout>;
 
     const defer = typeof requestIdleCallback === 'function'
       ? requestIdleCallback
       : (cb: IdleRequestCallback) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 } as IdleDeadline), 0);
 
+    // Initial refresh after 1.5 seconds — keeps previous data visible while loading
     defer(() => {
       if (cancelled) return;
-      ensureLoaded().catch(() => {});
-    });
-
-    defer(() => {
-      if (cancelled) return;
-      setTrendingLoading(true);
-      fetchYouTubeTrending()
-        .then(result => {
-          if (cancelled) return;
-          setTrending(result.songs);
-          setTrendingSource(result.source);
-          setTrendingLastUpdated(result.lastUpdated);
-          setTrendingLoading(false);
-          setTrendingError(null);
-        })
-        .catch(() => {
-          if (!cancelled) {
+      timeoutId = setTimeout(() => {
+        if (cancelled) return;
+        console.log('[HomePage] Fetching trending after deferred load...');
+        setTrendingLoading(true);
+        fetchYouTubeTrending()
+          .then(result => {
+            if (cancelled) return;
+            console.log(`[HomePage] Trending loaded: ${result.songs.length} songs, source=${result.source}`);
+            setTrending(result.songs);
+            setTrendingSource(result.source);
+            setTrendingLastUpdated(result.lastUpdated);
             setTrendingLoading(false);
-            setTrendingError('Could not load trending songs');
-          }
-        });
+          })
+          .catch(() => {
+            // On failure, keep previous data visible — just stop loading
+            console.warn('[HomePage] Trending fetch failed, keeping previous data');
+            if (!cancelled) setTrendingLoading(false);
+          });
+      }, INITIAL_DEFER_MS);
     });
 
-    return () => { cancelled = true; };
-  }, [ensureLoaded]);
+    return () => {
+      cancelled = true;
+      if (timeoutId) clearTimeout(timeoutId);
+    };
+  }, []);
 
   const loadTrending = useCallback(() => {
     let cancelled = false;
     setTrendingLoading(true);
-    setTrendingError(null);
     fetchYouTubeTrending()
       .then(result => {
         if (!cancelled) {
@@ -178,10 +195,8 @@ export const HomePage: React.FC = () => {
         }
       })
       .catch(() => {
-        if (!cancelled) {
-          setTrendingLoading(false);
-          setTrendingError('Could not load trending songs');
-        }
+        // On failure, keep previous data visible — just stop loading
+        if (!cancelled) setTrendingLoading(false);
       });
     return () => { cancelled = true; };
   }, []);
@@ -269,9 +284,11 @@ export const HomePage: React.FC = () => {
               {trendingLastUpdated && !trendingLoading && (
                 <span className="text-xs text-gray-500 flex items-center gap-1">
                   <Globe size={12} className="text-red-400" />
-                  {trendingSource === 'youtube_music' ? 'Live from YouTube' :
-                   trendingSource === 'charts' ? 'Official Charts' :
-                   trendingSource === 'cache' ? 'Cached' : 'Fallback'}
+                   {trendingSource === 'youtube_music' ? 'Live from YouTube' :
+                   trendingSource === 'charts' ? 'Charts + Live' :
+                   trendingSource === 'cache' ? 'Cached' :
+                   trendingSource === 'local_library' ? 'From Library' :
+                   trendingSource === 'builtin' ? 'Offline' : 'Loading'}
                   {' · '}
                   {(() => {
                     const diff = Date.now() - trendingLastUpdated;
@@ -291,29 +308,15 @@ export const HomePage: React.FC = () => {
               </button>
             </div>
           </div>
-          {trendingLoading ? (
+          {trendingLoading && trending.length === 0 ? (
             <div className="space-y-2">
               {[1, 2, 3, 4, 5].map(i => (
                 <SkeletonBlock key={i} className="h-14 w-full rounded-xl" />
               ))}
             </div>
-          ) : trendingError ? (
-            <div className="liquid-glass rounded-2xl p-8 text-center">
-              <p className="text-red-400 mb-3">Could not load trending songs</p>
-              <button
-                onClick={loadTrending}
-                className="px-4 py-2 rounded-xl bg-violet-500/20 text-violet-400 hover:bg-violet-500/30 transition-colors text-sm font-medium"
-              >
-                Try again
-              </button>
-            </div>
-          ) : trending.length > 0 ? (
+          ) : (
             <div className="liquid-glass rounded-xl sm:rounded-2xl p-1 sm:p-2">
               <SongTable songs={trending} />
-            </div>
-          ) : (
-            <div className="liquid-glass rounded-2xl p-8 text-center text-gray-500">
-              No trending data available
             </div>
           )}
         </section>
@@ -440,6 +443,7 @@ export const HomePage: React.FC = () => {
       </AnimatePresence>
     </div>
   );
-};
+});
+HomePage.displayName = 'HomePage';
 
 export default HomePage;

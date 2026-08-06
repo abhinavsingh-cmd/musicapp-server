@@ -15,7 +15,6 @@ function saveAlbums(albums: Album[]): void {
 
 interface AlbumStore {
   albums: Album[];
-  loading: boolean;
 
   // CRUD
   createAlbum: (data: { title: string; artist: string; coverArt?: string; releaseYear: number; genre: string; songIds: string[]; allSongs: Song[] }) => Album;
@@ -36,7 +35,6 @@ interface AlbumStore {
 
 export const useAlbumStore = create<AlbumStore>((set, get) => ({
   albums: loadAlbums(),
-  loading: false,
 
   createAlbum: (data) => {
     const { allSongs, ...rest } = data;

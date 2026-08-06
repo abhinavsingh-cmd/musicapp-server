@@ -36,10 +36,10 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
           setTimeout(() => reject(new Error('Lyrics timeout')), LYRICS_TIMEOUT_MS)
         ),
       ]);
-      if (get().songId !== songId) return;
+      if (get().songId !== songId) return set({ loading: false });
       set({ lyrics, loading: false });
     } catch {
-      if (get().songId !== songId) return;
+      if (get().songId !== songId) return set({ loading: false });
       set({ error: 'Failed to fetch lyrics', loading: false });
     }
   },
@@ -53,5 +53,5 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
     }
   },
 
-  clearLyrics: () => set({ lyrics: [], currentLine: -1, error: null, songId: null }),
+  clearLyrics: () => set({ lyrics: [], currentLine: -1, error: null, songId: null, loading: false }),
 }));

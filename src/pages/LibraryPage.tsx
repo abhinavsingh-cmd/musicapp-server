@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useGoBack } from '../hooks/useGoBack';
 import { useAudioStore } from '../stores/audioStore';
@@ -8,7 +8,7 @@ import { SongTable } from '../features/library/SongTable';
 import { AlbumGrid } from '../features/album/AlbumGrid';
 import { PlaylistCard } from '../features/playlist/PlaylistCard';
 import { cn } from '../utils/cn';
-import { Search, List, Grid, Plus, Music2, ArrowLeft } from 'lucide-react';
+import { Search, List, Grid, Plus, Music2, ArrowLeft, AlertTriangle } from 'lucide-react';
 import { Album, Song, Playlist } from '../types/music';
 import { AnimatePresence, motion } from 'framer-motion';
 
@@ -22,15 +22,45 @@ export const LibraryPage: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [activeTab, setActiveTab] = useState<'songs' | 'albums' | 'playlists'>('songs');
   const [viewMode, setViewMode] = useState<'list' | 'grid'>('list');
+  const [lastFetchAttempt, setLastFetchAttempt] = useState(0);
+  const [fetchRetries, setFetchRetries] = useState(0);
+  
   const songs = useSongsStore((s) => s.songs);
   const loading = useSongsStore((s) => s.loading);
+  const error = useSongsStore((s) => s.error);
   const ensureLoaded = useSongsStore((s) => s.ensureLoaded);
   const loadSong = useAudioStore((s) => s.loadSong);
   const userPlaylists = usePlaylistStore((s) => s.playlists);
   const navigate = useNavigate();
   const goBack = useGoBack();
 
-  useEffect(() => { ensureLoaded(); }, [ensureLoaded]);
+  const maxRetries = 3;
+  const retryTimeout = 30000;
+  const now = Date.now();
+  
+  const shouldRetryFetch = useMemo(() => {
+    const timeSinceLastAttempt = now - lastFetchAttempt;
+    return loading && (timeSinceLastAttempt >= retryTimeout || fetchRetries >= maxRetries);
+  }, [loading, lastFetchAttempt, fetchRetries, now, retryTimeout, maxRetries]);
+
+  useEffect(() => {
+    const attemptFetch = () => {
+      setLastFetchAttempt(Date.now());
+      if (fetchRetries < maxRetries) {
+        setFetchRetries(prev => prev + 1);
+        ensureLoaded();
+      }
+    };
+    
+    if (!loading && songs.length === 0) {
+      attemptFetch();
+    }
+  }, [loading, songs.length, ensureLoaded, fetchRetries, maxRetries]);
+
+  const handleRetry = useCallback(() => {
+    setFetchRetries(0);
+    ensureLoaded();
+  }, [ensureLoaded]);
 
   const filteredSongs = useMemo(() => songs.filter(song =>
     (song.title || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -75,8 +105,50 @@ export const LibraryPage: React.FC = () => {
     if (playlistSongs.length > 0) loadSong(playlistSongs[0], playlistSongs, 0);
   };
 
-  if (loading) {
-    return <div className="flex-1 flex items-center justify-center text-gray-400">Loading songs...</div>;
+  if (loading && songs.length === 0 && !shouldRetryFetch) {
+    return (
+      <div className="flex-1 flex items-center justify-center">
+        <div className="text-center space-y-4">
+          <div className="w-12 h-12 rounded-full border-4 border-violet-500 border-t-transparent animate-spin mx-auto" />
+          <p className="text-gray-400">Loading your library...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error || (loading && shouldRetryFetch)) {
+    return (
+      <div className="flex-1 flex items-center justify-center">
+        <div className="max-w-md w-full text-center space-y-4">
+          <div className="w-16 h-16 rounded-2xl bg-red-500/10 flex items-center justify-center mx-auto">
+            <AlertTriangle className="w-8 h-8 text-red-400" />
+          </div>
+          <div>
+            <h3 className="text-lg font-semibold text-white mb-2">Failed to load library</h3>
+            <p className="text-gray-400 text-sm mb-4">
+              {error || `Loading timed out after ${retryTimeout / 1000}s. Unable to load your library.`}
+            </p>
+          </div>
+          <div className="flex items-center justify-center gap-3">
+            <button
+              onClick={handleRetry}
+              className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-violet-500/10 hover:bg-violet-500/20 text-violet-400 text-sm font-medium transition-all"
+            >
+              Try Again
+            </button>
+            <button
+              onClick={() => window.location.reload()}
+              className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 text-white text-sm font-medium transition-all"
+            >
+              Reload App
+            </button>
+          </div>
+          <p className="text-gray-600 text-xs">
+            Retry attempts: {fetchRetries}/{maxRetries}
+          </p>
+        </div>
+      </div>
+    );
   }
 
   return (

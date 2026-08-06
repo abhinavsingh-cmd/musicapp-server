@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useGoBack } from '../hooks/useGoBack';
 import { useChartsStore, ChartSong, TrendingSource } from '../stores/chartsStore';
 import { useAudioStore } from '../stores/audioStore';
+import { trendingService } from '../services/trendingService';
 import { TrendingUp, TrendingDown, Minus, Sparkles, Music, ArrowLeft, RefreshCw, Clock, Globe, Radio } from 'lucide-react';
 import CachedImage from '../components/CachedImage';
 import { useSongContextMenu } from '../components/SongContextMenu';
@@ -15,6 +16,7 @@ const SOURCE_LABELS: Record<TrendingSource, string> = {
   charts: 'Official Charts',
   cache: 'Cached Data',
   builtin: 'Built-in Catalog',
+  local_library: 'Local Library',
   none: '',
 };
 
@@ -23,6 +25,7 @@ const SOURCE_ICONS: Record<TrendingSource, React.ReactNode> = {
   charts: <Radio size={12} className="text-emerald-400" />,
   cache: <Clock size={12} className="text-yellow-400" />,
   builtin: <Music size={12} className="text-gray-400" />,
+  local_library: <Music size={12} className="text-blue-400" />,
   none: null,
 };
 
@@ -86,7 +89,6 @@ export const ChartsPage: React.FC = () => {
   const globalCharts = useChartsStore((s) => s.globalCharts);
   const bollywoodCharts = useChartsStore((s) => s.bollywoodCharts);
   const loading = useChartsStore((s) => s.loading);
-  const error = useChartsStore((s) => s.error);
   const lastUpdated = useChartsStore((s) => s.lastUpdated);
   const source = useChartsStore((s) => s.source);
   const fetchCharts = useChartsStore((s) => s.fetchCharts);
@@ -106,7 +108,25 @@ export const ChartsPage: React.FC = () => {
     const defer = typeof requestIdleCallback === 'function'
       ? requestIdleCallback
       : (cb: IdleRequestCallback) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 } as IdleDeadline), 0);
-    defer(() => { fetchCharts(); });
+    
+    // Initialize from cache synchronously, then fetch fresh
+    defer(() => {
+      const initial = trendingService.getState();
+      if (initial && initial.songs.length > 0) {
+        useChartsStore.setState({
+          topCharts: initial.songs.map((song, i) => ({
+            id: `initial-${i}-${song.id}`, title: song.title, artist: song.artist,
+            thumbnail: song.coverArt, rank: i + 1, trend: 'up',
+            duration: song.duration, viewCount: 0
+          })),
+          source: initial.source as TrendingSource,
+          lastUpdated: initial.lastUpdated || Date.now(),
+        });
+      }
+      
+      // Then fetch fresh data
+      fetchCharts();
+    });
   }, [fetchCharts]);
 
   const charts = useMemo(() =>
@@ -246,36 +266,6 @@ export const ChartsPage: React.FC = () => {
               <div className="w-10 h-4 rounded bg-white/10" />
             </div>
           ))}
-        </div>
-      )}
-
-      {!loading && error && charts.length === 0 && (
-        <div className="text-center py-16">
-          <div className="w-16 h-16 rounded-full bg-red-500/10 flex items-center justify-center mx-auto mb-4">
-            <TrendingUp size={24} className="text-red-400" />
-          </div>
-          <p className="text-red-400 font-medium mb-2">{error}</p>
-          <button
-            onClick={fetchCharts}
-            className="px-4 py-2 rounded-xl bg-violet-500/20 text-violet-400 hover:bg-violet-500/30 transition-colors text-sm font-medium"
-          >
-            Try again
-          </button>
-        </div>
-      )}
-
-      {!loading && !error && charts.length === 0 && (
-        <div className="text-center py-16">
-          <div className="w-16 h-16 rounded-full bg-white/5 flex items-center justify-center mx-auto mb-4">
-            <Music size={24} className="text-gray-500" />
-          </div>
-          <p className="text-gray-400 font-medium mb-2">No chart data available</p>
-          <button
-            onClick={fetchCharts}
-            className="px-4 py-2 rounded-xl bg-violet-500/20 text-violet-400 hover:bg-violet-500/30 transition-colors text-sm font-medium"
-          >
-            Try again
-          </button>
         </div>
       )}
 

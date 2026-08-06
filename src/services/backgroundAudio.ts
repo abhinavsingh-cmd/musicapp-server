@@ -11,8 +11,8 @@ export interface MediaActionEvent {
 export interface BackgroundAudioPlugin extends Plugin {
   startService(options: { title: string; artist: string; album?: string }): Promise<{ started: boolean }>;
   stopService(): Promise<void>;
-  updateMetadata(options: { title: string; artist: string; album?: string }): Promise<void>;
-  updatePlaybackState(options: { isPlaying: boolean; position: number }): Promise<void>;
+  updateMetadata(options: { title: string; artist: string; album?: string; albumArt?: string }): Promise<void>;
+  updatePlaybackState(options: { isPlaying: boolean; position: number; duration?: number }): Promise<void>;
   setShuffle(): Promise<void>;
   setRepeat(): Promise<void>;
   getPlaybackState(): Promise<{ isPlaying: boolean; position: number; duration: number }>;
@@ -46,7 +46,7 @@ export const backgroundAudio = {
       // Plugin not available on web
     }
   },
-  updateMetadata: async (options: { title: string; artist: string; album?: string }): Promise<void> => {
+  updateMetadata: async (options: { title: string; artist: string; album?: string; albumArt?: string }): Promise<void> => {
     try {
       if (!BackgroundAudio) return;
       await BackgroundAudio.updateMetadata(options);
@@ -54,7 +54,7 @@ export const backgroundAudio = {
       // ignore
     }
   },
-  updatePlaybackState: async (options: { isPlaying: boolean; position: number }): Promise<void> => {
+  updatePlaybackState: async (options: { isPlaying: boolean; position: number; duration?: number }): Promise<void> => {
     try {
       if (!BackgroundAudio) return;
       await BackgroundAudio.updatePlaybackState(options);

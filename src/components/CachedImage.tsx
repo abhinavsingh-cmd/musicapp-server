@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, ImgHTMLAttributes } from 'react';
+import { useState, useEffect, useRef, ImgHTMLAttributes, memo } from 'react';
 import { getCachedImageUrl } from '../services/imageCache';
 import { Music } from 'lucide-react';
 
@@ -7,7 +7,7 @@ interface CachedImageProps extends Omit<ImgHTMLAttributes<HTMLImageElement>, 'sr
   fallbackSrc?: string;
 }
 
-export default function CachedImage({ src, fallbackSrc = '', alt, ...rest }: CachedImageProps) {
+const CachedImage = memo(function CachedImage({ src, fallbackSrc = '', alt, ...rest }: CachedImageProps) {
   const [resolved, setResolved] = useState<string>('');
   const [errored, setErrored] = useState(false);
   const cancelledRef = useRef(false);
@@ -54,4 +54,6 @@ export default function CachedImage({ src, fallbackSrc = '', alt, ...rest }: Cac
   }
 
   return <img src={resolved} alt={alt || ''} loading="lazy" {...rest} onError={() => setErrored(true)} />;
-}
+});
+
+export default CachedImage;

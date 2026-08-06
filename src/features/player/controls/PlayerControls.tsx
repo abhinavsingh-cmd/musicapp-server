@@ -2,6 +2,7 @@ import React, { memo, useRef } from 'react';
 import { useAudioStore } from '../../../stores/audioStore';
 import { useQueueStore } from '../../../stores/queueStore';
 import { useDownloadsStore } from '../../../stores/downloadsStore';
+import { useShallow } from 'zustand/react/shallow';
 import { cn } from '../../../utils/cn';
 import { Play, Pause, SkipBack, SkipForward, Volume2, VolumeX, Volume1, Shuffle, Repeat, Repeat1, Heart, Download, Check, X } from 'lucide-react';
 
@@ -21,24 +22,30 @@ const Spinner: React.FC<{ size?: number }> = ({ size = 20 }) => (
 );
 
 export const PlayerControls: React.FC<PlayerControlsProps> = React.memo(({ className }) => {
-  const isPlaying = useAudioStore((s) => s.isPlaying);
-  const isLoading = useAudioStore((s) => s.isLoading);
-  const currentSong = useAudioStore((s) => s.currentSong);
-  const isShuffled = useQueueStore((s) => s.isShuffled);
-  const repeatMode = useQueueStore((s) => s.repeatMode);
-  const volume = useAudioStore((s) => s.volume);
-  const favorites = useAudioStore((s) => s.favorites);
-  const togglePlayPause = useAudioStore((s) => s.togglePlayPause);
-  const nextSong = useAudioStore((s) => s.nextSong);
-  const previousSong = useAudioStore((s) => s.previousSong);
-  const toggleShuffle = useAudioStore((s) => s.toggleShuffle);
-  const cycleRepeat = useAudioStore((s) => s.cycleRepeat);
-  const setVolume = useAudioStore((s) => s.setVolume);
-  const toggleFavorite = useAudioStore((s) => s.toggleFavorite);
-  const downloadSong = useDownloadsStore((s) => s.downloadSong);
-  const cancelDownload = useDownloadsStore((s) => s.cancelDownload);
-  const isDownloaded = useDownloadsStore((s) => s.isDownloaded);
-  const isDownloading = useDownloadsStore((s) => s.isDownloading);
+  const { isPlaying, isLoading, currentSong, volume, favorites, togglePlayPause, nextSong, previousSong, setVolume, toggleFavorite } = useAudioStore(useShallow((s) => ({
+    isPlaying: s.isPlaying,
+    isLoading: s.isLoading,
+    currentSong: s.currentSong,
+    volume: s.volume,
+    favorites: s.favorites,
+    togglePlayPause: s.togglePlayPause,
+    nextSong: s.nextSong,
+    previousSong: s.previousSong,
+    setVolume: s.setVolume,
+    toggleFavorite: s.toggleFavorite,
+  })));
+  const { isShuffled, repeatMode, toggleShuffle, cycleRepeat } = useQueueStore(useShallow((s) => ({
+    isShuffled: s.isShuffled,
+    repeatMode: s.repeatMode,
+    toggleShuffle: s.toggleShuffle,
+    cycleRepeat: s.cycleRepeat,
+  })));
+  const { downloadSong, cancelDownload, isDownloaded, isDownloading } = useDownloadsStore(useShallow((s) => ({
+    downloadSong: s.downloadSong,
+    cancelDownload: s.cancelDownload,
+    isDownloaded: s.isDownloaded,
+    isDownloading: s.isDownloading,
+  })));
   const lastSkipRef = useRef(0);
 
   const handleSkip = (fn: () => void) => {

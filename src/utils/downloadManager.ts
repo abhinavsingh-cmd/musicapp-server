@@ -8,6 +8,8 @@
  *
  * Features:
  *   - Download progress via onProgress callback
+ *   - Pause / Resume / Cancel support
+ *   - File verification before marking complete
  *   - LRU eviction when total cache exceeds MAX_CACHE_SIZE
  *   - Thumbnail prefetch alongside song download
  */
@@ -21,6 +23,7 @@ const STORE_THUMBS = 'thumbnails';
 const STORE_META = 'meta';
 
 const MAX_CACHE_SIZE = 500 * 1024 * 1024; // 500 MB soft limit
+const MIN_AUDIO_SIZE = 10 * 1024; // 10 KB — anything smaller is not a valid audio file
 
 // ---------------------------------------------------------------------------
 // IndexedDB helpers
@@ -159,8 +162,67 @@ export type DownloadProgress = {
   percent: number;
 };
 
+export type DownloadState = 'idle' | 'downloading' | 'paused' | 'completed' | 'failed' | 'cancelled';
+
 // ---------------------------------------------------------------------------
-// Download a song with progress
+// Pause / Resume controller
+// ---------------------------------------------------------------------------
+
+interface DownloadController {
+  abortController: AbortController;
+  paused: boolean;
+  pausePromise: { resolve: () => void } | null;
+}
+
+const activeControllers = new Map<string, DownloadController>();
+
+export function pauseDownload(youtubeId: string): void {
+  const ctrl = activeControllers.get(youtubeId);
+  if (ctrl && !ctrl.paused) {
+    ctrl.paused = true;
+    ctrl.pausePromise = { resolve: () => {} };
+  }
+}
+
+export function resumeDownload(youtubeId: string): void {
+  const ctrl = activeControllers.get(youtubeId);
+  if (ctrl?.paused && ctrl.pausePromise) {
+    ctrl.paused = false;
+    ctrl.pausePromise.resolve();
+    ctrl.pausePromise = null;
+  }
+}
+
+export function cancelDownloadById(youtubeId: string): void {
+  const ctrl = activeControllers.get(youtubeId);
+  if (ctrl) {
+    ctrl.abortController.abort();
+    if (ctrl.pausePromise) {
+      ctrl.pausePromise.resolve();
+      ctrl.pausePromise = null;
+    }
+    activeControllers.delete(youtubeId);
+  }
+}
+
+export function isDownloadPaused(youtubeId: string): boolean {
+  return activeControllers.get(youtubeId)?.paused ?? false;
+}
+
+// ---------------------------------------------------------------------------
+// File verification
+// ---------------------------------------------------------------------------
+
+function verifyAudioBlob(blob: Blob): boolean {
+  if (blob.size < MIN_AUDIO_SIZE) return false;
+  const type = blob.type.toLowerCase();
+  // Accept common audio types or octet-stream (some servers don't set content-type)
+  if (type.startsWith('audio/') || type === 'application/octet-stream' || type === '') return true;
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Download a song with progress, pause, resume, cancel, and verification
 // ---------------------------------------------------------------------------
 
 export async function downloadSongWithProgress(
@@ -197,6 +259,15 @@ export async function downloadSongWithProgress(
 
   while (true) {
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+
+    // Check pause state
+    const ctrl = activeControllers.get(song.youtubeId);
+    if (ctrl?.paused && ctrl.pausePromise) {
+      await new Promise<void>((resolve) => {
+        ctrl.pausePromise = { resolve };
+      });
+    }
+
     const { done, value } = await reader.read();
     if (done) break;
     chunks.push(value);
@@ -206,6 +277,11 @@ export async function downloadSongWithProgress(
 
   const contentType = res.headers.get('content-type')?.split(';', 1)[0] || 'audio/mpeg';
   const blob = new Blob(chunks, { type: contentType });
+
+  // Verify the downloaded file
+  if (!verifyAudioBlob(blob)) {
+    throw new Error(`Downloaded file is invalid: ${blob.size} bytes, type: ${blob.type || 'unknown'}`);
+  }
 
   // Persist to IndexedDB
   const db = await openDB();
@@ -410,7 +486,7 @@ export async function evictOldCache(targetBytes?: number): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
-// Total cache size helper
+// Storage management
 // ---------------------------------------------------------------------------
 
 export async function getDownloadCount(): Promise<number> {
@@ -418,4 +494,21 @@ export async function getDownloadCount(): Promise<number> {
   const count = await txCount(db, STORE_SONGS);
   db.close();
   return count;
+}
+
+export async function getStorageBreakdown(): Promise<{ songs: number; thumbnails: number; total: number }> {
+  const db = await openDB();
+  const songs = await txGetAll<DownloadedSong>(db, STORE_SONGS);
+  const thumbs = await txGetAll<CachedThumbnail>(db, STORE_THUMBS);
+  db.close();
+  const songsSize = songs.reduce((acc, s) => acc + (s.size || 0), 0);
+  const thumbsSize = thumbs.reduce((acc, t) => acc + (t.blob?.size || 0), 0);
+  return { songs: songsSize, thumbnails: thumbsSize, total: songsSize + thumbsSize };
+}
+
+export async function clearThumbnailCache(): Promise<void> {
+  const db = await openDB();
+  await txClear(db, STORE_THUMBS);
+  db.close();
+  thumbnailUrlCache.clear();
 }

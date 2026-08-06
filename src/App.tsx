@@ -119,7 +119,6 @@ const App: React.FC = () => {
           </LayoutProvider>
         </AuthProvider>
       </ErrorBoundary>
-    </ErrorBoundary>
   );
 };
 
