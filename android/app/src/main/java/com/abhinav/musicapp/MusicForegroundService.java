@@ -55,7 +55,7 @@ import java.net.URL;
         private String currentTitle = "MusicApp";
         private String currentArtist = "Playing music";
         private String currentAlbum = "MusicApp Album";
-        private boolean isPlaying = false;
+        public boolean isPlaying = false;
         private boolean hasHeadphonesConnected = false;
         private long duration = 0;
         private Bitmap albumArtBitmap = null;
@@ -79,8 +79,7 @@ import java.net.URL;
             mediaSession.setActive(true);
             mediaSession.setFlags(
                 MediaSession.FLAG_HANDLES_MEDIA_BUTTONS |
-                MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS |
-                MediaSession.FLAG_HANDLES_QUEUE_COMMANDS
+                MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS
             );
             mediaSession.setCallback(new MediaSession.Callback() {
                 @Override
@@ -91,15 +90,6 @@ import java.net.URL;
                 @Override
                 public void onPause() {
                     dispatchMediaAction(ACTION_PAUSE, -1);
-                }
-
-                @Override
-                public void onPlayPause() {
-                    if (isPlaying) {
-                        dispatchMediaAction(ACTION_PAUSE, -1);
-                    } else {
-                        dispatchMediaAction(ACTION_PLAY, -1);
-                    }
                 }
 
                 @Override
@@ -209,7 +199,6 @@ import java.net.URL;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 AudioFocusRequest.Builder builder = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
                     .setAudioAttributes(audioAttributes)
-                    .setReceivers(AudioFocusRequest.RECEIVER_SWITCH)
                     .setWillPauseWhenDucked(true);
                 audioFocusRequest = builder.build();
                 int result = audioManager.requestAudioFocus(audioFocusRequest);
@@ -373,11 +362,6 @@ import java.net.URL;
             Notification.MediaStyle mediaStyle = new Notification.MediaStyle()
                     .setMediaSession(mediaSession.getSessionToken())
                     .setShowActionsInCompactView(0, 1, 2);
-            
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                mediaStyle.setShowCustomActions(false);
-                mediaStyle.setShowSeekingControls(true);
-            }
             
             nb.setStyle(mediaStyle);
         }

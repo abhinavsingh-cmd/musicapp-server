@@ -113,8 +113,8 @@ public class AndroidDownloadManager extends Plugin {
      */
     @PluginMethod
     public void cancelDownload(PluginCall call) {
-        long downloadId = call.getLong("downloadId", -1);
-        if (downloadId == -1) {
+        Long downloadId = call.getLong("downloadId", -1L);
+        if (downloadId == null || downloadId == -1L) {
             call.reject("downloadId is required");
             return;
         }
@@ -130,8 +130,8 @@ public class AndroidDownloadManager extends Plugin {
      */
     @PluginMethod
     public void queryDownload(PluginCall call) {
-        long downloadId = call.getLong("downloadId", -1);
-        if (downloadId == -1) {
+        Long downloadId = call.getLong("downloadId", -1L);
+        if (downloadId == null || downloadId == -1L) {
             call.reject("downloadId is required");
             return;
         }
@@ -187,8 +187,8 @@ public class AndroidDownloadManager extends Plugin {
      */
     @PluginMethod
     public void getDownloadedFile(PluginCall call) {
-        long downloadId = call.getLong("downloadId", -1);
-        if (downloadId == -1) {
+        Long downloadId = call.getLong("downloadId", -1L);
+        if (downloadId == null || downloadId == -1L) {
             call.reject("downloadId is required");
             return;
         }

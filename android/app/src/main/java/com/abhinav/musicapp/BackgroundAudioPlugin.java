@@ -141,7 +141,7 @@ public class BackgroundAudioPlugin extends Plugin {
         try {
             Intent intent = new Intent(getContext(), MusicForegroundService.class);
             intent.setAction("shuffle");
-            startService(intent);
+            getContext().startService(intent);
             call.resolve();
         } catch (Exception e) {
             call.reject("Failed to set shuffle: " + e.getMessage());
@@ -154,7 +154,7 @@ public class BackgroundAudioPlugin extends Plugin {
         try {
             Intent intent = new Intent(getContext(), MusicForegroundService.class);
             intent.setAction("repeat");
-            startService(intent);
+            getContext().startService(intent);
             call.resolve();
         } catch (Exception e) {
             call.reject("Failed to set repeat: " + e.getMessage());
