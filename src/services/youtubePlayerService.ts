@@ -145,6 +145,9 @@ class YouTubePlayerService {
 
   private ensureContainer(): HTMLDivElement {
     if (!this.containerEl) {
+      if (!document.body) {
+        throw new Error('document.body not ready');
+      }
       this.containerEl = document.createElement('div');
       this.containerEl.id = 'yt-player-container';
       this.containerEl.style.cssText = 'position:fixed;top:-9999px;left:-9999px;width:1px;height:1px;opacity:0;pointer-events:none;z-index:-1;';

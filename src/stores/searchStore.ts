@@ -259,11 +259,12 @@ export const useSearchStore = create<SearchState>((set, get) => ({
       if (gen !== searchGeneration) return;
       const msg = getErrorMessage(err);
       const isOffline = err instanceof OfflineError;
+      // CRITICAL: Only clear ytResults, NOT libraryResults.
+      // Library results were already successfully fetched and should be preserved.
       set({
-        status: isOffline ? 'offline' : 'error',
+        status: libraryHits.length > 0 ? 'success' : (isOffline ? 'offline' : 'error'),
         ytStatus: 'idle',
         error: isOffline ? msg : null,
-        libraryResults: [],
         ytResults: [],
       });
     }

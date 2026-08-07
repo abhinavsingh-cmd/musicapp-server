@@ -52,7 +52,7 @@ export async function fetchSongs(): Promise<Song[]> {
   try {
     const res = await apiFetch(api('/songs'));
     const data = await res.json();
-    const serverSongs = (data.songs || []).map(mapSong);
+    const serverSongs = (data.details?.songs || data.songs || []).map(mapSong);
     const deduped = dedupe(serverSongs);
     if (deduped.length > 0) {
       cachedSongs = deduped;

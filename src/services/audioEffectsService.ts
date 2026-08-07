@@ -110,12 +110,33 @@ export class AudioEffectsService {
       this.disconnectChain();
       this.chain = null;
       try { this.sourceNode?.disconnect(); } catch {}
-      this.sourceNode = this.context.createMediaElementSource(audioElement);
+      try {
+        this.sourceNode = this.context.createMediaElementSource(audioElement);
+      } catch (err) {
+        // createMediaElementSource fails if the element was already connected
+        // to another source node (e.g. after AudioContext loss/recreation).
+        // Reset everything so next init() creates a fresh context + source.
+        console.warn('[AudioEffects] createMediaElementSource failed, resetting AudioContext:', err);
+        try { this.context.close(); } catch {}
+        this.context = null;
+        this.sourceNode = null;
+        this.audioElement = null;
+        this.filters = [];
+        this.chain = null;
+        return;
+      }
       this.audioElement = audioElement;
       this.buildChain();
     } else if (!this.context) {
       this.context = new AudioContext();
-      this.sourceNode = this.context.createMediaElementSource(audioElement);
+      try {
+        this.sourceNode = this.context.createMediaElementSource(audioElement);
+      } catch (err) {
+        console.warn('[AudioEffects] createMediaElementSource failed:', err);
+        try { this.context.close(); } catch {}
+        this.context = null;
+        return;
+      }
       this.audioElement = audioElement;
       this.buildChain();
     }

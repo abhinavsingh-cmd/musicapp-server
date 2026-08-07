@@ -14,13 +14,9 @@
 import { YTSong } from '../stores/searchStore';
 
 const INVIDIOUS_INSTANCES = [
-  'https://inv.nadeko.net',
-  'https://invidious.fdn.fr',
-  'https://vid.puffyan.us',
-  'https://invidious.privacyredirect.com',
   'https://yewtu.be',
-  'https://iv.ggtyler.dev',
-  'https://invidious.lunar.icu',
+  'https://invidious.flokinet.to',
+  'https://invidious.io.lol',
 ];
 
 const SEARCH_TIMEOUT_MS = 8000;

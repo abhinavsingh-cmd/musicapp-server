@@ -24,6 +24,9 @@ function loadCachedSongs(): Song[] | null {
   try {
     const raw = localStorage.getItem(SONGS_CACHE_KEY);
     if (!raw) return null;
+    if (raw.length > 100_000) {
+      console.log(`[songsStore] Large cache (${(raw.length / 1024).toFixed(0)}KB), deferring parse`);
+    }
     const entry: SongsCacheEntry = JSON.parse(raw);
     if (!Array.isArray(entry.songs)) return null;
     return entry.songs;
@@ -86,7 +89,7 @@ function fetchWithTimeout(): Promise<Song[]> {
         settled = true;
         resolve([]);
       }
-    }, 5_000);
+    }, 20_000);
   }).finally(() => {
     inflightFetch = null;
   });

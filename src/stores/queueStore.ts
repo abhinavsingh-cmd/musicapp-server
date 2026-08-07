@@ -175,7 +175,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
 
     if (repeatMode === 'one') {
       const song = queue[currentIndex];
-      return song;
+      return song ?? null;
     }
 
     let nextIndex: number;
@@ -211,6 +211,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
     }
 
     const song = queue[nextIndex];
+    if (!song) return null;
     set({ currentIndex: nextIndex });
     schedulePersist(get());
     get().addRecent(song);
@@ -229,7 +230,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
 
     if (repeatMode === 'one') {
       const song = queue[currentIndex];
-      return song;
+      return song ?? null;
     }
 
     let prevIndex: number;
@@ -240,6 +241,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
     }
 
     const song = queue[prevIndex];
+    if (!song) return null;
     set({ currentIndex: prevIndex });
     schedulePersist(get());
     get().addRecent(song);

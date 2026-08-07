@@ -113,8 +113,12 @@ class MediaSessionService {
     if (!this.supported || !this.callbacks) return;
 
     try {
-      navigator.mediaSession.setActionHandler('nexttrack', hasNext ? () => this.callbacks!.onNext() : null);
-      navigator.mediaSession.setActionHandler('previoustrack', hasPrevious ? () => this.callbacks!.onPrevious() : null);
+      navigator.mediaSession.setActionHandler('nexttrack', hasNext ? () => {
+        if (this.callbacks) this.callbacks.onNext();
+      } : null);
+      navigator.mediaSession.setActionHandler('previoustrack', hasPrevious ? () => {
+        if (this.callbacks) this.callbacks.onPrevious();
+      } : null);
     } catch {
       // ignore unsupported actions
     }

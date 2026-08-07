@@ -51,7 +51,7 @@ export class OfflineError extends ApiError {
 // Config
 // ---------------------------------------------------------------------------
 
-const DEFAULT_TIMEOUT = 5_000;
+const DEFAULT_TIMEOUT = 15_000;
 const MAX_RETRIES = 1;
 const RETRY_DELAY_MS = 400;
 

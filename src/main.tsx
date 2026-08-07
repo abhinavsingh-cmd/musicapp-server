@@ -96,4 +96,5 @@ window.addEventListener('unhandledrejection', (e) => {
 
 window.addEventListener('error', (e) => {
   console.error('[Global] Uncaught error:', e.error?.message || e.message, e.error?.stack);
+  e.preventDefault();
 });

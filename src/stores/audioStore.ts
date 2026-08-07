@@ -257,6 +257,7 @@ function initAudioServiceHandler() {
         const now = Date.now();
         if (now - lastProgressUpdate < PROGRESS_THROTTLE_MS) return;
         lastProgressUpdate = now;
+        if (typeof data !== 'number') return;
         useAudioStore.setState({ progress: data });
         if (now - lastMediaUpdate > 1000) {
           lastMediaUpdate = now;

@@ -1239,19 +1239,34 @@ app.get("/api/stream/:videoId", (req, res) => {
   const audioUrl = "https://www.youtube.com/watch?v=" + videoId;
   console.log("[Stream] Starting stream for:", videoId);
 
+  // Rotate through different player client combos to avoid 429 rate limits.
+  // Default (no player_client) works most reliably; iOS User-Agent avoids some blocks.
+  const CLIENT_COMBOS = [
+    "",
+    "ios",
+    "web_creator",
+    "mweb",
+  ];
+
   const attemptStream = (attempt = 1) => {
-    const maxAttempts = 2;
+    const maxAttempts = 4;
+    const clients = CLIENT_COMBOS[(attempt - 1) % CLIENT_COMBOS.length];
+
+    const extractorArgs = clients
+      ? `youtube:player_client=${clients}`
+      : "youtube";
 
     const ytArgs = [
       "-f", "bestaudio/best",
       "-o", "-",
       "--no-check-certificates",
       "--age-limit", "18",
-      "--extractor-args", "youtube:player_client=tv,web_creator,web",
-      "--add-header", "User-Agent:Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
+      "--extractor-args", extractorArgs,
+      "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
       audioUrl
     ];
 
+    console.log(`[Stream] Attempt ${attempt}/${maxAttempts} with clients: ${clients}`);
     const yt = spawn("yt-dlp", ytArgs, { stdio: ["ignore", "pipe", "pipe"] });
 
     let headersSent = false;
@@ -1261,8 +1276,8 @@ app.get("/api/stream/:videoId", (req, res) => {
         if (!res.headersSent) {
           console.error("[Stream] Timed out after 30s for:", videoId, "attempt", attempt);
           if (attempt < maxAttempts) {
-            console.log("[Stream] Retrying... attempt", attempt + 1);
-            setTimeout(() => attemptStream(attempt + 1), 1000);
+            console.log("[Stream] Retrying with different clients... attempt", attempt + 1);
+            setTimeout(() => attemptStream(attempt + 1), 1500);
           } else {
             fail(res, 504, "STREAM_TIMEOUT", "Stream timed out after retries", { videoId, attempts: maxAttempts });
           }
@@ -1307,8 +1322,8 @@ app.get("/api/stream/:videoId", (req, res) => {
       console.error("[Stream] Process error:", err.message, "attempt", attempt);
       if (!res.headersSent) {
         if (attempt < maxAttempts) {
-          console.log("[Stream] Retrying... attempt", attempt + 1);
-          setTimeout(() => attemptStream(attempt + 1), 1000);
+          console.log("[Stream] Retrying with different clients... attempt", attempt + 1);
+          setTimeout(() => attemptStream(attempt + 1), 1500);
         } else {
           fail(res, 500, "STREAM_ERROR", "Stream process failed after retries", { videoId, detail: err.message, attempts: maxAttempts });
         }
@@ -1321,8 +1336,8 @@ app.get("/api/stream/:videoId", (req, res) => {
         console.error("[Stream] yt-dlp exited with code:", code, "for:", videoId, "attempt", attempt);
         if (!res.headersSent) {
           if (attempt < maxAttempts) {
-            console.log("[Stream] Retrying... attempt", attempt + 1);
-            setTimeout(() => attemptStream(attempt + 1), 1000);
+            console.log("[Stream] Retrying with different clients... attempt", attempt + 1);
+            setTimeout(() => attemptStream(attempt + 1), 1500);
           } else {
             fail(res, 500, "STREAM_FAILED", "Stream failed after retries", { videoId, code, detail: stderrOutput.slice(0, 500), attempts: maxAttempts });
           }
@@ -1376,8 +1391,7 @@ app.get("/api/download/:videoId", (req, res) => {
       "-o", "-",
       "--no-check-certificates",
       "--age-limit", "18",
-      "--extractor-args", "youtube:player_client=tv,web_creator,web",
-      "--add-header", "User-Agent:Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
+      "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
       audioUrl
     ], { stdio: ["ignore", "pipe", "pipe"] });
 

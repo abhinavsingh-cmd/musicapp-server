@@ -5,6 +5,7 @@ import { backgroundAudio } from './backgroundAudio';
 import { youtubePlayerService } from './youtubePlayerService';
 import { showToast } from '../utils/toast';
 import { metricsCollector } from './metricsCollector';
+import { api } from '../config/api';
 
 function isNativePlatform(): boolean {
   return !!(window as any).Capacitor;
@@ -301,7 +302,15 @@ export class AudioService {
     }
     
     if (song.youtubeId && isValidYouTubeId(song.youtubeId)) {
-      log('PATH 2: YouTube IFrame (direct)', { youtubeId: song.youtubeId });
+      if (isNativePlatform()) {
+        // On native: try server stream URL first (HTML audio supports background playback).
+        // Fall back to YouTube IFrame if server is unreachable.
+        log('PATH 2a: Native — attempting server stream for background playback');
+        this.useYoutubePlayer = false;
+        this.playWithServerFallback(song, playbackId, markId);
+        return;
+      }
+      log('PATH 2b: YouTube IFrame (web)', { youtubeId: song.youtubeId });
       preconnectYouTube();
       this.useYoutubePlayer = true;
       this.playYouTube(song, playbackId, markId);
@@ -592,10 +601,68 @@ export class AudioService {
         }
 
         clearBufferingTimeout();
+        // Fallback: try server stream via HTML audio when YouTube IFrame fails
+        log('YouTube IFrame failed — attempting server stream fallback...');
+        try {
+          const streamUrl = await this.fetchServerStreamUrl(song.youtubeId!);
+          if (streamUrl && this.currentPlaybackId === playbackId) {
+            log('Server stream URL obtained, playing via HTML audio:', streamUrl.substring(0, 80));
+            this.useYoutubePlayer = false;
+            this.playHtmlAudio({ ...song, audioUrl: streamUrl }, playbackId, markId);
+            return;
+          }
+        } catch (fallbackErr) {
+          logError('Server stream fallback also failed:', fallbackErr);
+        }
         this.emitPlaybackError(song, `Cannot play "${song.title}": ${msg}`);
       }
     }
     clearBufferingTimeout();
+  }
+
+  /**
+   * Native platform: try server stream URL first (HTML audio → background playback),
+   * fall back to YouTube IFrame if server is unreachable.
+   */
+  private async playWithServerFallback(song: Song, playbackId: number, markId: string): Promise<void> {
+    try {
+      log('playWithServerFallback: fetching server stream URL...');
+      const streamUrl = await this.fetchServerStreamUrl(song.youtubeId!);
+      if (this.currentPlaybackId !== playbackId) return;
+      if (streamUrl) {
+        log('playWithServerFallback: got stream URL, playing via HTML audio');
+        this.playHtmlAudio({ ...song, audioUrl: streamUrl }, playbackId, markId);
+        return;
+      }
+    } catch (err) {
+      logError('playWithServerFallback: server stream fetch failed:', err);
+    }
+    // Fallback to YouTube IFrame
+    log('playWithServerFallback: no server stream, falling back to YouTube IFrame');
+    if (this.currentPlaybackId !== playbackId) return;
+    preconnectYouTube();
+    this.useYoutubePlayer = true;
+    this.playYouTube(song, playbackId, markId);
+  }
+
+  /**
+   * Fetch stream URL from the server's audio-info endpoint.
+   * Used as a fallback when YouTube IFrame player fails.
+   */
+  private async fetchServerStreamUrl(youtubeId: string): Promise<string | null> {
+    try {
+      const response = await fetch(api(`/api/audio-info/${youtubeId}`));
+      if (!response.ok) return null;
+      const data = await response.json();
+      if (!data.success || !data.details?.formats?.length) return null;
+      // Pick the best quality format with a URL
+      const best = data.details.formats
+        .filter((f: any) => f.url)
+        .sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+      return best?.url || null;
+    } catch {
+      return null;
+    }
   }
 
   private stopCurrentPlayback(): void {
@@ -718,7 +785,7 @@ export class AudioService {
         this.setState({ isPlaying: true, error: null });
         this.startProgressTracking();
         this.emit('play', { song: this.state.currentSong });
-        if (isNativePlatform()) {
+        if (isNativePlatform() && this.state.currentSong) {
           backgroundAudio.startService({ title: this.state.currentSong.title, artist: this.state.currentSong.artist }).catch(() => {});
         }
       } catch (err) {

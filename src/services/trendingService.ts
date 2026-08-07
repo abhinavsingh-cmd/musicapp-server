@@ -31,9 +31,9 @@ const CACHE_MAX_AGE = 60 * 60 * 1000;     // 60 min max for loading stale
 const BACKGROUND_INTERVAL = 15 * 60 * 1000; // 15 min
 const MAX_BACKOFF_MS = 16_000;
 const BASE_BACKOFF_MS = 1_000;
-const MAX_RETRIES = 4;
-const REQUEST_TIMEOUT_MS = 6_000;
-const TOTAL_TIMEOUT_MS = 12_000;
+const MAX_RETRIES = 3;
+const REQUEST_TIMEOUT_MS = 12_000;
+const TOTAL_TIMEOUT_MS = 25_000;
 
 // ── Built-in fallback (20 popular songs) ───────────────────────────────────
 const BUILTIN: TrendingResult = {
@@ -313,12 +313,26 @@ class TrendingService {
    * Initialize: load from disk, start background refresh.
    */
   init(): TrendingResult {
-    // Load from disk synchronously
+    // Load from disk synchronously, but preserve the original cachedAt time
+    // so the data's actual age is respected (don't set cacheTime = Date.now()
+    // which would make stale disk data appear "fresh" and block network fetches).
     const disk = this.loadFromDisk();
     if (disk) {
       this.cache = disk;
-      this.cacheTime = Date.now();
-      console.log(`[Trending] init: loaded from disk: ${disk.songs.length} songs, source=${disk.source}`);
+      // Use the disk entry's cachedAt time, or if missing, treat as stale
+      const raw = localStorage.getItem(CACHE_KEY);
+      if (raw) {
+        try {
+          const entry: CacheEntry = JSON.parse(raw);
+          this.cacheTime = entry.cachedAt || 0;
+        } catch {
+          this.cacheTime = 0; // stale — will trigger network fetch
+        }
+      } else {
+        this.cacheTime = 0;
+      }
+      const age = Math.round((Date.now() - this.cacheTime) / 1000);
+      console.log(`[Trending] init: loaded from disk: ${disk.songs.length} songs, source=${disk.source}, age=${age}s`);
     } else {
       console.log('[Trending] init: no disk cache, using builtin');
     }
