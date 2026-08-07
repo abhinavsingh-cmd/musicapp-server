@@ -1239,29 +1239,14 @@ app.get("/api/stream/:videoId", (req, res) => {
   const audioUrl = "https://www.youtube.com/watch?v=" + videoId;
   console.log("[Stream] Starting stream for:", videoId);
 
-  // Rotate through different player client combos to avoid 429 rate limits.
-  // Default (no player_client) works most reliably; iOS User-Agent avoids some blocks.
-  const CLIENT_COMBOS = [
-    "",
-    "ios",
-    "web_creator",
-    "mweb",
-  ];
-
   const attemptStream = (attempt = 1) => {
-    const maxAttempts = 4;
-    const clients = CLIENT_COMBOS[(attempt - 1) % CLIENT_COMBOS.length];
-
-    const extractorArgs = clients
-      ? `youtube:player_client=${clients}`
-      : "youtube";
+    const maxAttempts = 2;
 
     const ytArgs = [
       "-f", "bestaudio/best",
       "-o", "-",
       "--no-check-certificates",
       "--age-limit", "18",
-      "--extractor-args", extractorArgs,
       "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
       audioUrl
     ];
@@ -1277,7 +1262,7 @@ app.get("/api/stream/:videoId", (req, res) => {
           console.error("[Stream] Timed out after 30s for:", videoId, "attempt", attempt);
           if (attempt < maxAttempts) {
             console.log("[Stream] Retrying with different clients... attempt", attempt + 1);
-            setTimeout(() => attemptStream(attempt + 1), 1500);
+            setTimeout(() => attemptStream(attempt + 1), 2000);
           } else {
             fail(res, 504, "STREAM_TIMEOUT", "Stream timed out after retries", { videoId, attempts: maxAttempts });
           }
