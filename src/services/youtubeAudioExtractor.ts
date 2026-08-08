@@ -1,13 +1,21 @@
 /**
  * YouTube Audio Extractor
  *
- * Fetches direct audio stream URLs from YouTube via Invidious API instances.
+ * Fetches direct audio stream URLs for YouTube videos.
  * This allows playing audio via HTML <audio> instead of YouTube IFrame,
  * which is required for background playback on Android.
  *
  * YouTube IFrame stops when the WebView goes to background.
  * HTML <audio> with a foreground service continues playing — like Spotify.
+ *
+ * Strategy:
+ *   1. Server yt-dlp audio-info endpoint (fastest, uses server-side yt-dlp)
+ *   2. Invidious API instances (fallback, most are dead as of 2026)
+ *
+ * Falls back to YouTube IFrame player (foreground only) if all fail.
  */
+
+import { api } from '../config/api';
 
 const INVIDIOUS_INSTANCES = [
   'https://yewtu.be',
@@ -15,19 +23,20 @@ const INVIDIOUS_INSTANCES = [
   'https://invidious.io.lol',
 ];
 
-const EXTRACT_TIMEOUT_MS = 10_000;
+const SERVER_TIMEOUT_MS = 8_000;
+const INVIDIOUS_TIMEOUT_MS = 6_000;
 
 // Cache extracted URLs to avoid repeated network calls
 const urlCache = new Map<string, { url: string; expiresAt: number }>();
 const CACHE_TTL_MS = 25 * 60 * 1000; // 25 minutes
 
+// Track failed IDs to avoid retrying known-dead sources
+const failedIds = new Set<string>();
+
 interface InvidiousFormat {
   type: string;
   url?: string;
   bitrate?: number;
-  encoding?: string;
-  container?: string;
-  qualityLabel?: string;
 }
 
 interface InvidiousVideoResponse {
@@ -41,12 +50,12 @@ function log(...args: any[]) {
 }
 
 function logError(...args: any[]) {
-  if (import.meta.env.DEV) console.error('[YouTubeAudioExtractor]', ...args);
+  console.error('[YouTubeAudioExtractor]', ...args);
 }
 
 /**
  * Extract a direct audio stream URL for a YouTube video.
- * Tries multiple Invidious instances in parallel.
+ * Tries server endpoint first, then Invidious instances.
  * Returns the best audio URL or null if all fail.
  */
 export async function extractAudioUrl(youtubeId: string): Promise<string | null> {
@@ -57,39 +66,99 @@ export async function extractAudioUrl(youtubeId: string): Promise<string | null>
     return cached.url;
   }
 
-  log('Extracting audio URL for:', youtubeId);
-
-  // Race all instances — first successful response wins
-  const results = await Promise.allSettled(
-    INVIDIOUS_INSTANCES.map(instance => fetchFromInstance(instance, youtubeId))
-  );
-
-  for (const result of results) {
-    if (result.status === 'fulfilled' && result.value) {
-      const audioUrl = pickBestAudioUrl(result.value);
-      if (audioUrl) {
-        // Cache the result
-        urlCache.set(youtubeId, {
-          url: audioUrl,
-          expiresAt: Date.now() + CACHE_TTL_MS,
-        });
-        log('✓ Extracted audio URL for:', youtubeId, audioUrl.substring(0, 80));
-        return audioUrl;
-      }
-    }
+  // Skip known-failed IDs (within this session only)
+  if (failedIds.has(youtubeId)) {
+    log('Previously failed, skipping:', youtubeId);
+    return null;
   }
 
-  logError('✗ All Invidious instances failed for:', youtubeId);
+  log('Extracting audio URL for:', youtubeId);
+
+  // Strategy 1: Server yt-dlp audio-info endpoint
+  try {
+    const serverUrl = await fetchFromServer(youtubeId);
+    if (serverUrl) {
+      urlCache.set(youtubeId, { url: serverUrl, expiresAt: Date.now() + CACHE_TTL_MS });
+      log('✓ Got audio URL from server for:', youtubeId);
+      return serverUrl;
+    }
+  } catch (err) {
+    log('Server extraction failed:', err);
+  }
+
+  // Strategy 2: Invidious API instances (race all)
+  try {
+    const results = await Promise.allSettled(
+      INVIDIOUS_INSTANCES.map(instance => fetchFromInvidious(instance, youtubeId))
+    );
+
+    for (const result of results) {
+      if (result.status === 'fulfilled' && result.value) {
+        const audioUrl = pickBestAudioUrl(result.value);
+        if (audioUrl) {
+          urlCache.set(youtubeId, { url: audioUrl, expiresAt: Date.now() + CACHE_TTL_MS });
+          log('✓ Got audio URL from Invidious for:', youtubeId);
+          return audioUrl;
+        }
+      }
+    }
+  } catch (err) {
+    log('Invidious extraction failed:', err);
+  }
+
+  // All failed — mark as failed for this session
+  failedIds.add(youtubeId);
+  logError('✗ All extraction methods failed for:', youtubeId);
   return null;
 }
 
-async function fetchFromInstance(
+/**
+ * Fetch audio URL from server's yt-dlp audio-info endpoint.
+ * Returns a proxy URL that streams through the server (Google URLs are IP-locked).
+ */
+async function fetchFromServer(youtubeId: string): Promise<string | null> {
+  const url = api(`/audio-info/${youtubeId}`);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), SERVER_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: { Accept: 'application/json' },
+    });
+
+    if (!response.ok) return null;
+
+    const data = await response.json();
+    if (!data.success || !data.details?.formats?.length) return null;
+
+    // Pick the best audio format with a URL
+    const best = data.details.formats
+      .filter((f: any) => f.url && f.url.startsWith('http'))
+      .sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+
+    if (!best?.url) return null;
+
+    // Google URLs are IP-locked to the server. Return a proxy URL so the
+    // client can play it — the server fetches from Google and streams to us.
+    return api(`/proxy-audio?url=${encodeURIComponent(best.url)}`);
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * Fetch audio formats from an Invidious instance.
+ */
+async function fetchFromInvidious(
   instance: string,
   youtubeId: string
 ): Promise<InvidiousFormat[] | null> {
   const url = `${instance}/api/v1/videos/${youtubeId}`;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), EXTRACT_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), INVIDIOUS_TIMEOUT_MS);
 
   try {
     const response = await fetch(url, {
@@ -101,7 +170,7 @@ async function fetchFromInstance(
 
     const data: InvidiousVideoResponse = await response.json();
     return data.adaptiveFormats || null;
-  } catch (err) {
+  } catch {
     return null;
   } finally {
     clearTimeout(timeout);
@@ -109,7 +178,6 @@ async function fetchFromInstance(
 }
 
 function pickBestAudioUrl(formats: InvidiousFormat[]): string | null {
-  // Filter to audio-only formats with a URL
   const audioFormats = formats.filter(f => {
     if (!f.url) return false;
     const mime = (f.type || '').toLowerCase();
@@ -118,7 +186,7 @@ function pickBestAudioUrl(formats: InvidiousFormat[]): string | null {
 
   if (audioFormats.length === 0) return null;
 
-  // Prefer m4a/mp4a (best compatibility with HTML audio), then sort by bitrate
+  // Prefer m4a (best HTML audio compatibility), then sort by bitrate
   audioFormats.sort((a, b) => {
     const aIsM4a = (a.type || '').includes('mp4');
     const bIsM4a = (b.type || '').includes('mp4');
@@ -131,22 +199,9 @@ function pickBestAudioUrl(formats: InvidiousFormat[]): string | null {
 }
 
 /**
- * Pre-extract audio URLs for a list of songs (background prefetch).
- * Failures are silently ignored — this is best-effort.
- */
-export async function prefetchAudioUrls(songIds: string[]): Promise<void> {
-  const toFetch = songIds.filter(id => !urlCache.has(id));
-  if (toFetch.length === 0) return;
-
-  log('Prefetching audio URLs for', toFetch.length, 'songs');
-
-  // Fire and forget — don't block the caller
-  Promise.allSettled(toFetch.map(id => extractAudioUrl(id))).catch(() => {});
-}
-
-/**
  * Clear the URL cache (e.g. on logout or cache invalidation).
  */
 export function clearAudioUrlCache(): void {
   urlCache.clear();
+  failedIds.clear();
 }

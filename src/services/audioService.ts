@@ -311,28 +311,36 @@ export class AudioService {
     }
     
     if (song.youtubeId && isValidYouTubeId(song.youtubeId)) {
-      // PATH 1.5: Extract direct audio URL from Invidious → play as HTML audio.
-      // HTML audio survives background playback (YouTube IFrame does not).
-      log('PATH 1.5: Extracting audio URL for background playback:', song.youtubeId);
-      try {
-        const extractedUrl = await extractAudioUrl(song.youtubeId);
-        if (extractedUrl && this.currentPlaybackId === playbackId) {
-          log('✓ Extracted audio URL — playing as HTML audio (background-safe)');
-          this.useYoutubePlayer = false;
-          this.playHtmlAudio({ ...song, audioUrl: extractedUrl }, playbackId, markId);
-          return;
-        }
-      } catch (err) {
-        logError('Audio extraction failed, falling back to YouTube IFrame:', err);
+      // Try to extract a direct audio URL for background-safe playback.
+      // Run extraction and YouTube IFrame in PARALLEL — whichever succeeds first wins.
+      // This gives instant playback (YouTube IFrame) + background support (HTML audio).
+      log('Attempting extraction + YouTube IFrame in parallel for:', song.youtubeId);
+
+      // Extraction attempt (runs in background)
+      const extractionPromise = extractAudioUrl(song.youtubeId).catch(() => null);
+
+      // Start YouTube IFrame immediately (fastest path — plays in ~2s)
+      preconnectYouTube();
+      this.useYoutubePlayer = true;
+      this.playYouTube(song, playbackId, markId);
+
+      // Wait for extraction (short timeout — don't block too long)
+      const extractionResult = await Promise.race([
+        extractionPromise,
+        new Promise<null>(r => setTimeout(() => r(null), 5_000)),
+      ]);
+
+      if (extractionResult && this.currentPlaybackId === playbackId) {
+        // Extraction succeeded — switch to HTML audio for background playback
+        log('✓ Extraction succeeded during YouTube IFrame load — switching to HTML audio');
+        this.stopYouTubePlayer();
+        this.useYoutubePlayer = false;
+        this.playHtmlAudio({ ...song, audioUrl: extractionResult }, playbackId, markId);
+        return;
       }
 
-      // PATH 2: YouTube IFrame (foreground only — stops in background)
-      if (this.currentPlaybackId === playbackId) {
-        log('PATH 2: YouTube IFrame (fallback — will NOT play in background)');
-        preconnectYouTube();
-        this.useYoutubePlayer = true;
-        this.playYouTube(song, playbackId, markId);
-      }
+      // YouTube IFrame is already playing (or will play) — that's our primary path
+      log('Extraction did not beat YouTube IFrame — using IFrame playback');
       return;
     }
     
@@ -344,7 +352,8 @@ export class AudioService {
 
   private async playHtmlAudio(song: Song, playbackId: number, markId: string): Promise<void> {
     const MAX_RETRIES = 3;
-    const CANPLAY_TIMEOUT_MS = 3_000;
+    // Proxy/extracted URLs need more time to start streaming than local files
+    const CANPLAY_TIMEOUT_MS = song.audioUrl?.includes('/proxy-audio') ? 15_000 : 8_000;
 
     this.stopYouTubePlayer();
 

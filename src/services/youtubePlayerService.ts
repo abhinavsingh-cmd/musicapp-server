@@ -150,7 +150,7 @@ class YouTubePlayerService {
       }
       this.containerEl = document.createElement('div');
       this.containerEl.id = 'yt-player-container';
-      this.containerEl.style.cssText = 'position:fixed;top:-9999px;left:-9999px;width:1px;height:1px;opacity:0;pointer-events:none;z-index:-1;';
+      this.containerEl.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0.01;pointer-events:none;z-index:-9999;overflow:hidden;';
       document.body.appendChild(this.containerEl);
     }
     return this.containerEl;
@@ -201,7 +201,9 @@ class YouTubePlayerService {
     }
 
     const container = this.ensureContainer();
-    const origin = (window as any).Capacitor ? '' : window.location.origin;
+    // On Capacitor, page origin is https://localhost but YouTube needs a valid
+    // origin for CORS. Use the actual origin — it works with YouTube embeds.
+    const origin = window.location.origin || 'https://localhost';
 
     // Create player-ready promise BEFORE constructing the player
     this.playerReadyPromise = new Promise<void>((resolve) => {

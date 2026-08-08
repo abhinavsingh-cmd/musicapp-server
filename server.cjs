@@ -1512,6 +1512,77 @@ app.get("/api/audio-info/:videoId", (req, res) => {
   attemptInfo();
 });
 
+// ── Audio Proxy ──────────────────────────────────────────────────────────────
+// Proxies audio streams from Google CDN. The audio-info endpoint returns URLs
+// that are IP-locked to the Render server — the client can't fetch them directly.
+// This endpoint fetches the URL server-side and pipes it to the client.
+app.get("/api/proxy-audio", (req, res) => {
+  const audioUrl = req.query.url;
+  if (!audioUrl || !audioUrl.startsWith("https://")) {
+    return fail(res, 400, "INVALID_URL", "Missing or invalid url parameter");
+  }
+
+  console.log("[ProxyAudio] Proxying:", audioUrl.substring(0, 100));
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
+
+  req.on("close", () => {
+    clearTimeout(timeout);
+    controller.abort();
+  });
+
+  fetch(audioUrl, {
+    signal: controller.signal,
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+      "Range": req.headers.range || "",
+      "Origin": "https://www.youtube.com",
+      "Referer": "https://www.youtube.com/",
+    },
+  }).then(async (upstream) => {
+    clearTimeout(timeout);
+
+    if (!upstream.ok) {
+      console.error("[ProxyAudio] Upstream error:", upstream.status);
+      return fail(res, upstream.status, "UPSTREAM_ERROR", "Upstream returned error");
+    }
+
+    // Forward relevant headers
+    const contentType = upstream.headers.get("content-type") || "audio/mpeg";
+    const contentLength = upstream.headers.get("content-length");
+    const contentRange = upstream.headers.get("content-range");
+    const acceptRanges = upstream.headers.get("accept-ranges");
+
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    if (contentLength) res.setHeader("Content-Length", contentLength);
+    if (contentRange) res.setHeader("Content-Range", contentRange);
+    if (acceptRanges) res.setHeader("Accept-Ranges", acceptRanges);
+    if (upstream.status === 206) res.status(206);
+
+    const reader = upstream.body.getReader();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        res.write(value);
+      }
+    } catch (e) {
+      // Client disconnected
+    } finally {
+      res.end();
+    }
+  }).catch((err) => {
+    clearTimeout(timeout);
+    console.error("[ProxyAudio] Fetch failed:", err.message);
+    if (!res.headersSent) {
+      fail(res, 502, "PROXY_FAILED", "Failed to fetch audio from upstream");
+    }
+  });
+});
+
 // Lyrics endpoint — returns not-implemented (no lyrics provider configured)
 app.get("/api/lyrics/:videoId", (req, res) => {
   const videoId = req.params.videoId;
