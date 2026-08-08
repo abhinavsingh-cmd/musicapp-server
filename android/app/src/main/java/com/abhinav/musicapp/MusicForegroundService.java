@@ -185,7 +185,11 @@ import java.net.URL;
             filter.addAction("android.bluetooth.adapter.action.CONNECTION_STATE_CHANGED");
             filter.addAction("android.intent.action.MEDIA_BUTTON");
             
-            registerReceiver(headsetPlugReceiver, filter);
+            if (Build.VERSION.SDK_INT >= 34) {
+                registerReceiver(headsetPlugReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                registerReceiver(headsetPlugReceiver, filter);
+            }
         }
 
         private void requestAudioFocus() {
@@ -225,6 +229,7 @@ import java.net.URL;
         }
 
         private void abandonAudioFocus() {
+            if (audioManager == null) return;
             if (audioFocusRequest != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 audioManager.abandonAudioFocusRequest(audioFocusRequest);
             } else {
@@ -236,9 +241,13 @@ import java.net.URL;
         if (wakeLock != null && wakeLock.isHeld()) {
             return;
         }
-        PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
-        if (pm != null) {
-            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MusicApp::PlaybackLock");
+        if (wakeLock == null) {
+            PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+            if (pm != null) {
+                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MusicApp::PlaybackLock");
+            }
+        }
+        if (wakeLock != null && !wakeLock.isHeld()) {
             wakeLock.acquire();
         }
     }
@@ -287,7 +296,9 @@ import java.net.URL;
         startForeground(NOTIFICATION_ID, notification);
 
         // Notify JS that the service started so it can resume if needed.
-        BackgroundAudioPlugin.notifyMediaAction("play", -1);
+        if (BackgroundAudioPlugin.getInstance() != null) {
+            BackgroundAudioPlugin.notifyMediaAction("play", -1);
+        }
 
         return START_STICKY;
     }
@@ -402,6 +413,7 @@ import java.net.URL;
     }
 
     private void dispatchMediaAction(String action, long position) {
+        if (instance == null) return;
         String eventAction;
         if (ACTION_PLAY.equals(action)) {
             eventAction = "play";
@@ -509,6 +521,7 @@ import java.net.URL;
                 if (bmp != null) {
                     final Bitmap scaled = scaleBitmap(bmp, 256);
                     new Handler(Looper.getMainLooper()).post(() -> {
+                        if (instance == null) return;
                         albumArtBitmap = scaled;
                         rebuildNotification();
                     });
@@ -550,11 +563,16 @@ import java.net.URL;
     @Override
     public void onDestroy() {
         instance = null;
+        if (headsetPlugReceiver != null) {
+            try { unregisterReceiver(headsetPlugReceiver); } catch (Exception ignored) {}
+            headsetPlugReceiver = null;
+        }
         if (mediaSession != null) {
             mediaSession.setActive(false);
             mediaSession.release();
             mediaSession = null;
         }
+        abandonAudioFocus();
         releaseWakeLock();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE);

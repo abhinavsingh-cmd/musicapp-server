@@ -51,6 +51,10 @@ public class BackgroundAudioPlugin extends Plugin {
         plugin.notifyListeners("mediaAction", payload, true);
     }
 
+    public static BackgroundAudioPlugin getInstance() {
+        return instance;
+    }
+
     @PluginMethod
     public void startService(PluginCall call) {
         // Check POST_NOTIFICATIONS permission on Android 13+ before starting
@@ -87,8 +91,13 @@ public class BackgroundAudioPlugin extends Plugin {
                 getContext().startService(intent);
             }
         } catch (Exception e) {
-            // Android 12+ throws ForegroundServiceStartNotAllowedException if started from background
-            call.reject("Failed to start foreground service: " + e.getMessage());
+            // Android 12+ throws ForegroundServiceStartNotAllowedException if started from background.
+            // Resolve gracefully so the JS side doesn't crash — notification simply won't appear.
+            System.err.println("[BackgroundAudio] Failed to start foreground service: " + e.getMessage());
+            JSObject result = new JSObject();
+            result.put("started", false);
+            result.put("error", e.getMessage());
+            call.resolve(result);
             return;
         }
 
@@ -137,27 +146,33 @@ public class BackgroundAudioPlugin extends Plugin {
 
     @PluginMethod
     public void setShuffle(PluginCall call) {
-        // Implement shuffle logic via existing mediaActions
         try {
             Intent intent = new Intent(getContext(), MusicForegroundService.class);
             intent.setAction("shuffle");
-            getContext().startService(intent);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                getContext().startForegroundService(intent);
+            } else {
+                getContext().startService(intent);
+            }
             call.resolve();
         } catch (Exception e) {
-            call.reject("Failed to set shuffle: " + e.getMessage());
+            call.resolve();
         }
     }
 
     @PluginMethod
     public void setRepeat(PluginCall call) {
-        // Implement repeat logic via existing mediaActions
         try {
             Intent intent = new Intent(getContext(), MusicForegroundService.class);
             intent.setAction("repeat");
-            getContext().startService(intent);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                getContext().startForegroundService(intent);
+            } else {
+                getContext().startService(intent);
+            }
             call.resolve();
         } catch (Exception e) {
-            call.reject("Failed to set repeat: " + e.getMessage());
+            call.resolve();
         }
     }
 

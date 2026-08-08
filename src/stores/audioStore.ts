@@ -536,6 +536,7 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
     const index = Math.min(qs.currentIndex, queue.length - 1);
     const resolvedQueue = resolveQueueDownloads(queue);
     const song = resolvedQueue[index] || resolveDownloadUrl(currentSong);
+    if (!song) return;
     set({ currentSong: song, isLoading: true, error: null, progress: 0 });
     startLoadingTimeout();
     audioService.pause();

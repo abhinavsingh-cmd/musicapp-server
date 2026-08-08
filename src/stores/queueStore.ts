@@ -198,10 +198,23 @@ export const useQueueStore = create<QueueState>((set, get) => ({
         if (repeatMode === 'all') {
           nextIndex = 0;
         } else if (autoplayEnabled && currentIndex === queue.length - 1) {
+          const prevLength = queue.length;
           await get().ensureQueueSize();
           const newQueue = get().queue;
-          if (newQueue.length > queue.length) {
-            return get().nextSong();
+          if (newQueue.length > prevLength) {
+            // Re-read after ensureQueueSize to get the new next index
+            const updatedQueue = get().queue;
+            const updatedIndex = get().currentIndex;
+            if (updatedIndex < updatedQueue.length - 1) {
+              const nextIdx = updatedIndex + 1;
+              const nextSong = updatedQueue[nextIdx];
+              if (nextSong) {
+                set({ currentIndex: nextIdx });
+                schedulePersist(get());
+                get().addRecent(nextSong);
+                return nextSong;
+              }
+            }
           }
           return null;
         } else {
@@ -320,6 +333,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
     const { queue, currentIndex } = get();
     if (queue.length <= 1) return;
     const current = queue[currentIndex];
+    if (!current) return;
     const others = queue.filter((_, i) => i !== currentIndex);
     for (let i = others.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
@@ -338,7 +352,8 @@ export const useQueueStore = create<QueueState>((set, get) => ({
     const { originalQueue, currentIndex } = get();
     if (originalQueue.length === 0) return;
     const currentSong = get().queue[currentIndex];
-    const idx = originalQueue.findIndex((s) => s.id === currentSong?.id);
+    if (!currentSong) return;
+    const idx = originalQueue.findIndex((s) => s.id === currentSong.id);
     set({
       queue: originalQueue,
       currentIndex: idx >= 0 ? idx : 0,

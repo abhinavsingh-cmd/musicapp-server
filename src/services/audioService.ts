@@ -254,7 +254,7 @@ export class AudioService {
 
   private emit(event: AudioEventType, data?: any): void {
     this.listeners.forEach(cb => {
-      try { cb(event, data); } catch { }
+      try { cb(event, data); } catch (e) { logError('Listener error:', e); }
     });
   }
 
@@ -268,6 +268,10 @@ export class AudioService {
   }
 
   async play(song: Song, playlist: Song[] = [], startIndex: number = 0, startTime?: number): Promise<void> {
+    if (!song || !song.id) {
+      logError('play() called with null/undefined song');
+      return;
+    }
     const markId = `play_${song.id}_${Date.now()}`;
     performance.mark(markId);
     this.streamStartTime = performance.now();
@@ -278,7 +282,9 @@ export class AudioService {
     // playback succeeds. This ensures the notification appears instantly and the
     // service is alive before the audio element starts.
     if (isNativePlatform()) {
-      backgroundAudio.startService({ title: song.title, artist: song.artist }).catch(() => {});
+      backgroundAudio.startService({ title: song.title, artist: song.artist }).catch((err) => {
+        logError('backgroundAudio.startService failed:', err);
+      });
     }
     
     const playbackId = ++this.currentPlaybackId;
@@ -521,7 +527,9 @@ export class AudioService {
                 this.startProgressTracking();
                 this.emit('play', { song });
                 if (isNativePlatform()) {
-                  backgroundAudio.startService({ title: song.title, artist: song.artist }).catch(() => {});
+                  backgroundAudio.startService({ title: song.title, artist: song.artist }).catch((err) => {
+                    logError('backgroundAudio.startService (play event) failed:', err);
+                  });
                 }
               }
               break;
@@ -753,7 +761,9 @@ export class AudioService {
         this.startProgressTracking();
         this.emit('play', { song: this.state.currentSong });
         if (isNativePlatform() && this.state.currentSong) {
-          backgroundAudio.startService({ title: this.state.currentSong.title, artist: this.state.currentSong.artist }).catch(() => {});
+          backgroundAudio.startService({ title: this.state.currentSong.title, artist: this.state.currentSong.artist }).catch((err) => {
+            logError('backgroundAudio.startService (resume) failed:', err);
+          });
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Resume failed';
@@ -842,4 +852,4 @@ export class AudioService {
   }
 }
 
-export const audioService = new AudioService();
+// Singleton exported from audioServiceInstance.ts — do NOT create another instance here.
