@@ -249,12 +249,17 @@ export const SongTable: React.FC<SongTableProps> = memo(({ songs, className }) =
     return songs.slice(startIndex, startIndex + visibleCount);
   }, [songs, startIndex, visibleCount]);
 
+  const isLoadingRef = useRef(false);
+
   const handleRowClick = useCallback((song: Song, index: number) => {
+    if (isLoadingRef.current) return;
     if (currentSongId === song.id) { togglePlayPause(); }
     else {
       const dl = downloadsMap.get(song.youtubeId ?? '');
       const songToPlay = dl ? { ...song, audioUrl: dl } : song;
+      isLoadingRef.current = true;
       loadSong(songToPlay, songs, index);
+      setTimeout(() => { isLoadingRef.current = false; }, 500);
     }
   }, [currentSongId, loadSong, togglePlayPause, songs]);
 

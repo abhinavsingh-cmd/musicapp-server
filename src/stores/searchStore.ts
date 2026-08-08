@@ -105,7 +105,7 @@ let ytGeneration = 0;
 let ytAbortController: AbortController | null = null;
 
 async function fetchYouTubeSearch(query: string, signal?: AbortSignal): Promise<YTSong[]> {
-  // Client-side search via Invidious (bypasses broken server yt-dlp)
+  // Server endpoint first (yt-dlp), then Invidious fallback
   return youtubeSearch(query, signal);
 }
 

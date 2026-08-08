@@ -12,8 +12,10 @@ export interface BackupData {
 
 export class BackupService {
   async exportData(): Promise<BackupData> {
-    const favorites = JSON.parse(localStorage.getItem('favorites') || '[]');
-    const playlists = JSON.parse(localStorage.getItem('playlists') || '[]');
+    let favorites: any[] = [];
+    let playlists: any[] = [];
+    try { favorites = JSON.parse(localStorage.getItem('favorites') || '[]'); } catch { favorites = []; }
+    try { playlists = JSON.parse(localStorage.getItem('playlists') || '[]'); } catch { playlists = []; }
     const history = useHistoryStore.getState().history;
     const downloads = useDownloadsStore.getState().downloads.map(d => d.youtubeId);
 

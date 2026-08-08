@@ -306,7 +306,7 @@ export class AudioService {
     if (song.audioUrl && song.audioUrl.trim()) {
       log('PATH 1: HTML audio via audioUrl');
       this.useYoutubePlayer = false;
-      this.playHtmlAudio(song, playbackId, markId);
+      await this.playHtmlAudio(song, playbackId, markId);
       return;
     }
     
@@ -322,7 +322,7 @@ export class AudioService {
       // Start YouTube IFrame immediately (fastest path — plays in ~2s)
       preconnectYouTube();
       this.useYoutubePlayer = true;
-      this.playYouTube(song, playbackId, markId);
+      this.playYouTube(song, playbackId, markId).catch(() => {});
 
       // Wait for extraction (short timeout — don't block too long)
       const extractionResult = await Promise.race([
@@ -335,7 +335,7 @@ export class AudioService {
         log('✓ Extraction succeeded during YouTube IFrame load — switching to HTML audio');
         this.stopYouTubePlayer();
         this.useYoutubePlayer = false;
-        this.playHtmlAudio({ ...song, audioUrl: extractionResult }, playbackId, markId);
+        this.playHtmlAudio({ ...song, audioUrl: extractionResult }, playbackId, markId).catch(() => {});
         return;
       }
 
@@ -413,7 +413,7 @@ export class AudioService {
       }
 
       // Assign source AFTER equalizer is ready
-      audio.src = song.audioUrl!;
+      audio.src = song.audioUrl || '';
 
       if (audio.volume === 0 || Number.isNaN(audio.volume)) {
         const safe = this.state.volume || 0.7;

@@ -173,7 +173,8 @@ export async function apiFetch(
   const dedupeKey = deduplicate && method === 'GET' ? url : '';
 
   if (dedupeKey && inFlightRequests.has(dedupeKey)) {
-    return inFlightRequests.get(dedupeKey)!.then(r => r.clone());
+    const existing = inFlightRequests.get(dedupeKey);
+    if (existing) return existing.then(r => r.clone());
   }
 
   const startTime = performance.now();

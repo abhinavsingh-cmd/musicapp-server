@@ -151,9 +151,25 @@ export class LibrarySearchIndex {
       return cached;
     }
 
-    // Don't block on index build — return empty and let caller fall through to
-    // YouTube results. The index will be ready for the next keystroke.
-    if (!this.activeReady) return [];
+    // Don't block on index build — do a fast linear scan instead of returning empty.
+    if (!this.activeReady) {
+      const qLower = normalize(q);
+      const hits: IndexedSearchHit[] = [];
+      for (const rec of this.songs) {
+        if (opts.shouldCancel?.()) return [];
+        const titleN = normalize(rec.title || '');
+        const artistN = normalize(rec.artist || '');
+        const albumN = normalize(rec.album || '');
+        if (titleN.includes(qLower) || artistN.includes(qLower) || albumN.includes(qLower)) {
+          let score = 1;
+          if (titleN === qLower) score = 100;
+          else if (titleN.startsWith(qLower)) score = 10;
+          hits.push({ song: rec.song, score });
+        }
+      }
+      hits.sort((a, b) => b.score - a.score);
+      return hits.slice(0, limit);
+    }
 
     const snap = this.active;
     const queryTokens = tokenize(q);

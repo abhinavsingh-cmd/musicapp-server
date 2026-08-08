@@ -12,6 +12,7 @@
  */
 
 import { YTSong } from '../stores/searchStore';
+import { apiFetch } from '../config/api';
 
 const INVIDIOUS_INSTANCES = [
   'https://yewtu.be',
@@ -266,7 +267,29 @@ export async function youtubeSearch(
   const hasMusicTerm = /\b(song|music|audio|video|singer|artist|album|playlist)\b/i.test(query);
   const musicQuery = hasMusicTerm ? `${query} official` : `${query} official audio song`;
 
-  // Race all instances — fastest non-empty result wins
+  // PRIMARY: Use server endpoint (yt-dlp YouTube search)
+  try {
+    const url = `/api/youtube/search?q=${encodeURIComponent(musicQuery)}`;
+    const result = await apiFetch(url, { timeout: 12_000, retries: 1, signal });
+    const data = await result.json();
+    const wrapped = data?.details?.results || data?.results || [];
+    if (Array.isArray(wrapped) && wrapped.length > 0) {
+      log(`Server search returned ${wrapped.length} results`);
+      return wrapped.map((r: any) => ({
+        id: r.id || r.youtubeId || '',
+        title: cleanTitle(r.title || 'Unknown'),
+        artist: r.artist || r.channel || 'Unknown',
+        duration: r.duration || 0,
+        thumbnail: r.thumbnail || `https://img.youtube.com/vi/${r.id || r.youtubeId || ''}/mqdefault.jpg`,
+        viewCount: r.viewCount || 0,
+        album: '',
+      }));
+    }
+  } catch (err) {
+    logError('Server search failed, falling back to Invidious:', err);
+  }
+
+  // FALLBACK: Race Invidious instances
   const promises = INVIDIOUS_INSTANCES.map(instance =>
     searchViaInstance(instance, musicQuery, signal).then(results => {
       if (results.length === 0) throw new Error('Empty results');

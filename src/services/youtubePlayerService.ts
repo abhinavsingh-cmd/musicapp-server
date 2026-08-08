@@ -343,7 +343,7 @@ class YouTubePlayerService {
       throw new Error('YouTube player not initialized');
     }
 
-    this.player.setVolume(this.volume * 100);
+    try { this.player.setVolume(this.volume * 100); } catch (e) { logError('setVolume FAILED:', e); }
   }
 
   async play(): Promise<void> {

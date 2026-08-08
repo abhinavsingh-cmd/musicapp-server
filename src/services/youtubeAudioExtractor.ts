@@ -195,7 +195,7 @@ function pickBestAudioUrl(formats: InvidiousFormat[]): string | null {
     return (b.bitrate || 0) - (a.bitrate || 0);
   });
 
-  return audioFormats[0].url || null;
+  return audioFormats[0]?.url || null;
 }
 
 /**
