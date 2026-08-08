@@ -1266,7 +1266,7 @@ app.get("/api/stream/:videoId", (req, res) => {
       audioUrl
     ];
 
-    console.log(`[Stream] Attempt ${attempt}/${maxAttempts} with clients: ${clients}`);
+    console.log(`[Stream] Attempt ${attempt}/${maxAttempts} for: ${videoId}`);
     const yt = spawn("yt-dlp", ytArgs, { stdio: ["ignore", "pipe", "pipe"] });
 
     let headersSent = false;

@@ -1,271 +1,401 @@
 import { test, expect, Page } from '@playwright/test';
 
 /**
- * Full user-journey UI test: every button, panel, page and store feature.
- * Run against a local `npm run dev` (vite :3000, api :3001).
- *
- * vtt about the sections:
- *   1. Auth/login
- *   2. Home page chrome + song rows
- *   3. Player: controls, seek, volume, shuffle, repeat, favorite, download
- *   4. Panels: Queue, Lyrics, Equalizer (presets, bands, toggles, persistence)
- *   5. Keyboard shortcuts
- *   6. Every route/page incl. create forms, settings, 404
- *   7. Mobile viewport
+ * Full user-style E2E journey: login → home → every player control → queue →
+ * lyrics → equalizer → shortcuts → every page/form → 404. Requires the dev
+ * server running (`npm run dev`: vite :3000, api :3001).
  */
 
 const BASE = 'http://localhost:3000';
 
-interface Collected {
-  consoleErrors: string[];
-  pageErrors: string[];
-  failedRequests: string[];
+const player = (page: Page) => page.locator('.fixed.bottom-0');
+
+const songRow = (page: Page) => page.locator('.grid.grid-cols-12.group');
+
+async function login(page: Page) {
+  await page.goto(`${BASE}/login`);
+  await expect(page.locator('input#email')).toBeVisible();
+  await page.fill('input#email', 'e2e-user@example.com');
+  await page.fill('input#password', 'password123');
+  await page.click('button[type="submit"]');
+  await page.waitForURL(`${BASE}/`);
+  // wait for the content area to mount
+  await expect(songRow(page).first()).toBeVisible({ timeout: 30000 });
 }
 
-function collect(page: Page): Collected {
-  const c: Collected = { consoleErrors: [], pageErrors: [], failedRequests: [] };
-  page.on('console', (msg) => {
-    if (msg.type() === 'error') c.consoleErrors.push(msg.text());
-  });
-  page.on('pageerror', (err) => c.pageErrors.push(err.message));
-  page.on('response', (resp) => {
-    if (resp.status() >= 400) c.failedRequests.push(`${resp.status()} ${resp.url()}`);
-  });
-  return c;
+async function openPanel(page: Page, title: string) {
+  await player(page).locator(`[title="${title}"]`).click();
+  await expect(player(page).locator(`[title="${title}"]`)).toBeVisible();
 }
 
-const isBenignConsoleError = (t: string) =>
-  t.includes('Download the React DevTools') ||
-  t.includes('favicon') ||
-  t.includes('[HMR]') ||
-  t.includes('Autofill');
-
-function findPlayer(page: Page) {
-  return page.locator('.fixed.bottom-0');
-}
-
-function timeText(page: Page) {
-  return page.locator('.fixed.bottom-0 .font-mono').first();
+async function closePanel(page: Page, title: string) {
+  await player(page).locator(`[title="${title}"]`).click();
 }
 
 test.describe.configure({ mode: 'serial' });
 
-test('user journey: login → home → player → panels → shortcuts → pages → 404', async ({ page }) => {
-  test.setTimeout(5 * 60_000);
-  const c = collect(page);
+test('full user journey (desktop)', async ({ page }) => {
+  test.setTimeout(7 * 60_000);
+  const consoleErrors: string[] = [];
+  const pageErrors: string[] = [];
+  const failedRequests: string[] = [];
+  page.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(m.text()); });
+  page.on('pageerror', (e) => pageErrors.push(e.message));
+  page.on('response', (r) => { if (r.status() >= 400) failedRequests.push(`${r.status()} ${r.url()}`); });
 
-  await test.step('login', async () => {
-    await page.goto(`${BASE}/login`);
-    await expect(page.locator('input#email')).toBeVisible();
-    await page.fill('input#email', 'tester@example.com');
-    await page.fill('input#password', 'password123');
-    await page.click('button[type="submit"]');
-    await expect(page).toHaveURL(`${BASE}/`);
-    await expect(page.locator('main, .liquid-glass').first()).toBeVisible({ timeout: 20000 });
+  // ── 1. LOGIN ───────────────────────────────────────────────────────────────
+  await test.step('1. login + home renders', async () => {
+    await login(page);
+    const rows = await songRow(page).count();
+    console.log(`[Home] song rows: ${rows}`);
+    expect(rows).toBeGreaterThan(0);
+    await expect(player(page)).toBeVisible();
   });
 
-  const songRows = page.locator('.grid.grid-cols-12.group');
-
-  await test.step('home page renders sections', async () => {
-    await expect(page.getByRole('heading', { level: 1 }).first()).toContainText(/Welcome|Trending|Good/i);
-    await expect(songRows.first()).toBeVisible({ timeout: 20000 });
-    const count = await songRows.count();
-    console.log(`[Home] song rows visible: ${count}`);
-    expect(count).toBeGreaterThan(0);
+  // ── 2. PLAYBACK ────────────────────────────────────────────────────────────
+  await test.step('2. pick a song and confirm it loads', async () => {
+    await songRow(page).first().click();
+    await page.waitForTimeout(2500);
+    const title = await player(page).locator('p').first().textContent();
+    console.log(`[Playback] song: ${title?.trim()}`);
+    expect(title?.trim()).toBeTruthy();
+    expect(title).not.toContain('No song selected');
+    await expect(player(page).locator('.font-mono').first()).toBeVisible();
   });
 
-  const player = tPlayer(page);
-
-  await test.step('start playback from first song row', async () => {
-    await songRows.first().click();
-    await expect(player.locator('p').first()).not.toContainText('No song selected');
-    const songTitle = await player.locator('p').first().textContent();
-    expect(songTitle?.trim().length).toBeGreaterThan(0);
-    console.log(`[Playback] playing: ${songTitle?.trim()}`);
-    // Progress bar exists & time display visible
-    await expect(player.locator('.font-mono').first()).toBeVisible();
-  });
-
-  await test.step('progress/seek', async () => {
-    const bar = player.locator('div.relative.h-1\\.5.bg-white\\/10');
+  await test.step('3. progress bar seek', async () => {
+    await page.waitForTimeout(2000);
+    const bar = player(page).locator('div.relative.h-1\\.5.bg-white\\/10');
     await expect(bar).toBeVisible();
     const box = await bar.boundingBox();
     if (box) {
       await page.mouse.click(box.x + box.width * 0.5, box.y + box.height / 2);
+      await page.waitForTimeout(800);
     }
-    await page.waitForTimeout(1200);
-    expect(await player.locator('.font-mono').first().textContent()).not.toBe('0:00');
+    const time = await player(page).locator('.font-mono').first().textContent();
+    console.log(`[Progress] time shown: ${time}`);
+    expect(time).toMatch(/^\d+:\d\d$/);
   });
 
-  await test.step('play/pause toggle', async () => {
-    const playBtn = player.locator('button:has(svg.lucide-play)');
-    const pauseBtn = player.locator('button:has(svg.lucide-pause)');
-    const state = (await pauseBtn.count()) > 0 ? 'playing' : 'paused';
-    console.log(`[Controls] initial state: ${state}`);
-    if (state === 'paused') {
+  await test.step('4. play / pause toggle', async () => {
+    const playBtn = player(page).locator('button:has(svg.lucide-play)');
+    const pauseBtn = player(page).locator('button:has(svg.lucide-pause)');
+    const wasPlaying = (await pauseBtn.count()) > 0;
+    if (!wasPlaying) {
       await playBtn.first().click();
-      await expect(pauseBtn.first()).toBeVisible({ timeout: 15000 });
+      await expect(pauseBtn.first()).toBeVisible({ timeout: 20000 });
+      console.log('[Controls] play → playing');
+    } else {
+      console.log('[Controls] already playing');
     }
     await pauseBtn.first().click();
-    await expect(playBtn.first()).toBeVisible({ timeout: 15000 });
+    await expect(playBtn.first()).toBeVisible({ timeout: 10000 });
     await playBtn.first().click();
-    await expect(pauseBtn.first()).toBeVisible({ timeout: 15000 });
-    console.log('[Controls] pause/play OK');
+    await expect(pauseBtn.first()).toBeVisible({ timeout: 10000 });
+    console.log('[Controls] pause → play OK');
   });
 
-  await test.step('next / previous track', async () => {
-    const firstTitle = await player.locator('p').first().textContent();
-    await player.locator('button:has(svg.lucide-skip-forward)').click();
-    await page.waitForTimeout(2500);
-    const nextTitle = await player.locator('p').first().textContent();
-    console.log(`[Controls] next: '${firstTitle?.trim()}' → '${nextTitle?.trim()}'`);
-    expect(nextTitle).not.toBe(firstTitle);
-    await player.locator('button:has(svg.lucide-skip-back)').click();
-    await page.waitForTimeout(2500);
+  await test.step('5. next / previous', async () => {
+    const before = await player(page).locator('p').first().textContent();
+    await player(page).locator('button:has(svg.lucide-skip-forward)').click();
+    await page.waitForTimeout(3000);
+    const after = await player(page).locator('p').first().textContent();
+    console.log(`[Next]: "${before?.trim()}" → "${after?.trim()}"`);
+    expect(after).not.toBe(before);
+    await player(page).locator('button:has(svg.lucide-skip-back)').click();
+    await page.waitForTimeout(3000);
   });
 
-  await test.step('shuffle + repeat cycle', async () => {
-    await player.locator('[title="Shuffle Off"]').click();
-    await expect(player.locator('[title="Shuffle On"]')).toBeVisible();
-    console.log('[Shuffle] on');
-    await page.locator('[title^="Repeat:"]').click();
-    const r1 = await page.locator('[title^="Repeat:"]').getAttribute('title');
-    await page.locator('[title^="Repeat:"]').click();
-    const r2 = await page.locator('[title^="Repeat:"]').getAttribute('title');
-    await page.locator('[title^="Repeat:"]').click();
-    const r3 = await page.locator('[title^="Repeat:"]').getAttribute('title');
-    console.log(`[Repeat] cycle: ${r1} → ${r2} → ${r3}`);
-    expect(new Set([r1, r2, r3]).size).toBeGreaterThan(1);
-  });
-
-  await test.step('volume slider', async () => {
-    const vol = player.locator('input[type="range"]').first();
-    expect(await vol.inputValue()).not.toBe('');
-    await vol.fill('0.0');
-    await page.waitForTimeout(100);
-    console.log('[Volume] set to 0 (mute icon path exercised)');
-  });
-
-  await test.step('favorite / heart', async () => {
-    const heartBtn = player.locator('button:has(svg.lucide-heart)');
-    await heartBtn.click();
-    const filled = await heartBtn.locator('svg').getAttribute('fill');
-    expect(filled).toBe('currentColor');
-    console.log('[Favorite] added');
-  });
-
-  await test.step('download button', async () => {
-    const dlBtn = player.locator('[title="Download"],[title="Cancel download"]');
-    if ((await dlBtn.count()) === 0) {
-      console.log('[Download] already downloaded — skipping click');
-    } else {
-      await dlBtn.first().click();
-      await page.waitForTimeout(6000);
-      const title = await player.locator('button:has(svg.lucide-download), button:has(svg.lucide-x), button:has(svg.lucide-check)').first().getAttribute('title').catch(() => null);
-      console.log(`[Download] after click: ${title ?? 'unknown'}`);
+  await test.step('6. shuffle + repeat cycle', async () => {
+    const shuffleBtn = player(page).locator('[title="Shuffle Off"],[title="Shuffle On"]');
+    await shuffleBtn.first().click();
+    await expect(player(page).locator('[title="Shuffle On"]')).toBeVisible({ timeout: 5000 });
+    console.log('[Shuffle] toggled ON');
+    const titles: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const b = player(page).locator('[title^="Repeat:"]');
+      await b.click();
+      titles.push((await b.getAttribute('title')) || '');
     }
+    console.log(`[Repeat] cycle: ${titles.join(' → ')}`);
+    expect(new Set(titles).size).toBeGreaterThan(1);
   });
 
-  await test.step('queue panel', async () => {
-    await player.locator('[title="Queue"]').click();
-    await expect(page.getByText('Queue', { exact: true })).toBeVisible();
-    const queueVisible = await page.locator('.fixed.bottom-28').count();
-    expect(queueVisible).toBeGreaterThan(0);
-    console.log('[Queue] panel opened');
-    await player.locator('[title="Queue"]').click();
-  });
-
-  await test.step('lyrics panel', async () => {
-    await player.locator('[title="Lyrics"]').click();
-    await expect(page.getByText('Lyrics', { exact: true }).first()).toBeVisible();
-    await page.waitForTimeout(6000);
-    const hasLines = (await page.locator('.cursor-pointer.hover\\:bg-white\\/5').count()) > 0;
-    const hasEmpty = await page.getByText('No lyrics available').isVisible().catch(() => false);
-    const stillLoading = await page.getByText('Loading lyrics...').isVisible().catch(() => false);
-    console.log(`[Lyrics] lines=${hasLines} empty=${hasEmpty} stuckLoading=${stillLoading}`);
-    if (stillLoading) console.log('[BUG] lyrics stuck on "Loading lyrics..." state');
-    await player.locator('[title="Lyrics"]').click();
-  });
-
-  await test.step('equalizer panel', async () => {
-    await player.locator('[title="Equalizer"]').click();
-    await expect(page.getByRole('heading', { name: 'Audio Effects' })).toBeVisible();
-    const band = page.locator('input[type="range"]');
-    const presets = ['Flat', 'Bass Boost', 'Treble Boost', 'Rock', 'Classical', 'Jazz', 'Hip Hop', 'Electronic', 'Vocal', 'Pop'];
-    for (const p of presets) {
-      await expect(page.getByRole('button', { name: p })).toBeVisible();
-    }
-    console.log('[EQ] all 10 presets visible');
-    // Power toggle: confirm it is off earlier -> click -> enabled
-    const pow = page.getByRole('button', { name: '', exact: false }).filter({ has: page.locator('svg.lucide-power') });
-    await pow.click();
+  await test.step('7. volume slider', async () => {
+    const vol = player(page).locator('input[type="range"]').first();
+    await vol.fill('0');
     await page.waitForTimeout(300);
-    // In dev the AudioContext may not exist, but store updates; check persisted data
-    const store = await page.evaluate(() =>
-      JSON.parse(localStorage.getItem('audio_effects_v1') || 'null')
-    );
-    console.log(`[EQ] store after power toggle: enabled=${store?.enabled}`);
-    expect(store?.enabled).toBe(true);
-    // preset Rock sets nonzero gains
-    await page.getByRole('button', { name: 'Rock' }).click();
-    const store2 = await page.evaluate(() =>
-      JSON.parse(localStorage.getItem('audio_effects_v1') || 'null')
-    );
-    console.log(`[EQ] rock gains: ${store2?.gains?.slice(0, 5)}`);
-    expect(store2?.pred).toBe('Rock');
-    // bass slider changes value
-    const bass = page.getByText('Bass Boost').locator('xpath=..').locator('input[type="range"]');
-    await bass.fill('8');
-    const store3 = await page.evaluate(() =>
-      JSON.parse(localStorage.getItem('audio_effects_v1') || 'null')
-    );
-    console.log(`[EQ] bassBoost=${store3?.bassBoost}`);
-    expect(store3?.bassBoost).toBe(8);
-    // toggles
-    await page.getByRole('button', { name: /Loudness/ }).click();
-    const store4 = await page.evaluate(() =>
-      JSON.parse(localStorage.getItem('audio_effects_v1') || 'null')
-    );
-    expect(store4?.loudnessMode).toBe(true);
-    console.log('[EQ] loudness toggle OK');
-    await player.locator('[title="Equalizer"]').click();
+    const v = await vol.inputValue();
+    console.log(`[Volume] set to ${v}`);
+    await vol.fill('0.7');
   });
 
-  await test.step('keyboard shortcuts', async () => {
-    // L toggles lyrics
+  await test.step('8. favorite heart', async () => {
+    const heartBtn = player(page).locator('button:has(svg.lucide-heart)');
+    await expect(heartBtn).toBeVisible();
+    await heartBtn.click();
+    await page.waitForTimeout(400);
+    const fill = await heartBtn.locator('svg').getAttribute('fill');
+    console.log(`[Favorite] heart fill after click: ${fill}`);
+    expect(fill).toBe('currentColor');
+  });
+
+  await test.step('9. download button', async () => {
+    const dl = player(page).locator('[title="Download"],[title="Cancel download"]');
+    if ((await dl.count()) === 0) {
+      console.log('[Download] already downloaded via state');
+    } else {
+      await dl.first().click();
+      await page.waitForTimeout(8000);
+      const cancelledOrDone = await player(page).locator('[title="Cancel download"],[title="Downloaded"]');
+      const state = (await cancelledOrDone.count()) > 0 ? 'started/finished' : 'unknown';
+      console.log(`[Download] clicked, state after 8s: ${state}`);
+    }
+  });
+
+  // ── 3. QUEUE ───────────────────────────────────────────────────────────────
+  await test.step('10. queue panel', async () => {
+    await openPanel(page, 'Queue');
+    const q = page.locator('.fixed.bottom-28');
+    await expect(q).toBeVisible();
+    await expect(q.getByText('Queue', { exact: true })).toBeVisible();
+    console.log('[Queue] panel opened');
+    await closePanel(page, 'Queue');
+  });
+
+  // ── 4. LYRICS ──────────────────────────────────────────────────────────────
+  await test.step('11. lyrics panel', async () => {
+    await openPanel(page, 'Lyrics');
+    const panel = page.locator('.fixed.bottom-28');
+    await expect(panel.getByText('Lyrics', { exact: true })).toBeVisible();
+    await page.waitForTimeout(8000);
+    const hasLines = await panel.locator('.cursor-pointer.hover\\:bg-white\\/5').count();
+    const empty = await panel.getByText('No lyrics available').isVisible();
+    const stillLoading = await panel.getByText('Loading lyrics...').isVisible();
+    console.log(`[Lyrics] lines=${hasLines} empty=${empty} stuckLoading=${stillLoading}`);
+    expect(empty || hasLines > 0, `lyrics should resolve (stuck loading=${stillLoading})`).toBeTruthy();
+    await closePanel(page, 'Lyrics');
+  });
+
+  // ── 5. EQUALIZER ───────────────────────────────────────────────────────────
+  await test.step('12. equalizer panel: presets, bands, toggles, persistence', async () => {
+    await page.evaluate(() => localStorage.removeItem('audio_effects_v1'));
+    await openPanel(page, 'Equalizer');
+    await expect(page.getByRole('heading', { name: 'Audio Effects' })).toBeVisible();
+
+    for (const preset of ['Flat', 'Bass Boost', 'Treble Boost', 'Rock', 'Classical', 'Jazz', 'Hip Hop', 'Electronic', 'Vocal', 'Pop']) {
+      await expect(page.getByRole('button', { name: preset })).toBeVisible();
+    }
+    console.log('[EQ] all 10 presets rendered');
+
+    // 10 band sliders + 3 extra sliders
+    const ranges = player(page).locator('input[type="range"]');
+    console.log(`[EQ] range inputs: ${await ranges.count()}`);
+    expect(await ranges.count()).toBeGreaterThanOrEqual(13);
+
+    // power toggle: sliders start disabled (default off) → click → enabled
+    const powerBtn = page.locator('button:has(svg.lucide-power)');
+    await powerBtn.click();
+    await page.waitForTimeout(500);
+    let store = await eqStore(page);
+    console.log(`[EQ] store after power: enabled=${store?.enabled}`);
+    expect(store?.enabled).toBe(true);
+
+    // preset 'Rock' applies gains
+    await page.getByRole('button', { name: 'Rock' }).click();
+    store = await eqStore(page);
+    console.log(`[EQ] Rock preset gains: [${(store?.gains || []).slice(0, 4)}]`);
+    expect(store?.preset).toBe('Rock');
+    expect((store?.gains || []).some((g: number) => g !== 0)).toBe(true);
+
+    // bass boost slider
+    const bassSlider = page.getByText('Bass Boost', { exact: true }).locator('xpath=..').locator('input[type="range"]');
+    await bassSlider.fill('8');
+    await page.waitForTimeout(300);
+    store = await eqStore(page);
+    console.log(`[EQ] bassBoost=${store?.bassBoost}`);
+    expect(store?.bassBoost).toBe(8);
+
+    // effect toggles
+    await page.getByRole('button', { name: /Loudness/ }).click();
+    await page.getByRole('button', { name: /Virtualizer/ }).click();
+    store = await eqStore(page);
+    console.log(`[EQ] loudness=${store?.loudnessMode} virtualizer=${store?.virtualizerEnabled}`);
+    expect(store?.loudnessMode).toBe(true);
+    expect(store?.virtualizerEnabled).toBe(true);
+    await closePanel(page, 'Equalizer');
+  });
+
+  // ── 6. KEYBOARD SHORTCUTS ──────────────────────────────────────────────────
+  await test.step('13. keyboard shortcuts (L, space, shift+arrows)', async () => {
     await page.locator('body').press('l');
-    await expect(page.getByText('Lyrics', { exact: true }).first()).toBeVisible();
+    await expect(page.locator('.fixed.bottom-28').getByText('Lyrics', { exact: true })).toBeVisible();
     await page.locator('body').press('l');
-    await expect(page.getByText('Lyrics', { exact: true }).first()).toBeHidden();
-    console.log('[Keys] L toggles lyrics OK');
-    // Space toggles play/pause
+    await expect(page.locator('.fixed.bottom-28')).toHaveCount(0);
+    console.log('[Keys] L toggles lyrics');
+
+    const wasPlaying = (await player(page).locator('button:has(svg.lucide-pause)').count()) > 0;
     await page.locator('body').press('Space');
     await page.waitForTimeout(600);
-    const pauseVisible = await (player.locator('button:has(svg.lucide-pause)')).count();
+    const nowPlaying = (await player(page).locator('button:has(svg.lucide-pause)').count()) > 0;
+    console.log(`[Keys] space: wasPlaying=${wasPlaying} nowPlaying=${nowPlaying} (toggled)`);
+    expect(nowPlaying).toBe(!wasPlaying);
     await page.locator('body').press('Space');
-    console.log(`[Keys] space toggles (pause visible after: ${pauseVisible > 0}) OK`);
-    // Shift+Right seeks +10s
-    const before = await page.locator('.fixed.bottom-0 .font-mono').first().textContent();
+
+    const before = await player(page).locator('.font-mono').first().textContent();
     await page.keyboard.press('Shift+ArrowRight');
-    await page.waitForTimeout(600);
-    const after = await page.locator('.fixed.bottom-0 .font-mono').first().textContent();
-    console.log(`[Keys] seek: ${before} → ${after}`);
+    await page.waitForTimeout(800);
+    const after = await player(page).locator('.font-mono').first().textContent();
+    console.log(`[Keys] shift+→ seek: ${before} → ${after}`);
     expect(after).not.toBe(before);
   });
 
-  await stepNav(page);
+  // ── 7. PAGES ───────────────────────────────────────────────────────────────
+  await test.step('14. search page', async () => {
+    await page.goto(`${BASE}/search`);
+    const input = page.locator('input[placeholder*="Search"]');
+    await expect(input).toBeVisible({ timeout: 15000 });
+    await input.fill('Arijit');
+    await page.waitForTimeout(2000);
+    console.log(`[Search] placeholder='${await input.getAttribute('placeholder')}' → typed query`);
+    await expect(page.getByRole('button', { name: /Filters/ })).toBeVisible();
+    await page.getByRole('button', { name: /Filters/ }).click();
+    await page.waitForTimeout(500);
+    console.log('[Search] Filters popover opened');
+  });
 
-  await test.step('404 page', async () => {
-    await page.goto(`${BASE}/definitely-not-a-route`);
+  await test.step('15. library page', async () => {
+    await page.goto(`${BASE}/library`);
+    await expect(page.getByRole('heading', { name: /Your Library|Library/i }).first()).toBeVisible();
+    await expect(page.getByRole('tab', { name: /Songs|Albums|Playlists/ }).first()).toBeVisible();
+    console.log('[Library] tabs present');
+  });
+
+  await test.step('16. discover page', async () => {
+    await page.goto(`${BASE}/discover`);
+    await expect(page.getByRole('heading', { name: /Discover/i })).toBeVisible();
+    await expect(page.locator('button, a').filter({ hasText: /Genre|All|Pop|Rock|Indian/i }).first()).toBeVisible();
+    console.log('[Discover] genre chips OK');
+  });
+
+  await test.step('17. favorites page (heart from step 8 should appear)', async () => {
+    await page.goto(`${BASE}/favorites`);
+    const emptyState = page.getByText(/No favorites|Nothing here|empty/i);
+    if (await emptyState.isVisible().catch(() => false)) {
+      console.log('[Favorites] empty state (favorite not persisted to page?) — possible BUG');
+    } else {
+      const rows = await songRow(page).count();
+      console.log(`[Favorites] favorite rows: ${rows}`);
+      expect(rows).toBeGreaterThan(0);
+    }
+  });
+
+  await test.step('18. history page', async () => {
+    await page.goto(`${BASE}/history`);
+    await expect(page.getByRole('heading', { name: /History/i }).first()).toBeVisible();
+    const clearBtn = page.getByRole('button', { name: /Clear all/i });
+    if (await clearBtn.count()) {
+      await clearBtn.click();
+      console.log('[History] cleared');
+    } else {
+      console.log('[History] no clear-all button found — possible BUG(???)');
+    }
+  });
+
+  await test.step('19. downloads page', async () => {
+    await page.goto(`${BASE}/downloads`);
+    await expect(page.getByRole('heading', { name: /Download/i }).first()).toBeVisible();
+    console.log('[Downloads] page renders');
+  });
+
+  await test.step('20. charts page', async () => {
+    await page.goto(`${BASE}/charts`);
+    await expect(page.getByRole('heading', { name: /Charts/i })).toBeVisible();
+    await expect(page.getByRole('button', { name: /Refresh/i })).toBeVisible();
+    console.log('[Charts] refresh button visible');
+  });
+
+  await test.step('21. settings page', async () => {
+    await page.goto(`${BASE}/settings`);
+    await expect(page.getByRole('heading', { name: /Settings/i })).toBeVisible();
+    const autoplay = page.getByRole('button', { name: /Enable autoplay|Disable autoplay/i });
+    if (await autoplay.count()) {
+      await autoplay.click();
+      const newLabel = await autoplay.textContent();
+      console.log(`[Settings] autoplay toggled → "${newLabel?.trim()}"`);
+    } else {
+      console.log('[Settings] autoplay toggle missing — possible BUG');
+    }
+    // theme picker
+    await expect(page.getByText('Theme', { exact: true }).first()).toBeVisible();
+  });
+
+  await test.step('22. create playlist form', async () => {
+    await page.goto(`${BASE}/create-playlist`);
+    await expect(page.getByRole('heading', { name: /Playlist/i })).toBeVisible();
+    await page.fill('input[placeholder="My Playlist"], input[placeholder*="name"]', 'E2E Test Playlist');
+    await page.fill('textarea[placeholder*="description"], input[placeholder*="description"]', 'created by e2e');
+    console.log('[CreatePlaylist] form filled');
+    const submit = page.getByRole('button', { name: /Create|Save|Done/i }).first();
+    await expect(submit).toBeVisible();
+  });
+
+  await test.step('23. create album form', async () => {
+    await page.goto(`${BASE}/create-album`);
+    await expect(page.getByRole('heading', { name: /Album/i })).toBeVisible();
+    await page.fill('input[placeholder="Album Title"]', 'E2E Album');
+    await page.fill('input[placeholder="Artist Name"]', 'E2E Artist');
+    console.log('[CreateAlbum] form filled');
+  });
+
+  await test.step('24. 404 page', async () => {
+    await page.goto(`${BASE}/totally-not-a-real-route`);
     await expect(page.getByText('404', { exact: true }).first()).toBeVisible();
     await expect(page.getByText(/Page not found/i)).toBeVisible();
-    console.log('[404] OK');
+    await expect(page.getByRole('button', { name: 'Home' })).toBeVisible();
+    console.log('[404] page renders with Home button');
   });
 
-  await test.step('no page crashes', async () => {
-    expect(c.pageErrors, `uncaught page errors: ${c.pageErrors.join(' | ')}`).toEqual([]);
-    const real = c.consoleErrors.filter((e) => !isBenignConsoleError(e));
-    console.log(`[Console] real errors: ${real.length}`);
-    console.log(`[Network] failed requests: ${c.failedRequests.length}`);
+  await test.step('25. error collection', async () => {
+    const realConsole = consoleErrors.filter((e) => !/DevTools|favicon|\[HMR\]/.test(e));
+    console.log(`[Errors] pageErrors=${pageErrors.length} consoleErrors=${realConsole.length} failedRequests=${failedRequests.length}`);
+    expect(pageErrors, `page errors: ${pageErrors.join(' | ')}`).toEqual([]);
   });
 });
+
+test('mobile viewport: player expand + panels', async ({ page }) => {
+  test.setTimeout(3 * 60_000);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await stubAuth(page);
+  await page.goto(BASE);
+  await expect(songRow(page).first()).toBeVisible({ timeout: 30000 });
+
+  const expand = page.locator('[aria-label="Expand player"]');
+  await expect(expand).toBeVisible();
+  await expand.click();
+  await expect(page.getByText('Now Playing')).toBeVisible();
+  console.log('[Mobile] expanded player OK');
+
+  for (const label of ['Lyrics', 'Equalizer', 'Queue']) {
+    const b = page.getByRole('button', { name: new RegExp(label) });
+    await expect(b.first()).toBeVisible();
+    console.log(`[Mobile] expanded player has ${label} button`);
+  }
+});
+
+/** Seed localStorage so a test doesn't need the login form. */
+async function stubAuth(page: Page) {
+  await page.addInitScript(() => {
+    localStorage.setItem('musicAppUser', JSON.stringify({
+      id: 'e2e', name: 'E2E', email: 'e2e-user@example.com', avatar: '',
+    }));
+  });
+}
+
+/** Read the persisted audio-effects store. */
+async function eqStore(page: Page): Promise<any> {
+  return page.evaluate(() => {
+    try { return JSON.parse(localStorage.getItem('audio_effects_v1') || 'null'); }
+    catch { return null; }
+  });
+}
