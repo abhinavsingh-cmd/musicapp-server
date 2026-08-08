@@ -3,9 +3,9 @@ import { backgroundPlaybackService } from './backgroundPlaybackService';
 import { audioEffectsService } from './audioEffectsService';
 import { backgroundAudio } from './backgroundAudio';
 import { youtubePlayerService } from './youtubePlayerService';
+import { extractAudioUrl } from './youtubeAudioExtractor';
 import { showToast } from '../utils/toast';
 import { metricsCollector } from './metricsCollector';
-import { api } from '../config/api';
 
 function isNativePlatform(): boolean {
   return !!(window as any).Capacitor;
@@ -278,13 +278,16 @@ export class AudioService {
     this.pendingStartTime = startTime && isFinite(startTime) && startTime > 0 ? startTime : 0;
     log('▶ play() called:', { title: song.title, youtubeId: song.youtubeId || 'NONE', startTime: this.pendingStartTime });
     
-    // Start foreground service immediately when a song is loaded — not after
-    // playback succeeds. This ensures the notification appears instantly and the
-    // service is alive before the audio element starts.
+    // Start foreground service SYNCHRONOUSLY before audio plays — critical for
+    // background survival. The service must be alive and holding audio focus
+    // before the first audio byte reaches the speaker.
     if (isNativePlatform()) {
-      backgroundAudio.startService({ title: song.title, artist: song.artist }).catch((err) => {
-        logError('backgroundAudio.startService failed:', err);
-      });
+      try {
+        await backgroundAudio.startService({ title: song.title, artist: song.artist });
+        log('Foreground service started');
+      } catch (err) {
+        logError('backgroundAudio.startService failed (non-fatal):', err);
+      }
     }
     
     const playbackId = ++this.currentPlaybackId;
@@ -308,10 +311,28 @@ export class AudioService {
     }
     
     if (song.youtubeId && isValidYouTubeId(song.youtubeId)) {
-      log('PATH 2: YouTube IFrame', { youtubeId: song.youtubeId });
-      preconnectYouTube();
-      this.useYoutubePlayer = true;
-      this.playYouTube(song, playbackId, markId);
+      // PATH 1.5: Extract direct audio URL from Invidious → play as HTML audio.
+      // HTML audio survives background playback (YouTube IFrame does not).
+      log('PATH 1.5: Extracting audio URL for background playback:', song.youtubeId);
+      try {
+        const extractedUrl = await extractAudioUrl(song.youtubeId);
+        if (extractedUrl && this.currentPlaybackId === playbackId) {
+          log('✓ Extracted audio URL — playing as HTML audio (background-safe)');
+          this.useYoutubePlayer = false;
+          this.playHtmlAudio({ ...song, audioUrl: extractedUrl }, playbackId, markId);
+          return;
+        }
+      } catch (err) {
+        logError('Audio extraction failed, falling back to YouTube IFrame:', err);
+      }
+
+      // PATH 2: YouTube IFrame (foreground only — stops in background)
+      if (this.currentPlaybackId === playbackId) {
+        log('PATH 2: YouTube IFrame (fallback — will NOT play in background)');
+        preconnectYouTube();
+        this.useYoutubePlayer = true;
+        this.playYouTube(song, playbackId, markId);
+      }
       return;
     }
     
@@ -601,43 +622,23 @@ export class AudioService {
         }
 
         clearBufferingTimeout();
-        // Fallback: try server stream via HTML audio when YouTube IFrame fails
-        log('YouTube IFrame failed — attempting server stream fallback...');
+        // Fallback: try Invidious audio extraction when YouTube IFrame fails
+        log('YouTube IFrame failed — attempting Invidious audio extraction fallback...');
         try {
-          const streamUrl = await this.fetchServerStreamUrl(song.youtubeId!);
-          if (streamUrl && this.currentPlaybackId === playbackId) {
-            log('Server stream URL obtained, playing via HTML audio:', streamUrl.substring(0, 80));
+          const extractedUrl = await extractAudioUrl(song.youtubeId!);
+          if (extractedUrl && this.currentPlaybackId === playbackId) {
+            log('Invidious fallback succeeded — playing as HTML audio:', extractedUrl.substring(0, 80));
             this.useYoutubePlayer = false;
-            this.playHtmlAudio({ ...song, audioUrl: streamUrl }, playbackId, markId);
+            this.playHtmlAudio({ ...song, audioUrl: extractedUrl }, playbackId, markId);
             return;
           }
         } catch (fallbackErr) {
-          logError('Server stream fallback also failed:', fallbackErr);
+          logError('Invidious fallback also failed:', fallbackErr);
         }
         this.emitPlaybackError(song, `Cannot play "${song.title}": ${msg}`);
       }
     }
     clearBufferingTimeout();
-  }
-
-  /**
-   * Fetch stream URL from the server's audio-info endpoint.
-   * Used as a fallback when YouTube IFrame player fails.
-   */
-  private async fetchServerStreamUrl(youtubeId: string): Promise<string | null> {
-    try {
-      const response = await fetch(api(`/api/audio-info/${youtubeId}`));
-      if (!response.ok) return null;
-      const data = await response.json();
-      if (!data.success || !data.details?.formats?.length) return null;
-      // Pick the best quality format with a URL
-      const best = data.details.formats
-        .filter((f: any) => f.url)
-        .sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0))[0];
-      return best?.url || null;
-    } catch {
-      return null;
-    }
   }
 
   private stopCurrentPlayback(): void {
