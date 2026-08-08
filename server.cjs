@@ -58,6 +58,7 @@ const ALLOWED_ORIGINS = [
   'https://musicapp-server-alkf.onrender.com',
   'http://localhost:3000',
   'http://localhost:5173',
+  'https://localhost',
 ];
 app.use(cors({
   origin: (origin, callback) => {
