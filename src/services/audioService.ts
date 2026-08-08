@@ -3,7 +3,7 @@ import { backgroundPlaybackService } from './backgroundPlaybackService';
 import { audioEffectsService } from './audioEffectsService';
 import { backgroundAudio } from './backgroundAudio';
 import { youtubePlayerService } from './youtubePlayerService';
-import { extractAudioUrl } from './youtubeAudioExtractor';
+import { extractAudioUrl, invalidateAudioUrl } from './youtubeAudioExtractor';
 import { showToast } from '../utils/toast';
 import { metricsCollector } from './metricsCollector';
 
@@ -450,6 +450,10 @@ export class AudioService {
         logError(`⏱ canplay timeout on attempt ${attempt}/${MAX_RETRIES}`);
         if (attempt < MAX_RETRIES) {
           log('Retrying...');
+          // The stream URL is likely stale/expired (403/416 upstream) — force a
+          // fresh extraction so the next attempt doesn't reuse the bad URL.
+          const freshUrl = await this.reExtractFreshUrl(song);
+          if (freshUrl) song.audioUrl = freshUrl;
           continue;
         }
         this.emitPlaybackError(song, `Unable to play "${song.title}" — loading timed out`);
@@ -501,6 +505,8 @@ export class AudioService {
 
         if (attempt < MAX_RETRIES) {
           log('Retrying...');
+          const freshUrl = await this.reExtractFreshUrl(song);
+          if (freshUrl) song.audioUrl = freshUrl;
           continue;
         }
 
@@ -512,6 +518,17 @@ export class AudioService {
     if (this.currentPlaybackId === playbackId) {
       this.emitPlaybackError(song, `Unable to play "${song.title}"`);
     }
+  }
+
+  /**
+   * Force a fresh stream URL for a failed play attempt. The cached proxy URL may
+   * reference an expired/nerfed Googlevideo URL (403/416) — invalidating the
+   * extractor cache makes the next extractAudioUrl() call fetch a new one.
+   */
+  private async reExtractFreshUrl(song: Song): Promise<string | null> {
+    if (!song.youtubeId || !song.audioUrl?.includes('/proxy-audio')) return null;
+    invalidateAudioUrl(song.youtubeId);
+    return await extractAudioUrl(song.youtubeId).catch(() => null);
   }
 
   private async playYouTube(song: Song, playbackId: number, markId: string): Promise<void> {

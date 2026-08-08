@@ -205,3 +205,14 @@ export function clearAudioUrlCache(): void {
   urlCache.clear();
   failedIds.clear();
 }
+
+/**
+ * Invalidate a single video's cached URL (e.g. after a proven playback failure).
+ * Forces the next extractAudioUrl call to re-fetch a fresh stream URL.
+ */
+export function invalidateAudioUrl(youtubeId: string): void {
+  if (urlCache.delete(youtubeId)) {
+    log('Invalidated cached URL for:', youtubeId);
+  }
+  failedIds.delete(youtubeId);
+}

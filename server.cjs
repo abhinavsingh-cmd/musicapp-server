@@ -1020,6 +1020,8 @@ async function fetchLiveTrending() {
         }
       }
     }
+    // If we already have enough results, don't waste time on remaining batches
+    if (allResults.length >= 15) break;
   }
 
   if (allResults.length > 0) {
@@ -1073,20 +1075,27 @@ function getBuiltInFallback() {
 
 async function doFetchTrending() {
   const startMs = Date.now();
+  const OVERALL_TIMEOUT_MS = 45_000;
   console.log("[Trending] Starting live fetch...");
+
+  const withTimeout = (promise, ms) => Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms)),
+  ]);
 
   try {
     console.log("[Trending] Step 1: Fetching live YouTube Music trending...");
-    const liveResults = await fetchLiveTrending();
+    const liveResults = await withTimeout(fetchLiveTrending(), OVERALL_TIMEOUT_MS);
     console.log("[Trending] Step 1 got", liveResults.length, "results");
-    if (liveResults.length >= 10) {
+    if (liveResults.length >= 5) {
       const elapsed = Date.now() - startMs;
       console.log("[Trending] LIVE SUCCESS: Got", liveResults.length, "results in", elapsed, "ms");
       return { results: liveResults, source: 'youtube_music' };
     }
 
     console.log("[Trending] Step 2: Fetching official charts...");
-    const chartResults = await fetchOfficialCharts();
+    const remaining = Math.max(1, OVERALL_TIMEOUT_MS - (Date.now() - startMs));
+    const chartResults = await withTimeout(fetchOfficialCharts(), remaining);
     console.log("[Trending] Step 2 got", chartResults.length, "chart results");
     const merged = [...liveResults, ...chartResults];
     const deduped = [];
@@ -1138,9 +1147,12 @@ async function ensureTrending(res) {
     lastTrendingAttempt = now;
     pendingTrendingFetch = doFetchTrending()
       .then(result => {
-        trendingCache = result.results.slice(0, 40);
-        trendingCacheTime = Date.now();
-        trendingSource = result.source;
+        // Only cache live/chart results — NEVER cache builtin fallback
+        if (result.source !== 'builtin') {
+          trendingCache = result.results.slice(0, 40);
+          trendingCacheTime = Date.now();
+          trendingSource = result.source;
+        }
         return result;
       })
       .finally(() => { pendingTrendingFetch = null; });
@@ -1180,11 +1192,13 @@ app.get("/api/charts/trending.json", async (req, res) => {
     return ok(res, { results: data.results, source: data.source, lastUpdated: data.lastUpdated }, `Trending from ${data.source}`);
   } catch (err) {
     console.error("[Charts] Endpoint error:", err.message);
-    const fallback = getBuiltInFallback();
-    trendingCache = fallback;
-    trendingCacheTime = Date.now();
-    trendingSource = 'builtin';
-    return ok(res, { results: fallback, source: 'builtin', lastUpdated: trendingCacheTime }, "Builtin trending fallback");
+    // Do NOT write fallback to trendingCache — that poisons it for 30 minutes.
+    // Return whatever cache we have, or builtin without caching it.
+    const fallback = trendingCache && trendingCache.length > 0
+      ? trendingCache
+      : getBuiltInFallback();
+    const src = trendingCache && trendingCache.length > 0 ? trendingSource : 'builtin';
+    return ok(res, { results: fallback, source: src, lastUpdated: trendingCacheTime || Date.now() }, `Trending fallback (${src})`);
   }
 });
 
@@ -1462,6 +1476,38 @@ app.get("/api/download/:videoId", (req, res) => {
   attemptDownload();
 });
 
+// Maps googlevideo stream URLs back to their video IDs so the audio proxy can
+// refresh stale/expired URLs (403/416) with a fresh yt-dlp lookup when needed.
+const audioUrlVideoMap = new Map();
+// videoId -> { url, at } — recently refreshed URLs, so retry storms reuse them
+const freshAudioUrlCache = new Map();
+const FRESH_URL_TTL_MS = 10 * 60 * 1000;
+
+// Run yt-dlp once more to fetch a fresh direct audio URL for a video.
+// Returns null on failure; caches successful results briefly.
+function getFreshAudioUrl(videoId) {
+  return new Promise((resolve) => {
+    const cached = freshAudioUrlCache.get(videoId);
+    if (cached && Date.now() - cached.at < FRESH_URL_TTL_MS) {
+      return resolve(cached.url);
+    }
+    execFile("yt-dlp", [
+      "-f", "bestaudio[ext=m4a]/bestaudio",
+      "--get-url",
+      "--no-warnings",
+      "--no-check-certificates",
+      "--age-limit", "18",
+      "https://www.youtube.com/watch?v=" + videoId
+    ], { timeout: 15000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+      if (err) return resolve(null);
+      const url = String(stdout || "").trim();
+      if (!url || !url.startsWith("http")) return resolve(null);
+      freshAudioUrlCache.set(videoId, { url, at: Date.now() });
+      resolve(url);
+    });
+  });
+}
+
 // Get audio info (for preloading stream URL)
 app.get("/api/audio-info/:videoId", (req, res) => {
   const videoId = req.params.videoId;
@@ -1491,17 +1537,21 @@ app.get("/api/audio-info/:videoId", (req, res) => {
       }
       try {
         const info = JSON.parse(stdout);
+        const formats = (info.formats || []).filter(f => f.acodec !== "none").map(f => ({
+          url: f.url || '',
+          quality: f.format_note || '',
+          ext: f.ext || '',
+          bitrate: f.abr || 0,
+        }));
+        for (const f of formats) {
+          if (f.url) audioUrlVideoMap.set(f.url, videoId);
+        }
         return ok(res, {
           title: String(info.title || 'Unknown'),
           artist: String(info.uploader || info.channel || 'Unknown'),
           duration: Number(info.duration) || 0,
           thumbnail: String(info.thumbnail || ''),
-          formats: (info.formats || []).filter(f => f.acodec !== "none").map(f => ({
-            url: f.url || '',
-            quality: f.format_note || '',
-            ext: f.ext || '',
-            bitrate: f.abr || 0,
-          })),
+          formats,
         }, "Audio info retrieved");
       } catch (e) {
         console.error("[AudioInfo] Parse error for:", videoId);
@@ -1517,69 +1567,112 @@ app.get("/api/audio-info/:videoId", (req, res) => {
 // Proxies audio streams from Google CDN. The audio-info endpoint returns URLs
 // that are IP-locked to the Render server — the client can't fetch them directly.
 // This endpoint fetches the URL server-side and pipes it to the client.
+//
+// Failure recovery:
+//   403/416 from Google usually means the stream URL expired or was rejected.
+//   We refresh it via yt-dlp (reusing `freshAudioUrlCache` for retry storms)
+//   and retry once. If a 416 persists, we retry without a Range header since
+//   Googlevideo rejects ranges it can't satisfy.
 app.get("/api/proxy-audio", (req, res) => {
   const audioUrl = req.query.url;
   if (!audioUrl || !audioUrl.startsWith("https://")) {
     return fail(res, 400, "INVALID_URL", "Missing or invalid url parameter");
   }
 
-  console.log("[ProxyAudio] Proxying:", audioUrl.substring(0, 100));
+  const clientRange = req.headers.range;
+  const videoId = audioUrlVideoMap.get(audioUrl) || req.query.videoId || null;
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30000);
+  console.log("[ProxyAudio] Proxying:", audioUrl.substring(0, 100), videoId ? `(videoId: ${videoId})` : "");
 
-  req.on("close", () => {
-    clearTimeout(timeout);
-    controller.abort();
-  });
+  const pipeToClient = async (url, options = {}) => {
+    const { refreshed = false, includeRange = true } = options;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000);
 
-  fetch(audioUrl, {
-    signal: controller.signal,
-    headers: {
+    const cleanup = () => {
+      clearTimeout(timeout);
+      controller.abort();
+    };
+    req.once("close", cleanup);
+
+    const headers = {
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-      "Range": req.headers.range || "",
       "Origin": "https://www.youtube.com",
       "Referer": "https://www.youtube.com/",
-    },
-  }).then(async (upstream) => {
-    clearTimeout(timeout);
+    };
+    if (includeRange) headers["Range"] = clientRange || "bytes=0-";
 
-    if (!upstream.ok) {
-      console.error("[ProxyAudio] Upstream error:", upstream.status);
-      return fail(res, upstream.status, "UPSTREAM_ERROR", "Upstream returned error");
-    }
-
-    // Forward relevant headers
-    const contentType = upstream.headers.get("content-type") || "audio/mpeg";
-    const contentLength = upstream.headers.get("content-length");
-    const contentRange = upstream.headers.get("content-range");
-    const acceptRanges = upstream.headers.get("accept-ranges");
-
-    res.setHeader("Content-Type", contentType);
-    res.setHeader("Cache-Control", "no-cache");
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    if (contentLength) res.setHeader("Content-Length", contentLength);
-    if (contentRange) res.setHeader("Content-Range", contentRange);
-    if (acceptRanges) res.setHeader("Accept-Ranges", acceptRanges);
-    if (upstream.status === 206) res.status(206);
-
-    const reader = upstream.body.getReader();
     try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        res.write(value);
+      const upstream = await fetch(url, { signal: controller.signal, headers });
+
+      if (!upstream.ok) {
+        // Drain/cancel the failed body so the socket can be reused
+        try { await upstream.body?.cancel(); } catch {}
+
+        if (upstream.status === 403 || upstream.status === 416 || upstream.status === 502) {
+          if (!refreshed && videoId) {
+            const fresh = await getFreshAudioUrl(videoId);
+            if (fresh && fresh !== url) {
+              console.log("[ProxyAudio] Refreshing stale URL for", videoId, "after HTTP", upstream.status);
+              return pipeToClient(fresh, { refreshed: true, includeRange });
+            }
+          }
+          if (upstream.status === 416 && includeRange) {
+            console.log("[ProxyAudio] Retrying", videoId || "stream", "without Range after 416");
+            return pipeToClient(url, { refreshed, includeRange: false });
+          }
+        }
+
+        console.error("[ProxyAudio] Upstream error:", upstream.status);
+        req.removeListener("close", cleanup);
+        return fail(res, upstream.status, "UPSTREAM_ERROR", "Upstream returned error");
       }
-    } catch (e) {
-      // Client disconnected
-    } finally {
-      res.end();
+
+      req.removeListener("close", cleanup);
+
+      // Forward relevant headers
+      const contentType = upstream.headers.get("content-type") || "audio/mpeg";
+      const contentLength = upstream.headers.get("content-length");
+      const contentRange = upstream.headers.get("content-range");
+      const acceptRanges = upstream.headers.get("accept-ranges");
+
+      res.setHeader("Content-Type", contentType);
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      if (contentLength) res.setHeader("Content-Length", contentLength);
+      if (contentRange) res.setHeader("Content-Range", contentRange);
+      if (acceptRanges) res.setHeader("Accept-Ranges", acceptRanges);
+      if (upstream.status === 206) res.status(206);
+
+      const reader = upstream.body.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (res.destroyed) break;
+          if (!res.write(value)) {
+            await new Promise(resolve => res.once("drain", resolve));
+          }
+        }
+      } catch (e) {
+        // Client disconnected mid-stream
+      } finally {
+        clearTimeout(timeout);
+        res.end();
+      }
+    } catch (err) {
+      clearTimeout(timeout);
+      console.error("[ProxyAudio] Fetch failed:", err.message);
+      if (!res.headersSent) {
+        fail(res, 502, "PROXY_FAILED", "Failed to fetch audio from upstream");
+      }
     }
-  }).catch((err) => {
-    clearTimeout(timeout);
-    console.error("[ProxyAudio] Fetch failed:", err.message);
+  };
+
+  pipeToClient(audioUrl).catch((err) => {
+    console.error("[ProxyAudio] Proxy pipeline error:", err.message);
     if (!res.headersSent) {
-      fail(res, 502, "PROXY_FAILED", "Failed to fetch audio from upstream");
+      fail(res, 502, "PROXY_FAILED", "Failed to proxy audio stream");
     }
   });
 });
