@@ -40,14 +40,23 @@ function logError(...args: any[]) {
 
 function logPerf(label: string, startMark: string) {
   if (import.meta.env.DEV) {
-    const endMark = `${startMark}_end`;
-    performance.mark(endMark);
-    performance.measure(label, startMark, endMark);
-    const m = performance.getEntriesByName(label).pop();
-    if (m) console.log(`[Perf] ${label}: ${m.duration.toFixed(0)}ms`);
-    performance.clearMarks(startMark);
-    performance.clearMarks(endMark);
-    performance.clearMeasures(label);
+    // Never let performance instrumentation break playback: the start mark may
+    // have been consumed/cleared by an earlier logPerf call (e.g. the parallel
+    // YouTube path uses the same markId), which makes measure() throw.
+    try {
+      const endMark = `${startMark}_end`;
+      performance.mark(endMark);
+      if (performance.getEntriesByName(startMark).length > 0) {
+        performance.measure(label, startMark, endMark);
+        const m = performance.getEntriesByName(label).pop();
+        if (m) console.log(`[Perf] ${label}: ${m.duration.toFixed(0)}ms`);
+      }
+      performance.clearMarks(startMark);
+      performance.clearMarks(endMark);
+      performance.clearMeasures(label);
+    } catch {
+      // ignore — perf logging is best-effort
+    }
   }
 }
 
@@ -100,6 +109,7 @@ export class AudioService {
   private streamStartTime = 0;
   private waitingStartTime = 0;
   private pendingStartTime = 0;
+  private reEntryLock = false;
 
   private async getHtmlAudio(): Promise<HTMLAudioElement> {
     if (!this.htmlAudio) {
@@ -272,78 +282,81 @@ export class AudioService {
       logError('play() called with null/undefined song');
       return;
     }
+    // Re-entry guard: prevent concurrent play() for the same song. This breaks
+    // the infinite loop: foreground service → notifyMediaAction("play") →
+    // audioStore.play() → audioService.play() → startService → service → play…
+    if (this.reEntryLock && this.state.currentSong?.id === song.id && (this.state.isPlaying || this.state.isLoading)) {
+      log('play() re-entry blocked — song already playing/loading:', song.title);
+      return;
+    }
+    this.reEntryLock = true;
+    try {
+      await this._playInternal(song, playlist, startIndex, startTime);
+    } finally {
+      this.reEntryLock = false;
+    }
+  }
+
+  private async _playInternal(song: Song, playlist: Song[], startIndex: number, startTime?: number): Promise<void> {
     const markId = `play_${song.id}_${Date.now()}`;
-    performance.mark(markId);
     this.streamStartTime = performance.now();
     this.pendingStartTime = startTime && isFinite(startTime) && startTime > 0 ? startTime : 0;
     log('▶ play() called:', { title: song.title, youtubeId: song.youtubeId || 'NONE', startTime: this.pendingStartTime });
-    
-    // Start foreground service SYNCHRONOUSLY before audio plays — critical for
-    // background survival. The service must be alive and holding audio focus
-    // before the first audio byte reaches the speaker.
+
+    // Start foreground service — fire-and-forget. Do NOT await: if the service
+    // start is slow/blocked, we don't want it to delay or crash playback. The
+    // service will come up in the background and take over when ready.
     if (isNativePlatform()) {
-      try {
-        await backgroundAudio.startService({ title: song.title, artist: song.artist });
-        log('Foreground service started');
-      } catch (err) {
-        logError('backgroundAudio.startService failed (non-fatal):', err);
-      }
+      backgroundAudio.startService({ title: song.title, artist: song.artist })
+        .then(() => log('Foreground service started'))
+        .catch(() => {});
     }
-    
+
     const playbackId = ++this.currentPlaybackId;
     this.stopCurrentPlayback();
-    
-    this.setState({ 
-      currentSong: song, 
-      isLoading: true, 
-      error: null, 
-      duration: song.duration, 
+
+    this.setState({
+      currentSong: song,
+      isLoading: true,
+      error: null,
+      duration: song.duration,
       currentTime: 0,
-      isPlaying: false 
+      isPlaying: false
     });
     this.emit('loaded', { song, playlist, index: startIndex });
-    
+
     if (song.audioUrl && song.audioUrl.trim()) {
       log('PATH 1: HTML audio via audioUrl');
       this.useYoutubePlayer = false;
       await this.playHtmlAudio(song, playbackId, markId);
       return;
     }
-    
+
     if (song.youtubeId && isValidYouTubeId(song.youtubeId)) {
-      // Try to extract a direct audio URL for background-safe playback.
-      // Run extraction and YouTube IFrame in PARALLEL — whichever succeeds first wins.
-      // This gives instant playback (YouTube IFrame) + background support (HTML audio).
-      log('Attempting extraction + YouTube IFrame in parallel for:', song.youtubeId);
-
-      // Extraction attempt (runs in background)
-      const extractionPromise = extractAudioUrl(song.youtubeId).catch(() => null);
-
-      // Start YouTube IFrame immediately (fastest path — plays in ~2s)
-      preconnectYouTube();
-      this.useYoutubePlayer = true;
-      this.playYouTube(song, playbackId, markId).catch(() => {});
-
-      // Wait for extraction (short timeout — don't block too long)
-      const extractionResult = await Promise.race([
-        extractionPromise,
-        new Promise<null>(r => setTimeout(() => r(null), 5_000)),
-      ]);
-
-      if (extractionResult && this.currentPlaybackId === playbackId) {
-        // Extraction succeeded — switch to HTML audio for background playback
-        log('✓ Extraction succeeded during YouTube IFrame load — switching to HTML audio');
-        this.stopYouTubePlayer();
-        this.useYoutubePlayer = false;
-        this.playHtmlAudio({ ...song, audioUrl: extractionResult }, playbackId, markId).catch(() => {});
-        return;
+      // Step 1: Try extracting a direct audio URL (server yt-dlp → proxy).
+      // This is the preferred path — works in background and foreground.
+      log('Extracting audio URL for:', song.youtubeId);
+      try {
+        const extractionResult = await extractAudioUrl(song.youtubeId);
+        if (extractionResult && this.currentPlaybackId === playbackId) {
+          log('✓ Extraction succeeded — playing as HTML audio');
+          this.useYoutubePlayer = false;
+          await this.playHtmlAudio({ ...song, audioUrl: extractionResult }, playbackId, markId);
+          return;
+        }
+      } catch (err) {
+        logError('Extraction failed:', err);
       }
 
-      // YouTube IFrame is already playing (or will play) — that's our primary path
-      log('Extraction did not beat YouTube IFrame — using IFrame playback');
+      // Step 2: Extraction failed — fall back to YouTube IFrame (foreground only).
+      if (this.currentPlaybackId !== playbackId) return;
+      log('Extraction failed — falling back to YouTube IFrame');
+      preconnectYouTube();
+      this.useYoutubePlayer = true;
+      await this.playYouTube(song, playbackId, markId);
       return;
     }
-    
+
     logError('NO AUDIO SOURCE for:', song.title);
     this.setState({ error: 'No audio source available', isLoading: false });
     this.emit('error', 'No audio source available');

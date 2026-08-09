@@ -56,13 +56,15 @@ export interface AudioStore {
   toggleFavorite: (songId: string) => void;
   restoreFromPersistence: () => void;
 }
-
 function loadFavorites(): string[] {
   try {
-    return JSON.parse(localStorage.getItem('favorites') || '[]');
-  } catch { return []; }
+    return (JSON.parse(localStorage.getItem('favorites') || '[]') as string[])
+      .filter(Boolean)
+      .map(id => id.startsWith('t-') ? id.slice(2) : id);
+  } catch {
+    return [];
+  }
 }
-
 function saveFavorites(favs: string[]) {
   localStorage.setItem('favorites', JSON.stringify(favs));
 }
@@ -363,6 +365,9 @@ if (!(globalThis as any).__audioStoreInitialized) {
             serviceRequestedPlay = true;
             return;
           }
+          // Guard: do not re-trigger play if already playing/loading — prevents
+          // infinite loop with foreground service notifyMediaAction.
+          if (store.isPlaying || store.isLoading) return;
           store.play();
           break;
         case 'pause':
@@ -700,7 +705,7 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
         repeatMode: saved.repeatMode || 'off',
         isShuffled: !!saved.isShuffled,
         originalQueue: saved.originalQueue || [],
-        autoplayEnabled: true,
+        autoplayEnabled: useQueueStore.getState().autoplayEnabled,
       });
     }
 

@@ -295,10 +295,11 @@ import java.net.URL;
         Notification notification = buildNotification(title, artist, album);
         startForeground(NOTIFICATION_ID, notification);
 
-        // Notify JS that the service started so it can resume if needed.
-        if (BackgroundAudioPlugin.getInstance() != null) {
-            BackgroundAudioPlugin.notifyMediaAction("play", -1);
-        }
+        // Do NOT notify JS "play" here — this path is for JS-initiated service
+        // starts. Sending "play" back would re-trigger audioService.play() →
+        // startService() in an infinite loop, causing ANR/OOM crashes.
+        // JS-initiated: JS already owns playback.
+        // OS-initiated restarts (null intent): already handled above.
 
         return START_STICKY;
     }
