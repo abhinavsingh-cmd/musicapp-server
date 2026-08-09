@@ -93,9 +93,9 @@ export class AudioEffectsService {
     return this.filters;
   }
 
-  async init(_audioElement: HTMLAudioElement): Promise<void> {
-    return; // TEMP DISABLED: AudioContext crashes OPPO/VIVO WebView
+  async init(audioElement: HTMLAudioElement): Promise<void> {
     if (!this._supported) return;
+    try {
     // Already attached to this exact element and running — just resume.
     if (
       this.context &&
@@ -114,9 +114,6 @@ export class AudioEffectsService {
       try {
         this.sourceNode = this.context.createMediaElementSource(audioElement);
       } catch (err) {
-        // createMediaElementSource fails if the element was already connected
-        // to another source node (e.g. after AudioContext loss/recreation).
-        // Reset everything so next init() creates a fresh context + source.
         console.warn('[AudioEffects] createMediaElementSource failed, resetting AudioContext:', err);
         try { this.context.close(); } catch {}
         this.context = null;
@@ -147,18 +144,21 @@ export class AudioEffectsService {
         await this.context.resume();
       } catch (err) {
         this.setupAutoResume();
-        throw err;
       }
     }
 
     this.applyAll();
+    } catch {
+      // Equalizer init failed — continue without it
+    }
   }
 
   async resume(): Promise<void> {
-    return; // TEMP DISABLED
-    if (this.context && this.context.state === 'suspended' && this.sourceNode) {
-      await this.context.resume();
-    }
+    try {
+      if (this.context && this.context.state === 'suspended' && this.sourceNode) {
+        await this.context.resume();
+      }
+    } catch {}
   }
 
   private buildChain(): void {
