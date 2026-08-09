@@ -4,6 +4,7 @@ import { useAudioStore } from '../stores/audioStore';
 import { useQueueStore } from '../stores/queueStore';
 import { useDownloadsStore } from '../stores/downloadsStore';
 import { usePlaylistStore } from '../stores/playlistStore';
+import { favoriteKey } from '../utils/songIds';
 import {
   X, Heart, Download, Share2, ListPlus, SkipForward,
   Clock, User, Disc3, Check
@@ -57,7 +58,7 @@ export default function SongContextMenu({ song, position, onClose, onArtistClick
 
   if (!song || !position) return null;
 
-  const isFav = favorites.includes(song.id);
+  const isFav = favorites.includes(favoriteKey(song));
   const downloaded = isDownloaded(song.youtubeId || song.id);
   const downloading = isDownloading(song.youtubeId || song.id);
 
@@ -65,7 +66,7 @@ export default function SongContextMenu({ song, position, onClose, onArtistClick
     {
       icon: isFav ? <Heart size={16} fill="currentColor" className="text-red-400" /> : <Heart size={16} />,
       label: isFav ? 'Unlike' : 'Like',
-      onClick: () => handleAction(() => toggleFavorite(song.id)),
+      onClick: () => handleAction(() => toggleFavorite(favoriteKey(song))),
       className: isFav ? 'text-red-400' : '',
     },
     {

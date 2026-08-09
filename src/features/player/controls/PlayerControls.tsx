@@ -5,6 +5,7 @@ import { useDownloadsStore } from '../../../stores/downloadsStore';
 import { useShallow } from 'zustand/react/shallow';
 import { cn } from '../../../utils/cn';
 import { Play, Pause, SkipBack, SkipForward, Volume2, VolumeX, Volume1, Shuffle, Repeat, Repeat1, Heart, Download, Check, X } from 'lucide-react';
+import { favoriteKey } from '../../../utils/songIds';
 
 interface PlayerControlsProps { className?: string; }
 
@@ -55,7 +56,7 @@ export const PlayerControls: React.FC<PlayerControlsProps> = React.memo(({ class
     fn();
   };
 
-  const isFav = currentSong ? favorites.includes(currentSong.id) : false;
+  const isFav = currentSong ? favorites.includes(favoriteKey(currentSong)) : false;
   const RepeatIcon = repeatMode === 'one' ? Repeat1 : Repeat;
   const downloaded = currentSong ? isDownloaded(currentSong.youtubeId || currentSong.id) : false;
   const downloading = currentSong ? isDownloading(currentSong.youtubeId || currentSong.id) : false;
@@ -132,7 +133,7 @@ export const PlayerControls: React.FC<PlayerControlsProps> = React.memo(({ class
 
       <div className="flex items-center space-x-1 sm:space-x-2">
         <button
-          onClick={() => currentSong && toggleFavorite(currentSong.id)}
+          onClick={() => currentSong && toggleFavorite(favoriteKey(currentSong))}
           className={cn(
             "w-9 h-9 rounded-full flex items-center justify-center transition-all duration-200 active:scale-90",
             isFav

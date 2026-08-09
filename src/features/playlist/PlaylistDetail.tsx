@@ -6,6 +6,7 @@ import { useDownloadsStore } from '../../stores/downloadsStore';
 import { useSongsStore } from '../../stores/songsStore';
 import { Playlist, Song } from '../../types/music';
 import { cn } from '../../utils/cn';
+import { favoriteKey } from '../../utils/songIds';
 import {
   DndContext,
   closestCenter,
@@ -124,13 +125,13 @@ const SortablePlaylistSongRow: React.FC<SortablePlaylistSongRowProps> = React.me
       {/* Actions */}
       <div className="flex items-center gap-1 flex-shrink-0">
         <button
-          onClick={(e) => { e.stopPropagation(); toggleFavorite(song.id); }}
+          onClick={(e) => { e.stopPropagation(); toggleFavorite(favoriteKey(song)); }}
           className={cn(
             "p-1.5 rounded-lg transition-all",
-            favorites.includes(song.id) ? "text-red-500" : "text-gray-500 opacity-0 group-hover:opacity-100 hover:text-red-400"
+            favorites.includes(favoriteKey(song)) ? "text-red-500" : "text-gray-500 opacity-0 group-hover:opacity-100 hover:text-red-400"
           )}
         >
-          <Heart size={14} fill={favorites.includes(song.id) ? "currentColor" : "none"} />
+          <Heart size={14} fill={favorites.includes(favoriteKey(song)) ? "currentColor" : "none"} />
         </button>
         <button
           onClick={(e) => { e.stopPropagation(); const key = song.youtubeId || song.id; if (isDownloadingFn(key)) return; if (!isDownloadedFn(key)) downloadSong(song); }}

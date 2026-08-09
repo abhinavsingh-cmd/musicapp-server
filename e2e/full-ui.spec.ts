@@ -10,6 +10,20 @@ const BASE = 'http://localhost:3000';
 
 const player = (page: Page) => page.locator('.fixed.bottom-0');
 
+// Wait until the player shows the given icon (play/pause). Tolerates the
+// auto-advance loading state (~15s of spinner when a track ends/changes).
+async function waitForPlayerIcon(page: Page, name: 'play' | 'pause', timeout = 60_000) {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    const n = await player(page).locator(`svg.lucide-${name}`).count();
+    if (n > 0) return;
+    if (Date.now() > deadline) {
+      throw new Error(`player icon '${name}' never appeared in ${timeout}ms`);
+    }
+    await page.waitForTimeout(400);
+  }
+}
+
 const songRow = (page: Page) => page.locator('.grid.grid-cols-12.group');
 
 async function login(page: Page) {
@@ -69,7 +83,8 @@ test('full user journey (desktop)', async ({ page }) => {
     await expect(bar).toBeVisible();
     const box = await bar.boundingBox();
     if (box) {
-      await page.mouse.click(box.x + box.width * 0.5, box.y + box.height / 2);
+      // Seek shallow (5%) so the track doesn't end mid-test
+      await page.mouse.click(box.x + box.width * 0.05, box.y + box.height / 2);
       await page.waitForTimeout(800);
     }
     const time = await player(page).locator('.font-mono').first().textContent();
@@ -78,32 +93,54 @@ test('full user journey (desktop)', async ({ page }) => {
   });
 
   await test.step('4. play / pause toggle', async () => {
-    const playBtn = player(page).locator('button:has(svg.lucide-play)');
-    const pauseBtn = player(page).locator('button:has(svg.lucide-pause)');
-    const wasPlaying = (await pauseBtn.count()) > 0;
-    if (!wasPlaying) {
-      await playBtn.first().click();
-      await expect(pauseBtn.first()).toBeVisible({ timeout: 20000 });
-      console.log('[Controls] play → playing');
-    } else {
-      console.log('[Controls] already playing');
+    const p = player(page);
+    // Normalize to a loaded-paused state first (auto-advance may be mid-load)
+    if ((await p.locator('svg.lucide-pause').count()) > 0) {
+      await p.locator('button:has(svg.lucide-pause)').click();
     }
-    await pauseBtn.first().click();
-    await expect(playBtn.first()).toBeVisible({ timeout: 10000 });
-    await playBtn.first().click();
-    await expect(pauseBtn.first()).toBeVisible({ timeout: 10000 });
+    await waitForPlayerIcon(page, 'play');
+    console.log('[Controls] normalized to paused');
+
+    await p.locator('button:has(svg.lucide-play)').click();
+    await waitForPlayerIcon(page, 'pause');
+    console.log('[Controls] play → playing');
+    await p.locator('button:has(svg.lucide-pause)').click();
+    await waitForPlayerIcon(page, 'play');
+    await p.locator('button:has(svg.lucide-play)').click();
+    await waitForPlayerIcon(page, 'pause');
     console.log('[Controls] pause → play OK');
   });
 
   await test.step('5. next / previous', async () => {
+    const queueState = () =>
+      page.evaluate(() => {
+        try { return JSON.parse(localStorage.getItem('playback-queue') || 'null'); }
+        catch { return null; }
+      });
+    const q0 = await queueState();
     const before = await player(page).locator('p').first().textContent();
+
     await player(page).locator('button:has(svg.lucide-skip-forward)').click();
-    await page.waitForTimeout(3000);
-    const after = await player(page).locator('p').first().textContent();
-    console.log(`[Next]: "${before?.trim()}" → "${after?.trim()}"`);
-    expect(after).not.toBe(before);
+    let after = before;
+    let spinHistory: number[] = [];
+    for (let i = 0; i < 18 && after === before; i++) {
+      await page.waitForTimeout(800);
+      spinHistory.push(await player(page).locator('svg.animate-spin').count());
+      after = await player(page).locator('p').first().textContent();
+    }
+    const q1 = await queueState();
+    console.log(`[Next] "${before?.trim()}" → "${after?.trim()}" (queue ${q0?.queue?.length}→${q1?.queue?.length} idx ${q0?.currentIndex}→${q1?.currentIndex}, spinners ${spinHistory.slice(0, 6)})`);
+    expect(after, `skip-forward should change track (queue idx ${q0?.currentIndex} → ${q1?.currentIndex})`).not.toBe(before);
+
+    const beforeP = await player(page).locator('p').first().textContent();
     await player(page).locator('button:has(svg.lucide-skip-back)').click();
-    await page.waitForTimeout(3000);
+    let afterP = beforeP;
+    for (let i = 0; i < 18 && afterP === beforeP; i++) {
+      await page.waitForTimeout(800);
+      afterP = await player(page).locator('p').first().textContent();
+    }
+    console.log(`[Prev]: "${beforeP?.trim()}" → "${afterP?.trim()}"`);
+    expect(afterP).not.toBe(beforeP);
   });
 
   await test.step('6. shuffle + repeat cycle', async () => {
@@ -188,8 +225,9 @@ test('full user journey (desktop)', async ({ page }) => {
     }
     console.log('[EQ] all 10 presets rendered');
 
-    // 10 band sliders + 3 extra sliders
-    const ranges = player(page).locator('input[type="range"]');
+    // 10 band sliders + 3 extra sliders live in the panel, not the player bar
+    const panel = page.locator('.fixed.bottom-28');
+    const ranges = panel.locator('input[type="range"]');
     console.log(`[EQ] range inputs: ${await ranges.count()}`);
     expect(await ranges.count()).toBeGreaterThanOrEqual(13);
 
@@ -208,39 +246,77 @@ test('full user journey (desktop)', async ({ page }) => {
     expect(store?.preset).toBe('Rock');
     expect((store?.gains || []).some((g: number) => g !== 0)).toBe(true);
 
-    // bass boost slider
-    const bassSlider = page.getByText('Bass Boost', { exact: true }).locator('xpath=..').locator('input[type="range"]');
-    await bassSlider.fill('8');
+    // bass boost slider (index 10 = after 10 band sliders)
+    const bassSlider = panel.locator('input[type="range"]').nth(10);
+    await bassSlider.fill('8', { timeout: 5000 });
     await page.waitForTimeout(300);
     store = await eqStore(page);
     console.log(`[EQ] bassBoost=${store?.bassBoost}`);
     expect(store?.bassBoost).toBe(8);
 
-    // effect toggles
-    await page.getByRole('button', { name: /Loudness/ }).click();
-    await page.getByRole('button', { name: /Virtualizer/ }).click();
+    // stereo width slider (index 12)
+    const stereoSlider = panel.locator('input[type="range"]').nth(12);
+    await stereoSlider.fill('0.9', { timeout: 5000 });
     store = await eqStore(page);
-    console.log(`[EQ] loudness=${store?.loudnessMode} virtualizer=${store?.virtualizerEnabled}`);
-    expect(store?.loudnessMode).toBe(true);
-    expect(store?.virtualizerEnabled).toBe(true);
+    console.log(`[EQ] stereoWidth=${store?.stereoWidth}`);
+    expect(store?.stereoWidth).toBeCloseTo(0.9, 1);
+
+    // effect toggles — verify a real state flip (presets may pre-enable effects)
+    for (const label of ['Loudness', 'Limiter', 'Virtualizer']) {
+      const btn = page.getByRole('button', { name: new RegExp(label) });
+      const key = label === 'Loudness' ? 'loudnessMode' : label === 'Limiter' ? 'limiterEnabled' : 'virtualizerEnabled';
+      const before = (await eqStore(page))?.[key];
+      await btn.click();
+      await page.waitForTimeout(500);
+      const after = (await eqStore(page))?.[key];
+      console.log(`[EQ] ${label}: ${before} → ${after}`);
+      expect(after).toBe(!before);
+    }
     await closePanel(page, 'Equalizer');
   });
 
   // ── 6. KEYBOARD SHORTCUTS ──────────────────────────────────────────────────
-  await test.step('13. keyboard shortcuts (L, space, shift+arrows)', async () => {
+await test.step('13. keyboard shortcuts (L=favorite, space, shift+arrows/N/P)', async () => {
+    // L toggles the favorite (per useKeyboardShortcuts)
+    const heartBtn = player(page).locator('button:has(svg.lucide-heart)');
+    await expect(heartBtn).toBeVisible();
+    const fillBefore = await heartBtn.locator('svg').getAttribute('fill');
     await page.locator('body').press('l');
-    await expect(page.locator('.fixed.bottom-28').getByText('Lyrics', { exact: true })).toBeVisible();
-    await page.locator('body').press('l');
-    await expect(page.locator('.fixed.bottom-28')).toHaveCount(0);
-    console.log('[Keys] L toggles lyrics');
+    await page.waitForTimeout(500);
+    const fillAfter = await heartBtn.locator('svg').getAttribute('fill');
+    console.log(`[Keys] L: heart ${fillBefore} → ${fillAfter}`);
+    expect(fillAfter).not.toBe(fillBefore);
 
-    const wasPlaying = (await player(page).locator('button:has(svg.lucide-pause)').count()) > 0;
+    // Shift+N → next track; Shift+P → previous track
+    const beforeTrack = await player(page).locator('p').first().textContent();
+    await page.keyboard.press('Shift+N');
+    let afterTrack = beforeTrack;
+    for (let i = 0; i < 15 && afterTrack === beforeTrack; i++) {
+      await page.waitForTimeout(700);
+      afterTrack = await player(page).locator('p').first().textContent();
+    }
+    console.log(`[Keys] Shift+N: "${beforeTrack?.trim()}" → "${afterTrack?.trim()}"`);
+    expect(afterTrack).not.toBe(beforeTrack);
+    await page.keyboard.press('Shift+P');
+    await page.waitForTimeout(3000);
+
+    // Space toggles play/pause — normalize to a paused state first
+    const p = player(page);
+    for (let i = 0; i < 4; i++) {
+      if ((await p.locator('svg.lucide-pause').count()) > 0) {
+        await p.locator('button:has(svg.lucide-pause)').click();
+        await waitForPlayerIcon(page, 'play', 30000);
+        break;
+      }
+      if ((await p.locator('svg.lucide-play').count()) > 0) break;
+      await page.waitForTimeout(800);
+    }
     await page.locator('body').press('Space');
-    await page.waitForTimeout(600);
-    const nowPlaying = (await player(page).locator('button:has(svg.lucide-pause)').count()) > 0;
-    console.log(`[Keys] space: wasPlaying=${wasPlaying} nowPlaying=${nowPlaying} (toggled)`);
-    expect(nowPlaying).toBe(!wasPlaying);
+    await waitForPlayerIcon(page, 'pause');
+    console.log('[Keys] space toggles play → playing');
     await page.locator('body').press('Space');
+    await waitForPlayerIcon(page, 'play');
+    console.log('[Keys] space toggles pause → OK');
 
     const before = await player(page).locator('.font-mono').first().textContent();
     await page.keyboard.press('Shift+ArrowRight');
@@ -248,6 +324,11 @@ test('full user journey (desktop)', async ({ page }) => {
     const after = await player(page).locator('.font-mono').first().textContent();
     console.log(`[Keys] shift+→ seek: ${before} → ${after}`);
     expect(after).not.toBe(before);
+    await page.keyboard.press('Shift+ArrowLeft');
+    await page.waitForTimeout(800);
+    const afterBack = await player(page).locator('.font-mono').first().textContent();
+    console.log(`[Keys] shift+← seek: ${after} → ${afterBack}`);
+    expect(afterBack).not.toBe(after);
   });
 
   // ── 7. PAGES ───────────────────────────────────────────────────────────────
@@ -267,8 +348,12 @@ test('full user journey (desktop)', async ({ page }) => {
   await test.step('15. library page', async () => {
     await page.goto(`${BASE}/library`);
     await expect(page.getByRole('heading', { name: /Your Library|Library/i }).first()).toBeVisible();
-    await expect(page.getByRole('tab', { name: /Songs|Albums|Playlists/ }).first()).toBeVisible();
-    console.log('[Library] tabs present');
+    for (const tab of ['Songs', 'Albums', 'Playlists']) {
+      await expect(page.getByRole('button', { name: new RegExp(`^${tab}$`) })).toBeVisible();
+    }
+    await page.getByRole('button', { name: /^Playlists$/ }).click();
+    await page.waitForTimeout(500);
+    console.log('[Library] tabs present and clickable');
   });
 
   await test.step('16. discover page', async () => {
@@ -278,16 +363,25 @@ test('full user journey (desktop)', async ({ page }) => {
     console.log('[Discover] genre chips OK');
   });
 
-  await test.step('17. favorites page (heart from step 8 should appear)', async () => {
-    await page.goto(`${BASE}/favorites`);
-    const emptyState = page.getByText(/No favorites|Nothing here|empty/i);
-    if (await emptyState.isVisible().catch(() => false)) {
-      console.log('[Favorites] empty state (favorite not persisted to page?) — possible BUG');
-    } else {
-      const rows = await songRow(page).count();
-      console.log(`[Favorites] favorite rows: ${rows}`);
-      expect(rows).toBeGreaterThan(0);
+  await test.step('17. favorites page', async () => {
+    // (Re-)favorite the current track so the page has content — step 13's
+    // keyboard test toggled it off with the L shortcut.
+    const heartBtn = player(page).locator('button:has(svg.lucide-heart)');
+    if ((await heartBtn.locator('svg').getAttribute('fill')) !== 'currentColor') {
+      await heartBtn.click();
+      await page.waitForTimeout(400);
     }
+    await page.goto(`${BASE}/favorites`);
+    // Catalog fetch is async — wait for either the empty state or a row
+    const empty = page.getByText('No favorites yet');
+    await expect(empty.or(songRow(page).first())).toBeVisible({ timeout: 20000 });
+    const rows = await songRow(page).count();
+    console.log(`[Favorites] favorite rows: ${rows}`);
+    if (rows === 0) {
+      const heading = await page.getByRole('heading', { name: /Favorites/i }).textContent();
+      console.log(`[Favorites] heading: ${heading}`);
+    }
+    expect(rows, 'favorited track should appear on the favorites page').toBeGreaterThan(0);
   });
 
   await test.step('18. history page', async () => {
@@ -359,6 +453,7 @@ test('full user journey (desktop)', async ({ page }) => {
   await test.step('25. error collection', async () => {
     const realConsole = consoleErrors.filter((e) => !/DevTools|favicon|\[HMR\]/.test(e));
     console.log(`[Errors] pageErrors=${pageErrors.length} consoleErrors=${realConsole.length} failedRequests=${failedRequests.length}`);
+    for (const e of realConsole) console.log(`[Errors] console: ${e}`);
     expect(pageErrors, `page errors: ${pageErrors.join(' | ')}`).toEqual([]);
   });
 });

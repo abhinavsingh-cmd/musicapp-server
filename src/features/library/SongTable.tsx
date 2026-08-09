@@ -329,7 +329,7 @@ export const SongTable: React.FC<SongTableProps> = memo(({ songs, className }) =
               const isActive = currentSongId === song.id;
               return (
                 <SongRow key={song.id} song={song} index={actualIndex} isActive={isActive} isCurrentlyPlaying={isActive && isPlaying} isLoading={isActive && isLoading}
-                  onClick={() => handleRowClick(song, actualIndex)} onFavToggle={() => toggleFavorite(song.id)} isFav={favSet.has(song.id)}
+                  onClick={() => handleRowClick(song, actualIndex)} onFavToggle={() => toggleFavorite(song.youtubeId || song.id)} isFav={favSet.has(song.youtubeId || song.id)}
                   isDownloaded={song.youtubeId ? downloadedSet.has(song.youtubeId) : false} isDownloading={song.youtubeId ? downloadingSet.has(song.youtubeId) : false}
                   onDownload={() => downloadSong(song)} onCancelDownload={() => song.youtubeId && cancelDownload(song.youtubeId)}
                   onContextMenu={(e) => handleContextMenu(e, song)} onTouchStart={(e) => handleLongPress(e, song)} />

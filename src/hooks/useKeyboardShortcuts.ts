@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { useAudioStore } from '../stores/audioStore';
 import { audioService } from '../services/audioServiceInstance';
+import { favoriteKey } from '../utils/songIds';
 
 export function useKeyboardShortcuts() {
   useEffect(() => {
@@ -55,7 +56,7 @@ export function useKeyboardShortcuts() {
           if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
             if (state.currentSong) {
               e.preventDefault();
-              state.toggleFavorite(state.currentSong.id);
+              state.toggleFavorite(favoriteKey(state.currentSong));
             }
           }
           break;

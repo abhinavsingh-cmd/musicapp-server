@@ -33,7 +33,7 @@ export const MainContent = memo(() => {
         </div>
       </header>
 
-      <div className="flex-1 overflow-y-auto relative">
+      <div className="flex-1 overflow-y-auto relative pb-28">
         <Outlet />
       </div>
     </main>

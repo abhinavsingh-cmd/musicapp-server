@@ -2,6 +2,7 @@ import React, { useEffect, useMemo } from 'react';
 import { useGoBack } from '../hooks/useGoBack';
 import { useAudioStore } from '../stores/audioStore';
 import { useSongsStore } from '../stores/songsStore';
+import { favoriteKey } from '../utils/songIds';
 import { SongTable } from '../features/library/SongTable';
 import { Heart, ArrowLeft } from 'lucide-react';
 
@@ -30,7 +31,7 @@ export const FavoritesPage: React.FC = () => {
 
   useEffect(() => { ensureLoaded(); }, [ensureLoaded]);
 
-  const favSongs = useMemo(() => songs.filter(s => favorites.includes(s.id)), [songs, favorites]);
+  const favSongs = useMemo(() => songs.filter(s => favorites.includes(favoriteKey(s))), [songs, favorites]);
 
   return (
     <div className="p-6 space-y-6">

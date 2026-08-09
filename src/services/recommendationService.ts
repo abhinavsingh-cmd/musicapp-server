@@ -103,7 +103,7 @@ async function getFavoritesBasedSongs(excludeIds: Set<string>, limit: number): P
   const { useAudioStore } = await import('../stores/audioStore');
   const favorites = useAudioStore.getState().favorites;
   const allSongs = await fetchSongs();
-  const favSongs = allSongs.filter(s => favorites.includes(s.id));
+  const favSongs = allSongs.filter(s => favorites.includes(s.youtubeId || s.id));
   
   const genres = new Set(favSongs.map(s => s.genre));
   const artists = new Set(favSongs.map(s => s.artist));
