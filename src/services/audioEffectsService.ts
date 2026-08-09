@@ -93,7 +93,8 @@ export class AudioEffectsService {
     return this.filters;
   }
 
-  async init(audioElement: HTMLAudioElement): Promise<void> {
+  async init(_audioElement: HTMLAudioElement): Promise<void> {
+    return; // TEMP DISABLED: AudioContext crashes OPPO/VIVO WebView
     if (!this._supported) return;
     // Already attached to this exact element and running — just resume.
     if (
@@ -154,6 +155,7 @@ export class AudioEffectsService {
   }
 
   async resume(): Promise<void> {
+    return; // TEMP DISABLED
     if (this.context && this.context.state === 'suspended' && this.sourceNode) {
       await this.context.resume();
     }
