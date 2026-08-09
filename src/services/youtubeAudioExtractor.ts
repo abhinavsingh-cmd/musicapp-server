@@ -17,14 +17,10 @@
 
 import { api } from '../config/api';
 
-const INVIDIOUS_INSTANCES = [
-  'https://yewtu.be',
-  'https://invidious.flokinet.to',
-  'https://invidious.io.lol',
-];
+const INVIDIOUS_INSTANCES: string[] = [];
 
-const SERVER_TIMEOUT_MS = 8_000;
-const INVIDIOUS_TIMEOUT_MS = 6_000;
+const SERVER_TIMEOUT_MS = 4_000;
+const INVIDIOUS_TIMEOUT_MS = 3_000;
 
 // Cache extracted URLs to avoid repeated network calls
 const urlCache = new Map<string, { url: string; expiresAt: number }>();

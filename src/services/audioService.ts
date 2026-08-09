@@ -369,19 +369,18 @@ export class AudioService {
         this.emit('ended');
       }
     } finally {
-      // TEMP DISABLED: foreground service start crashes OPPO/VIVO
-      // if (isNativePlatform() && this.currentPlaybackId === playbackId) {
-      //   backgroundAudio.startService({ title: song.title, artist: song.artist })
-      //     .then(() => log('Foreground service started'))
-      //     .catch(() => {});
-      // }
+      if (isNativePlatform() && this.currentPlaybackId === playbackId) {
+        backgroundAudio.startService({ title: song.title, artist: song.artist })
+          .then(() => log('Foreground service started'))
+          .catch(() => {});
+      }
     }
   }
 
   private async playHtmlAudio(song: Song, playbackId: number, markId: string): Promise<void> {
     const MAX_RETRIES = 3;
     // Proxy/extracted URLs need more time to start streaming than local files
-    const CANPLAY_TIMEOUT_MS = song.audioUrl?.includes('/proxy-audio') ? 15_000 : 8_000;
+    const CANPLAY_TIMEOUT_MS = song.audioUrl?.includes('/proxy-audio') ? 10_000 : 8_000;
 
     this.stopYouTubePlayer();
 
@@ -520,10 +519,9 @@ export class AudioService {
         logPerf('HTML_Audio_Playing', markId);
         this.consecutiveFailures = 0;
 
-        // TEMP DISABLED: foreground service start crashes OPPO/VIVO
-        // if (isNativePlatform()) {
-        //   backgroundAudio.startService({ title: song.title, artist: song.artist }).catch(() => {});
-        // }
+        if (isNativePlatform()) {
+          backgroundAudio.startService({ title: song.title, artist: song.artist }).catch(() => {});
+        }
         return;
       } catch (err) {
         if (this.currentPlaybackId !== playbackId) return;
@@ -606,12 +604,11 @@ export class AudioService {
                 this.consecutiveFailures = 0;
                 this.startProgressTracking();
                 this.emit('play', { song });
-                // TEMP DISABLED: foreground service start crashes OPPO/VIVO
-                // if (isNativePlatform()) {
-                //   backgroundAudio.startService({ title: song.title, artist: song.artist }).catch((err) => {
-                //     logError('backgroundAudio.startService (play event) failed:', err);
-                //   });
-                // }
+                if (isNativePlatform()) {
+                  backgroundAudio.startService({ title: song.title, artist: song.artist }).catch((err) => {
+                    logError('backgroundAudio.startService (play event) failed:', err);
+                  });
+                }
               }
               break;
             case 'pause':
@@ -761,14 +758,13 @@ export class AudioService {
       this.setState({ isPlaying: false });
       this.stopProgressTracking();
       this.emit('pause');
-      // TEMP DISABLED: backgroundAudio crashes OPPO/VIVO
-      // if (isNativePlatform()) {
-      //   backgroundAudio.updatePlaybackState({
-      //     isPlaying: false,
-      //     position: this.getCurrentTime(),
-      //     duration: this.getDuration(),
-      //   }).catch(() => {});
-      // }
+      if (isNativePlatform()) {
+        backgroundAudio.updatePlaybackState({
+          isPlaying: false,
+          position: this.getCurrentTime(),
+          duration: this.getDuration(),
+        }).catch(() => {});
+      }
     }
   }
 
@@ -822,12 +818,11 @@ export class AudioService {
         this.setState({ isPlaying: true, error: null });
         this.startProgressTracking();
         this.emit('play', { song: this.state.currentSong });
-        // TEMP DISABLED: foreground service start crashes OPPO/VIVO
-        // if (isNativePlatform() && this.state.currentSong) {
-        //   backgroundAudio.startService({ title: this.state.currentSong.title, artist: this.state.currentSong.artist }).catch((err) => {
-        //     logError('backgroundAudio.startService (resume) failed:', err);
-        //   });
-        // }
+        if (isNativePlatform() && this.state.currentSong) {
+          backgroundAudio.startService({ title: this.state.currentSong.title, artist: this.state.currentSong.artist }).catch((err) => {
+            logError('backgroundAudio.startService (resume) failed:', err);
+          });
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Resume failed';
         const errName = err instanceof Error ? err.name : '';
@@ -847,10 +842,9 @@ export class AudioService {
       isPlaying: false, currentTime: 0, currentSong: null,
       isLoading: false, error: null
     });
-    // TEMP DISABLED: backgroundAudio stop crashes OPPO/VIVO
-    // if (isNativePlatform()) {
-    //   backgroundAudio.stopService().catch(() => {});
-    // }
+    if (isNativePlatform()) {
+      backgroundAudio.stopService().catch(() => {});
+    }
   }
 
   seek(seconds: number): void {
