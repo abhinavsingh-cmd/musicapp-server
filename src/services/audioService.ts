@@ -298,69 +298,83 @@ export class AudioService {
   }
 
   private async _playInternal(song: Song, playlist: Song[], startIndex: number, startTime?: number): Promise<void> {
-    const markId = `play_${song.id}_${Date.now()}`;
-    this.streamStartTime = performance.now();
-    this.pendingStartTime = startTime && isFinite(startTime) && startTime > 0 ? startTime : 0;
-    log('▶ play() called:', { title: song.title, youtubeId: song.youtubeId || 'NONE', startTime: this.pendingStartTime });
-
-    // Start foreground service — fire-and-forget. Do NOT await: if the service
-    // start is slow/blocked, we don't want it to delay or crash playback. The
-    // service will come up in the background and take over when ready.
-    if (isNativePlatform()) {
-      backgroundAudio.startService({ title: song.title, artist: song.artist })
-        .then(() => log('Foreground service started'))
-        .catch(() => {});
-    }
-
     const playbackId = ++this.currentPlaybackId;
-    this.stopCurrentPlayback();
+    try {
+      const markId = `play_${song.id}_${Date.now()}`;
+      this.streamStartTime = performance.now();
+      this.pendingStartTime = startTime && isFinite(startTime) && startTime > 0 ? startTime : 0;
+      log('▶ play() called:', { title: song.title, youtubeId: song.youtubeId || 'NONE', startTime: this.pendingStartTime });
 
-    this.setState({
-      currentSong: song,
-      isLoading: true,
-      error: null,
-      duration: song.duration,
-      currentTime: 0,
-      isPlaying: false
-    });
-    this.emit('loaded', { song, playlist, index: startIndex });
+      this.stopCurrentPlayback();
 
-    if (song.audioUrl && song.audioUrl.trim()) {
-      log('PATH 1: HTML audio via audioUrl');
-      this.useYoutubePlayer = false;
-      await this.playHtmlAudio(song, playbackId, markId);
-      return;
-    }
+      this.setState({
+        currentSong: song,
+        isLoading: true,
+        error: null,
+        duration: song.duration,
+        currentTime: 0,
+        isPlaying: false
+      });
+      this.emit('loaded', { song, playlist, index: startIndex });
 
-    if (song.youtubeId && isValidYouTubeId(song.youtubeId)) {
-      // Step 1: Try extracting a direct audio URL (server yt-dlp → proxy).
-      // This is the preferred path — works in background and foreground.
-      log('Extracting audio URL for:', song.youtubeId);
-      try {
-        const extractionResult = await extractAudioUrl(song.youtubeId);
+      if (song.audioUrl && song.audioUrl.trim()) {
+        log('PATH 1: HTML audio via audioUrl');
+        this.useYoutubePlayer = false;
+        await this.playHtmlAudio(song, playbackId, markId);
+        return;
+      }
+
+      if (song.youtubeId && isValidYouTubeId(song.youtubeId)) {
+        log('Extracting audio URL for:', song.youtubeId);
+        let extractionResult: string | null = null;
+        try {
+          extractionResult = await extractAudioUrl(song.youtubeId);
+        } catch (err) {
+          logError('Extraction failed:', err);
+        }
+
         if (extractionResult && this.currentPlaybackId === playbackId) {
           log('✓ Extraction succeeded — playing as HTML audio');
           this.useYoutubePlayer = false;
           await this.playHtmlAudio({ ...song, audioUrl: extractionResult }, playbackId, markId);
           return;
         }
-      } catch (err) {
-        logError('Extraction failed:', err);
+
+        if (this.currentPlaybackId !== playbackId) return;
+
+        log('Extraction failed — falling back to YouTube IFrame');
+        preconnectYouTube();
+        this.useYoutubePlayer = true;
+        try {
+          await this.playYouTube(song, playbackId, markId);
+        } catch (ytErr) {
+          logError('YouTube IFrame also failed:', ytErr);
+          if (this.currentPlaybackId === playbackId) {
+            this.emitPlaybackError(song, `Unable to play "${song.title}" — no audio source available`);
+          }
+        }
+        return;
       }
 
-      // Step 2: Extraction failed — fall back to YouTube IFrame (foreground only).
-      if (this.currentPlaybackId !== playbackId) return;
-      log('Extraction failed — falling back to YouTube IFrame');
-      preconnectYouTube();
-      this.useYoutubePlayer = true;
-      await this.playYouTube(song, playbackId, markId);
-      return;
+      logError('NO AUDIO SOURCE for:', song.title);
+      this.setState({ error: 'No audio source available', isLoading: false });
+      this.emit('error', 'No audio source available');
+      this.emit('ended');
+    } catch (err) {
+      logError('_playInternal UNEXPECTED ERROR:', err);
+      if (this.currentPlaybackId === playbackId) {
+        const msg = err instanceof Error ? err.message : 'Playback failed';
+        this.setState({ error: msg, isLoading: false, isPlaying: false });
+        this.emit('error', msg);
+        this.emit('ended');
+      }
+    } finally {
+      if (isNativePlatform() && this.currentPlaybackId === playbackId) {
+        backgroundAudio.startService({ title: song.title, artist: song.artist })
+          .then(() => log('Foreground service started'))
+          .catch(() => {});
+      }
     }
-
-    logError('NO AUDIO SOURCE for:', song.title);
-    this.setState({ error: 'No audio source available', isLoading: false });
-    this.emit('error', 'No audio source available');
-    this.emit('ended');
   }
 
   private async playHtmlAudio(song: Song, playbackId: number, markId: string): Promise<void> {
@@ -414,15 +428,19 @@ export class AudioService {
       }
 
       // If equalizer is ready and enabled, apply the current gains to ensure instant effect
-      if (audioEffectsService.isReady && audioEffectsService.enabled) {
-        const currentGains = audioEffectsService.gains;
-        const eqFilters = audioEffectsService.getFilters();
-        for (let i = 0; i < currentGains.length && i < eqFilters.length; i++) {
-          if (Math.abs(eqFilters[i].gain.value - currentGains[i]) > 0.1) {
-            eqFilters[i].gain.value = currentGains[i];
+      try {
+        if (audioEffectsService.isReady && audioEffectsService.enabled) {
+          const currentGains = audioEffectsService.gains;
+          const eqFilters = audioEffectsService.getFilters();
+          for (let i = 0; i < currentGains.length && i < eqFilters.length; i++) {
+            if (Math.abs(eqFilters[i].gain.value - currentGains[i]) > 0.1) {
+              eqFilters[i].gain.value = currentGains[i];
+            }
           }
+          log('Applied current equalizer gains for instant effect');
         }
-        log('Applied current equalizer gains for instant effect');
+      } catch (eqErr) {
+        logError('Equalizer gain apply failed (non-fatal):', eqErr);
       }
 
       // Assign source AFTER equalizer is ready
