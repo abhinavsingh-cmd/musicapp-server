@@ -164,12 +164,7 @@ function chainAdvance(fn: () => Promise<void>): Promise<void> {
 }
 
 function syncMediaSessionEnded() {
-  try {
-    mediaSessionService.updatePlaybackState(false, 0, 0);
-  } catch {}
-  try {
-    backgroundAudio.updatePlaybackState({ isPlaying: false, position: 0, duration: 0 }).catch(() => {});
-  } catch {}
+  // All native calls disabled for OPPO/VIVO compatibility
 }
 
 function clearNextSongRetry() {
@@ -200,26 +195,15 @@ function initAudioServiceHandler() {
           error: null,
         });
         if (data?.song) {
-          mediaSessionService.updateMetadata(data.song);
-          mediaSessionService.updatePlaybackState(true, audioService.getCurrentTime(), audioService.getDuration());
-          backgroundAudio.updateMetadata({
-            title: data.song.title,
-            artist: data.song.artist,
-            album: data.song.album || 'MusicApp',
-            albumArt: data.song.coverArt,
-          }).catch(() => {});
-          backgroundAudio.updatePlaybackState({
-            isPlaying: true,
-            position: audioService.getCurrentTime(),
-            duration: audioService.getDuration(),
-          }).catch(() => {});
+          // All native calls disabled for OPPO/VIVO compatibility
+          // mediaSessionService calls already disabled in service
+          // backgroundAudio calls disabled — crash OPPO/VIVO
           if (data?.song) {
             const songId = data.song.id || '';
             if (songId !== lastHistorySongId) {
               lastHistorySongId = songId;
               useHistoryStore.getState().addSong(data.song);
             }
-            // Preload next songs in background
             const qs = useQueueStore.getState();
             preloadNextSongs(qs.queue, qs.currentIndex, { count: 3 }).catch(() => {});
           }
@@ -234,7 +218,7 @@ function initAudioServiceHandler() {
       }
       case 'pause':
         useAudioStore.setState({ isPlaying: false });
-        mediaSessionService.updatePlaybackState(false, audioService.getCurrentTime(), audioService.getDuration());
+        // Native calls disabled for OPPO/VIVO
         break;
       case 'ended': {
         const repeatMode = useQueueStore.getState().repeatMode;
@@ -263,16 +247,7 @@ function initAudioServiceHandler() {
         useAudioStore.setState({ progress: data });
         if (now - lastMediaUpdate > 1000) {
           lastMediaUpdate = now;
-          mediaSessionService.updatePlaybackState(
-            useAudioStore.getState().isPlaying,
-            data,
-            audioService.getDuration(),
-          );
-          backgroundAudio.updatePlaybackState({
-            isPlaying: useAudioStore.getState().isPlaying,
-            position: data,
-            duration: audioService.getDuration(),
-          }).catch(() => {});
+          // Native calls disabled for OPPO/VIVO
         }
         // Persist position every 5s while playing (throttled)
         if (now - lastProgressPersist > 5_000) {
@@ -289,7 +264,8 @@ function initAudioServiceHandler() {
           error: null,
         });
         if (data?.song) {
-          mediaSessionService.updateMetadata(data.song);
+          // mediaSession disabled for OPPO/VIVO
+          // mediaSessionService.updateMetadata(data.song);
         }
         break;
       }
@@ -324,85 +300,58 @@ if (!(globalThis as any).__audioStoreInitialized) {
     : (cb: IdleRequestCallback) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 } as IdleDeadline), 0);
 
   deferInit(() => {
-    try {
-      prewarmOnFirstInteraction();
-    } catch {}
+    // prewarmOnFirstInteraction disabled for OPPO/VIVO
+    // try {
+    //   prewarmOnFirstInteraction();
+    // } catch {}
 
-    try {
-      mediaSessionService.init({
-        onPlay: () => useAudioStore.getState().play(),
-        onPause: () => useAudioStore.getState().pause(),
-        onNext: () => useAudioStore.getState().nextSong(),
-        onPrevious: () => useAudioStore.getState().previousSong(),
-        onSeekForward: () => {
-          useAudioStore.getState().seek(Math.min(audioService.getCurrentTime() + 10, audioService.getDuration()));
-        },
-        onSeekBackward: () => {
-          useAudioStore.getState().seek(Math.max(audioService.getCurrentTime() - 10, 0));
-        },
-        onSeekTo: (time: number) => {
-          useAudioStore.getState().seek(time);
-        },
-        onStop: () => useAudioStore.getState().pause(),
-      });
-    } catch {}
+    // mediaSessionService disabled for OPPO/VIVO
+    // try {
+    //   mediaSessionService.init({...});
+    // } catch {}
 
-    try {
-      backgroundPlaybackService.init();
-    } catch {}
+    // All native services disabled for OPPO/VIVO compatibility
+    // try {
+    //   backgroundPlaybackService.init();
+    // } catch {}
 
-    backgroundAudio.onMediaAction((event) => {
-      const store = useAudioStore.getState();
-      switch (event.action) {
-        case 'play':
-          if (!store.currentSong) {
-            serviceRequestedPlay = true;
-            return;
-          }
-          if (store.isPlaying || store.isLoading) return;
-          store.play();
-          break;
-        case 'pause':
-        case 'stop':
-          serviceRequestedPlay = false;
-          store.pause();
-          break;
-        case 'next':
-          store.nextSong();
-          break;
-        case 'previous':
-          store.previousSong();
-          break;
-        case 'seek':
-          if (typeof event.position === 'number' && Number.isFinite(event.position)) {
-            store.seek(event.position);
-          }
-          break;
-      }
-    }).catch(() => {});
+    // backgroundAudio.onMediaAction disabled — crashes OPPO/VIVO
+    // backgroundAudio.onMediaAction((event) => {
+    //   const store = useAudioStore.getState();
+    //   switch (event.action) {
+    //     case 'play':
+    //       if (!store.currentSong) {
+    //         serviceRequestedPlay = true;
+    //         return;
+    //       }
+    //       if (store.isPlaying || store.isLoading) return;
+    //       store.play();
+    //       break;
+    //     case 'pause':
+    //     case 'stop':
+    //       serviceRequestedPlay = false;
+    //       store.pause();
+    //       break;
+    //     case 'next':
+    //       store.nextSong();
+    //       break;
+    //     case 'previous':
+    //       store.previousSong();
+    //       break;
+    //     case 'seek':
+    //       if (typeof event.position === 'number' && Number.isFinite(event.position)) {
+    //         store.seek(event.position);
+    //       }
+    //       break;
+    //   }
+    // }).catch(() => {});
 
-    try {
-      backgroundPlaybackService.onInterruption((type) => {
-        if (type === 'headphone-unplug' || type === 'bluetooth-disconnect') {
-          useAudioStore.getState().pause();
-        }
-      });
-
-      backgroundPlaybackService.onReconnect(() => {
-        const state = useAudioStore.getState();
-        if (state.currentSong && !state.isPlaying) {
-          audioService.resume().catch((err) => {
-            console.error('[AudioStore] Background resume failed:', err);
-          });
-        }
-      });
-
-      backgroundPlaybackService.onBackgroundChange((isBackground) => {
-        if (isBackground) {
-          persistPlaybackState();
-        }
-      });
-    } catch {}
+    // All native background services disabled for OPPO/VIVO
+    // try {
+    //   backgroundPlaybackService.onInterruption((type) => { ... });
+    //   backgroundPlaybackService.onReconnect(() => { ... });
+    //   backgroundPlaybackService.onBackgroundChange((isBackground) => { ... });
+    // } catch {}
 
     try {
       initAudioServiceHandler();
@@ -424,16 +373,17 @@ if (!(globalThis as any).__audioStoreInitialized) {
       (globalThis as any).__audioPersistInterval = persistIntervalId;
     } catch {}
 
-    try {
-      useQueueStore.subscribe((state) => {
-        try {
-          mediaSessionService.updateActions(
-            state.currentIndex < state.queue.length - 1,
-            state.currentIndex > 0,
-          );
-        } catch {}
-      });
-    } catch {}
+    // mediaSession queue sync disabled for OPPO/VIVO
+    // try {
+    //   useQueueStore.subscribe((state) => {
+    //     try {
+    //       mediaSessionService.updateActions(
+    //         state.currentIndex < state.queue.length - 1,
+    //         state.currentIndex > 0,
+    //       );
+    //     } catch {}
+    //   });
+    // } catch {}
   });
 }
 
