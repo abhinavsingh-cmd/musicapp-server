@@ -193,13 +193,13 @@ export const Sidebar = memo(({ className, isOpen = true, onClose }: SidebarProps
           transition={{ type: 'spring', stiffness: 300, damping: 30 }}
           className={cn(
             "w-64 h-screen sticky top-0 flex flex-col overflow-hidden flex-shrink-0",
-            "liquid-glass",
+            "bg-[#121220] border-r border-white/10",
             className
           )}
         >
           <div className="absolute inset-0 pointer-events-none">
-            <div className="absolute top-0 left-0 w-full h-32 bg-gradient-to-b from-[var(--color-accent)]/10 to-transparent" />
-            <div className="absolute bottom-0 left-0 w-full h-32 bg-gradient-to-t from-fuchsia-500/5 to-transparent" />
+            <div className="absolute top-0 left-0 w-full h-32 bg-gradient-to-b from-purple-500/10 to-transparent" />
+            <div className="absolute bottom-0 left-0 w-full h-32 bg-gradient-to-t from-purple-500/5 to-transparent" />
           </div>
 
           <div className="lg:hidden p-3 flex justify-end">
@@ -207,7 +207,7 @@ export const Sidebar = memo(({ className, isOpen = true, onClose }: SidebarProps
               onClick={handleClose}
               whileHover={{ scale: 1.1, rotate: 90 }}
               whileTap={{ scale: 0.9 }}
-              className="w-8 h-8 rounded-full bg-white/5 flex items-center justify-center text-gray-400 hover:text-white hover:bg-white/10 transition-all"
+              className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-white hover:bg-white/20 transition-all"
               aria-label="Close sidebar"
             >
               <X size={20} />
@@ -229,7 +229,7 @@ export const Sidebar = memo(({ className, isOpen = true, onClose }: SidebarProps
                 whileHover={{ rotate: 360, scale: 1.1 }}
                 transition={{ type: 'spring', stiffness: 300 }}
               />
-              <h1 className="text-xl font-bold text-gradient">MusicApp</h1>
+              <h1 className="text-xl font-bold text-white">MusicApp</h1>
             </motion.div>
 
             <nav className="space-y-1 px-3">

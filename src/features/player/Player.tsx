@@ -68,7 +68,7 @@ export const Player: React.FC<PlayerProps> = memo(({ className }) => {
       {/* Side panels — rendered inline, visibility toggled via CSS */}
       {showQueue && (
         <div
-          className="fixed bottom-28 right-4 w-96 h-[500px] rounded-3xl overflow-hidden z-40 liquid-glass flex flex-col lg:bottom-32 lg:right-4"
+           className="fixed bottom-28 right-4 w-96 h-[500px] rounded-3xl overflow-hidden z-40 bg-[#1a1a2e] border border-white/10 flex flex-col lg:bottom-32 lg:right-4"
           style={{ boxShadow: '0 25px 80px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.1)' }}
         >
           <div className="flex items-center justify-between p-4 border-b border-white/5 flex-shrink-0">
@@ -93,7 +93,7 @@ export const Player: React.FC<PlayerProps> = memo(({ className }) => {
 
       {showLyrics && (
         <div
-          className="fixed bottom-28 right-4 w-80 rounded-3xl overflow-hidden z-40 liquid-glass lg:bottom-32 lg:right-4"
+           className="fixed bottom-28 right-4 w-80 rounded-3xl overflow-hidden z-40 bg-[#1a1a2e] border border-white/10 lg:bottom-32 lg:right-4"
           style={{ boxShadow: '0 25px 80px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.1)' }}
         >
           <div className="flex items-center justify-between p-4 border-b border-white/10">
@@ -116,7 +116,7 @@ export const Player: React.FC<PlayerProps> = memo(({ className }) => {
 
       {showEqualizer && (
         <div
-          className="fixed bottom-28 right-4 w-96 rounded-3xl overflow-hidden z-40 liquid-glass lg:bottom-32 lg:right-4"
+           className="fixed bottom-28 right-4 w-96 rounded-3xl overflow-hidden z-40 bg-[#1a1a2e] border border-white/10 lg:bottom-32 lg:right-4"
           style={{ boxShadow: '0 25px 80px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.1)' }}
         >
           <div className="flex items-center justify-between p-4 border-b border-white/10">
@@ -152,7 +152,7 @@ export const Player: React.FC<PlayerProps> = memo(({ className }) => {
       <div
         className={cn(
           "fixed bottom-0 left-0 right-0 z-50",
-          "liquid-glass",
+          "bg-[#121220] border-t border-white/10",
           "lg:left-64",
           className
         )}
@@ -182,7 +182,7 @@ export const Player: React.FC<PlayerProps> = memo(({ className }) => {
             <button
               onClick={() => togglePanel('queue')}
               className={cn(
-                "w-10 h-10 rounded-full flex items-center justify-center transition-all duration-200 active:scale-90 liquid-glass",
+                "w-10 h-10 rounded-full flex items-center justify-center transition-all duration-200 active:scale-90 bg-white/10 hover:bg-white/20",
                 showQueue
                   ? "bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white shadow-glow"
                   : "text-gray-400 hover:text-white"
@@ -195,7 +195,7 @@ export const Player: React.FC<PlayerProps> = memo(({ className }) => {
             <button
               onClick={() => togglePanel('lyrics')}
               className={cn(
-                "w-10 h-10 rounded-full flex items-center justify-center transition-all duration-200 active:scale-90 liquid-glass",
+                "w-10 h-10 rounded-full flex items-center justify-center transition-all duration-200 active:scale-90 bg-white/10 hover:bg-white/20",
                 showLyrics
                   ? "bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white shadow-glow"
                   : "text-gray-400 hover:text-white"
@@ -208,7 +208,7 @@ export const Player: React.FC<PlayerProps> = memo(({ className }) => {
             <button
               onClick={() => togglePanel('equalizer')}
               className={cn(
-                "w-10 h-10 rounded-full flex items-center justify-center transition-all duration-200 active:scale-90 liquid-glass",
+                "w-10 h-10 rounded-full flex items-center justify-center transition-all duration-200 active:scale-90 bg-white/10 hover:bg-white/20",
                 showEqualizer
                   ? "bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white shadow-glow"
                   : "text-gray-400 hover:text-white"
@@ -239,7 +239,7 @@ export const Player: React.FC<PlayerProps> = memo(({ className }) => {
                 <button
                   onClick={() => togglePanel('lyrics')}
                   className={cn(
-                    "p-4 rounded-2xl liquid-glass text-center transition-all active:scale-95",
+                    "p-4 rounded-2xl bg-white/10 text-center transition-all active:scale-95",
                     showLyrics ? "bg-violet-500/20 border border-violet-500/30" : ""
                   )}
                 >
@@ -249,7 +249,7 @@ export const Player: React.FC<PlayerProps> = memo(({ className }) => {
                 <button
                   onClick={() => togglePanel('equalizer')}
                   className={cn(
-                    "p-4 rounded-2xl liquid-glass text-center transition-all active:scale-95",
+                    "p-4 rounded-2xl bg-white/10 text-center transition-all active:scale-95",
                     showEqualizer ? "bg-violet-500/20 border border-violet-500/30" : ""
                   )}
                 >
@@ -259,7 +259,7 @@ export const Player: React.FC<PlayerProps> = memo(({ className }) => {
                 <button
                   onClick={() => togglePanel('queue')}
                   className={cn(
-                    "p-4 rounded-2xl liquid-glass text-center transition-all active:scale-95",
+                    "p-4 rounded-2xl bg-white/10 text-center transition-all active:scale-95",
                     showQueue ? "bg-violet-500/20 border border-violet-500/30" : ""
                   )}
                 >
@@ -268,8 +268,8 @@ export const Player: React.FC<PlayerProps> = memo(({ className }) => {
                 </button>
               </div>
               {showLyrics && <LyricsDisplay />}
-              {showEqualizer && <div className="liquid-glass rounded-2xl p-4"><ErrorBoundary level="section"><EqualizerUI /></ErrorBoundary></div>}
-              {showQueue && <div className="liquid-glass rounded-2xl p-4 max-h-96 overflow-auto"><ErrorBoundary level="section"><QueuePanel /></ErrorBoundary></div>}
+              {showEqualizer && <div className="bg-[#1a1a2e] border border-white/10 rounded-2xl p-4"><ErrorBoundary level="section"><EqualizerUI /></ErrorBoundary></div>}
+              {showQueue && <div className="bg-[#1a1a2e] border border-white/10 rounded-2xl p-4 max-h-96 overflow-auto"><ErrorBoundary level="section"><QueuePanel /></ErrorBoundary></div>}
             </div>
           </div>
         )}
