@@ -30,7 +30,6 @@ class MediaSessionService {
 
   init(callbacks: MediaSessionCallbacks): void {
     this.callbacks = callbacks;
-    return; // TEMP DISABLED — testing native crash on OPPO/VIVO WebView
     if (!this.supported) return;
 
     const handlers: [string, (() => void) | ((action: any) => void) | null][] = [
@@ -54,8 +53,7 @@ class MediaSessionService {
   }
 
   /** Update the metadata shown in OS media controls */
-  updateMetadata(_song: Song): void {
-    return; // TEMP DISABLED — testing native crash on OPPO/VIVO WebView
+  updateMetadata(song: Song): void {
     if (!this.supported) return;
 
     const artwork: MediaImage[] = song.coverArt
@@ -91,8 +89,7 @@ class MediaSessionService {
   }
 
   /** Update the playback state shown in OS controls */
-  updatePlaybackState(_isPlaying: boolean, _currentTime: number, _duration: number): void {
-    return; // TEMP DISABLED — testing native crash on OPPO/VIVO WebView
+  updatePlaybackState(isPlaying: boolean, currentTime: number, duration: number): void {
     if (!this.supported) return;
 
     try {
