@@ -4,9 +4,10 @@ import { useGoBack } from '../hooks/useGoBack';
 import { useChartsStore, ChartSong, TrendingSource } from '../stores/chartsStore';
 import { useAudioStore } from '../stores/audioStore';
 import { trendingService } from '../services/trendingService';
-import { TrendingUp, TrendingDown, Minus, Sparkles, Music, ArrowLeft, RefreshCw, Clock, Globe, Radio } from 'lucide-react';
+import { TrendingUp, TrendingDown, Minus, Sparkles, Music, ArrowLeft, RefreshCw, Clock, Globe, Radio, Download, Check, Loader2 } from 'lucide-react';
 import CachedImage from '../components/CachedImage';
 import { useSongContextMenu } from '../components/SongContextMenu';
+import { useDownloadsStore } from '../stores/downloadsStore';
 
 const ROW_HEIGHT = 60;
 const BUFFER = 8;
@@ -29,13 +30,16 @@ const SOURCE_ICONS: Record<TrendingSource, React.ReactNode> = {
   none: null,
 };
 
-const ChartRow = memo(({ song, index, onPlay, getTrendIcon, onContextMenu, onTouchStart }: {
+const ChartRow = memo(({ song, index, onPlay, getTrendIcon, onContextMenu, onTouchStart, isDownloaded, isDownloading, onDownload }: {
   song: ChartSong;
   index: number;
   onPlay: () => void;
   getTrendIcon: (trend: string) => React.ReactNode;
   onContextMenu: (e: React.MouseEvent) => void;
   onTouchStart: (e: React.TouchEvent) => void;
+  isDownloaded: boolean;
+  isDownloading: boolean;
+  onDownload: (e: React.MouseEvent) => void;
 }) => (
   <div
     onClick={onPlay}
@@ -66,9 +70,19 @@ const ChartRow = memo(({ song, index, onPlay, getTrendIcon, onContextMenu, onTou
     <div className="text-gray-500 text-sm flex-shrink-0">
       {song.duration ? `${Math.floor(song.duration / 60)}:${(song.duration % 60).toString().padStart(2, '0')}` : '--:--'}
     </div>
-    <div className="w-8 h-8 rounded-full bg-violet-500/20 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
-      <Music size={14} className="text-violet-400" />
-    </div>
+    <button
+      onClick={(e) => { e.stopPropagation(); onDownload(e); }}
+      className="w-8 h-8 rounded-full bg-white/5 flex items-center justify-center hover:bg-white/10 transition-colors flex-shrink-0"
+      title={isDownloaded ? 'Downloaded' : isDownloading ? 'Downloading...' : 'Download'}
+    >
+      {isDownloaded ? (
+        <Check size={14} className="text-emerald-400" />
+      ) : isDownloading ? (
+        <Loader2 size={14} className="text-violet-400 animate-spin" />
+      ) : (
+        <Download size={14} className="text-gray-400 group-hover:text-white" />
+      )}
+    </button>
   </div>
 ));
 ChartRow.displayName = 'ChartRow';
@@ -103,6 +117,10 @@ export const ChartsPage: React.FC = () => {
     (artist) => navigate(`/search?q=${encodeURIComponent(artist)}`),
     (album) => navigate(`/search?q=${encodeURIComponent(album)}`),
   );
+
+  const isDownloadedFn = useDownloadsStore((s) => s.isDownloaded);
+  const isDownloadingFn = useDownloadsStore((s) => s.isDownloading);
+  const downloadSong = useDownloadsStore((s) => s.downloadSong);
 
   useEffect(() => {
     const defer = typeof requestIdleCallback === 'function'
@@ -192,6 +210,22 @@ export const ChartsPage: React.FC = () => {
       releaseYear: new Date().getFullYear(),
     })), index);
   }, [charts, loadSong]);
+
+  const handleDownload = useCallback((song: ChartSong) => {
+    const songData = {
+      id: song.id,
+      title: song.title,
+      artist: song.artist,
+      album: 'Charts',
+      duration: song.duration || 200,
+      genre: 'Pop',
+      coverArt: song.thumbnail,
+      audioUrl: '',
+      youtubeId: song.youtubeId,
+      releaseYear: new Date().getFullYear(),
+    };
+    downloadSong(songData);
+  }, [downloadSong]);
 
   const getTrendIcon = useCallback((trend: string) => {
     switch (trend) {
@@ -292,6 +326,9 @@ export const ChartsPage: React.FC = () => {
                       duration: song.duration || 200, genre: 'Pop', coverArt: song.thumbnail,
                       audioUrl: '', youtubeId: song.youtubeId, releaseYear: new Date().getFullYear(),
                     })}
+                    isDownloaded={isDownloadedFn(song.youtubeId || song.id)}
+                    isDownloading={isDownloadingFn(song.youtubeId || song.id)}
+                    onDownload={() => handleDownload(song)}
                   />
                 );
               })}
