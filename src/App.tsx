@@ -6,6 +6,7 @@ import { AppLayout } from './features/layout/AppLayout';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { useAudioStore } from './stores/audioStore';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
+import { backgroundAudio } from './services/backgroundAudio';
 
 const LoginPage = lazy(() => import('./pages/LoginPage'));
 const NotFoundPage = lazy(() => import('./pages/NotFoundPage'));
@@ -50,6 +51,10 @@ const App: React.FC = () => {
   useKeyboardShortcuts();
 
   useEffect(() => {
+    // Request notification permission on startup (Android 13+)
+    // This ensures the foreground service can show its notification
+    backgroundAudio.requestNotificationPermission().catch(() => {});
+
     // Restore playback state in background — never blocks render
     const defer = typeof requestIdleCallback === 'function'
       ? requestIdleCallback

@@ -307,12 +307,14 @@ export class AudioService {
 
       // Start foreground service FIRST — before any audio work — so the app
       // process is protected by Android from being killed during backgrounding.
+      // Must await so the service is guaranteed running before audio starts.
       if (isNativePlatform()) {
         try {
-          backgroundAudio.startService({ title: song.title, artist: song.artist })
-            .then(() => log('Foreground service started'))
-            .catch(() => {});
-        } catch {}
+          const result = await backgroundAudio.startService({ title: song.title, artist: song.artist });
+          log('Foreground service started:', result);
+        } catch (err) {
+          logError('Failed to start foreground service:', err);
+        }
       }
 
       this.stopCurrentPlayback();
@@ -815,7 +817,9 @@ export class AudioService {
         this.startProgressTracking();
         this.emit('play', { song: this.state.currentSong });
         if (isNativePlatform() && this.state.currentSong) {
-          try { backgroundAudio.startService({ title: this.state.currentSong.title, artist: this.state.currentSong.artist }).catch(() => {}); } catch {}
+          try {
+            await backgroundAudio.startService({ title: this.state.currentSong.title, artist: this.state.currentSong.artist });
+          } catch {}
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Resume failed';

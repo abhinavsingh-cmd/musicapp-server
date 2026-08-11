@@ -57,17 +57,26 @@ public class BackgroundAudioPlugin extends Plugin {
 
     @PluginMethod
     public void startService(PluginCall call) {
-        // Always start the service immediately — notification may not show
-        // on Android 13+ without POST_NOTIFICATIONS permission, but the
-        // foreground service still keeps the app alive for background audio.
+        // Always start the service immediately — even without POST_NOTIFICATIONS
+        // permission, the foreground service keeps the app alive for background audio.
         startForegroundService(call);
+
+        // On Android 13+, also request notification permission (notification won't
+        // show without it, which reduces the OS incentive to keep the process alive).
+        if (Build.VERSION.SDK_INT >= 33) {
+            int permResult = getContext().checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS);
+            if (permResult != PackageManager.PERMISSION_GRANTED) {
+                requestPermissionForAlias("notifications", call, "handlePermissionResult");
+            }
+        }
     }
 
     @PermissionCallback
     private void handlePermissionResult(PluginCall call) {
-        // Permission was requested — start service regardless of result
-        // (notification just won't show if denied, but foreground service still works)
-        startForegroundService(call);
+        MusicForegroundService service = getService();
+        if (service != null) {
+            service.rebuildNotification();
+        }
     }
 
     private void startForegroundService(PluginCall call) {
@@ -85,8 +94,6 @@ public class BackgroundAudioPlugin extends Plugin {
                 getContext().startService(intent);
             }
         } catch (Exception e) {
-            // Android 12+ throws ForegroundServiceStartNotAllowedException if started from background.
-            // Resolve gracefully so the JS side doesn't crash — notification simply won't appear.
             System.err.println("[BackgroundAudio] Failed to start foreground service: " + e.getMessage());
             JSObject result = new JSObject();
             result.put("started", false);
@@ -174,10 +181,8 @@ public class BackgroundAudioPlugin extends Plugin {
     public void getPlaybackState(PluginCall call) {
         MusicForegroundService service = getService();
         if (service != null) {
-            // Get current playback state
             JSObject result = new JSObject();
             result.put("isPlaying", service.isPlaying);
-            // TODO: Get actual position and duration from audio player
             result.put("position", 0.0);
             result.put("duration", 0.0);
             call.resolve(result);
@@ -191,8 +196,6 @@ public class BackgroundAudioPlugin extends Plugin {
     }
 
     private MusicForegroundService getService() {
-        // The service instance is accessible via the plugin's context
-        // We use a static reference pattern
         return MusicForegroundService.instance;
     }
 }

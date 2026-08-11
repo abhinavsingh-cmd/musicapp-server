@@ -16,6 +16,7 @@ export interface BackgroundAudioPlugin extends Plugin {
   setShuffle(): Promise<void>;
   setRepeat(): Promise<void>;
   getPlaybackState(): Promise<{ isPlaying: boolean; position: number; duration: number }>;
+  requestPermissions(): Promise<{ notifications: string }>;
   addListener(
     eventName: 'mediaAction',
     listenerFunc: (event: MediaActionEvent) => void,
@@ -30,6 +31,16 @@ try {
 }
 
 export const backgroundAudio = {
+  /** Request notification permission (Android 13+). Should be called on app start. */
+  requestNotificationPermission: async (): Promise<void> => {
+    try {
+      if (!BackgroundAudio) return;
+      await BackgroundAudio.requestPermissions();
+    } catch {
+      // ignore — permission may not be needed or already granted
+    }
+  },
+
   startService: async (options: { title: string; artist: string; album?: string }): Promise<{ started: boolean }> => {
     try {
       if (!BackgroundAudio) return { started: false };

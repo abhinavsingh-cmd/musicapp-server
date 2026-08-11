@@ -262,7 +262,7 @@ public class MusicForegroundService extends Service {
         updateNotification(title, artist, "MusicApp Album", null);
     }
 
-    private void rebuildNotification() {
+    public void rebuildNotification() {
         if (notificationManager == null) return;
         try {
             Notification notification = buildNotification(currentTitle, currentArtist, currentAlbum);
