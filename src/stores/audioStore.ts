@@ -66,7 +66,7 @@ function loadFavorites(): string[] {
   }
 }
 function saveFavorites(favs: string[]) {
-  localStorage.setItem('favorites', JSON.stringify(favs));
+  try { localStorage.setItem('favorites', JSON.stringify(favs)); } catch {}
 }
 
 function loadVolume(): number {
@@ -669,8 +669,8 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
     const newFavs = favorites.includes(songId)
       ? favorites.filter(id => id !== songId)
       : [...favorites, songId];
-    saveFavorites(newFavs);
     set({ favorites: newFavs });
+    saveFavorites(newFavs);
   },
 
   restoreFromPersistence: () => {

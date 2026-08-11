@@ -105,6 +105,10 @@ export const LibraryPage: React.FC = () => {
     if (playlistSongs.length > 0) loadSong(playlistSongs[0], playlistSongs, 0);
   };
 
+  const handleViewPlaylist = (playlist: Playlist) => {
+    navigate(`/playlist/${playlist.id}`);
+  };
+
   if (loading && songs.length === 0 && !shouldRetryFetch) {
     return (
       <div className="flex-1 flex items-center justify-center">
@@ -273,7 +277,7 @@ export const LibraryPage: React.FC = () => {
               ) : (
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
                   {userPlaylists.map((pl) => (
-                    <PlaylistCard key={pl.id} playlist={pl} onPlayPlaylist={handlePlayPlaylist} />
+                    <PlaylistCard key={pl.id} playlist={pl} onPlayPlaylist={handlePlayPlaylist} onViewPlaylist={handleViewPlaylist} />
                   ))}
                 </div>
               )}

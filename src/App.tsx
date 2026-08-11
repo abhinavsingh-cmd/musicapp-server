@@ -17,6 +17,7 @@ const FavoritesPage = lazy(() => import('./pages/FavoritesPage'));
 const CreatePlaylistPage = lazy(() => import('./pages/CreatePlaylistPage'));
 const CreateAlbumPage = lazy(() => import('./pages/CreateAlbumPage'));
 const DownloadsPage = lazy(() => import('./pages/DownloadsPage'));
+const PlaylistDetailPage = lazy(() => import('./pages/PlaylistDetailPage'));
 const ChartsPage = lazy(() => import('./pages/ChartsPage'));
 const HistoryPage = lazy(() => import('./pages/HistoryPage'));
 const SettingsPage = lazy(() => import('./pages/SettingsPage'));
@@ -98,6 +99,9 @@ const App: React.FC = () => {
                   } />
                   <Route path="/downloads" element={
                     <ErrorBoundary level="page"><Suspense fallback={<PageSpinner />}><DownloadsPage /></Suspense></ErrorBoundary>
+                  } />
+                  <Route path="/playlist/:id" element={
+                    <ErrorBoundary level="page"><Suspense fallback={<PageSpinner />}><PlaylistDetailPage /></Suspense></ErrorBoundary>
                   } />
                   <Route path="/charts" element={
                     <ErrorBoundary level="page"><Suspense fallback={<PageSpinner />}><ChartsPage /></Suspense></ErrorBoundary>

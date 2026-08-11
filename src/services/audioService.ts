@@ -305,6 +305,16 @@ export class AudioService {
       this.pendingStartTime = startTime && isFinite(startTime) && startTime > 0 ? startTime : 0;
       log('▶ play() called:', { title: song.title, youtubeId: song.youtubeId || 'NONE', startTime: this.pendingStartTime });
 
+      // Start foreground service FIRST — before any audio work — so the app
+      // process is protected by Android from being killed during backgrounding.
+      if (isNativePlatform()) {
+        try {
+          backgroundAudio.startService({ title: song.title, artist: song.artist })
+            .then(() => log('Foreground service started'))
+            .catch(() => {});
+        } catch {}
+      }
+
       this.stopCurrentPlayback();
 
       this.setState({
@@ -367,14 +377,6 @@ export class AudioService {
         this.setState({ error: msg, isLoading: false, isPlaying: false });
         this.emit('error', msg);
         this.emit('ended');
-      }
-    } finally {
-      if (isNativePlatform() && this.currentPlaybackId === playbackId) {
-        try {
-          backgroundAudio.startService({ title: song.title, artist: song.artist })
-            .then(() => log('Foreground service started'))
-            .catch(() => {});
-        } catch {}
       }
     }
   }
@@ -521,9 +523,6 @@ export class AudioService {
         logPerf('HTML_Audio_Playing', markId);
         this.consecutiveFailures = 0;
 
-        if (isNativePlatform()) {
-          try { backgroundAudio.startService({ title: song.title, artist: song.artist }).catch(() => {}); } catch {}
-        }
         return;
       } catch (err) {
         if (this.currentPlaybackId !== playbackId) return;
@@ -606,9 +605,6 @@ export class AudioService {
                 this.consecutiveFailures = 0;
                 this.startProgressTracking();
                 this.emit('play', { song });
-                if (isNativePlatform()) {
-                  try { backgroundAudio.startService({ title: song.title, artist: song.artist }).catch(() => {}); } catch {}
-                }
               }
               break;
             case 'pause':

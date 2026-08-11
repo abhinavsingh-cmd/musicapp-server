@@ -7,6 +7,7 @@ interface PlaylistCardProps {
   playlist: Playlist;
   className?: string;
   onPlayPlaylist?: (playlist: Playlist) => void;
+  onViewPlaylist?: (playlist: Playlist) => void;
 }
 
 const formatDuration = (seconds: number) => {
@@ -22,7 +23,8 @@ const formatDuration = (seconds: number) => {
 export const PlaylistCard: React.FC<PlaylistCardProps> = memo(({
   playlist,
   className,
-  onPlayPlaylist
+  onPlayPlaylist,
+  onViewPlaylist,
 }) => {
   return (
     <div
@@ -31,7 +33,7 @@ export const PlaylistCard: React.FC<PlaylistCardProps> = memo(({
         "transition-all duration-200 hover:-translate-y-1.5 hover:scale-[1.02] active:scale-[0.97]",
         className
       )}
-      onClick={() => onPlayPlaylist?.(playlist)}
+      onClick={() => onViewPlaylist?.(playlist) ?? onPlayPlaylist?.(playlist)}
     >
       <div className="relative mb-4">
         {playlist.coverArt ? (

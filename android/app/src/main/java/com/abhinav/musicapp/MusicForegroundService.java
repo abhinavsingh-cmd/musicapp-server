@@ -49,6 +49,7 @@ public class MusicForegroundService extends Service {
             createNotificationChannel();
             requestAudioFocus();
             registerHeadsetReceiver();
+            acquireWakeLock();
         } catch (Exception e) {
             System.err.println("[MusicForegroundService] onCreate failed: " + e.getMessage());
         }
@@ -92,6 +93,34 @@ public class MusicForegroundService extends Service {
             }
         } catch (Exception e) {
             System.err.println("[MusicForegroundService] abandonAudioFocus failed: " + e.getMessage());
+        }
+    }
+
+    private void acquireWakeLock() {
+        try {
+            if (wakeLock == null) {
+                PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+                if (pm != null) {
+                    wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MusicApp::Playback");
+                    wakeLock.setReferenceCounted(false);
+                }
+            }
+            if (wakeLock != null && !wakeLock.isHeld()) {
+                wakeLock.acquire();
+            }
+        } catch (Exception e) {
+            System.err.println("[MusicForegroundService] acquireWakeLock failed: " + e.getMessage());
+        }
+    }
+
+    private void releaseWakeLock() {
+        try {
+            if (wakeLock != null && wakeLock.isHeld()) {
+                wakeLock.release();
+            }
+            wakeLock = null;
+        } catch (Exception e) {
+            System.err.println("[MusicForegroundService] releaseWakeLock failed: " + e.getMessage());
         }
     }
 
@@ -159,6 +188,7 @@ public class MusicForegroundService extends Service {
 
             Notification notification = buildNotification(title, artist, album);
             startForeground(NOTIFICATION_ID, notification);
+            acquireWakeLock();
         } catch (Exception e) {
             System.err.println("[MusicForegroundService] onStartCommand failed: " + e.getMessage());
         }
@@ -260,6 +290,7 @@ public class MusicForegroundService extends Service {
             headsetReceiver = null;
         }
         abandonAudioFocus();
+        releaseWakeLock();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE);
         } else {
