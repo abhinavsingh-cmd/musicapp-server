@@ -62,7 +62,7 @@ const HeroSection = memo(({ songCount, onPlayAll, onPlayTrending }: { songCount:
           initial={{ opacity: 0, scale: 0.9 }}
           animate={{ opacity: 1, scale: 1 }}
           transition={{ delay: 0.3 }}
-          className="inline-flex items-center gap-2 px-4 py-2 rounded-full liquid-glass text-white/90 text-sm font-medium mb-4 sm:mb-6 will-transform"
+          className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white/10 text-white/90 text-sm font-medium mb-4 sm:mb-6 will-transform"
           whileHover={{ scale: 1.05 }}
           whileTap={{ scale: 0.95 }}
         >
@@ -109,7 +109,7 @@ const HeroSection = memo(({ songCount, onPlayAll, onPlayTrending }: { songCount:
             whileHover={{ scale: 1.05 }}
             whileTap={{ scale: 0.95 }}
             onClick={onPlayTrending}
-            className="flex items-center gap-2 px-6 sm:px-8 py-3 sm:py-3.5 rounded-full liquid-glass text-white font-bold text-sm sm:text-base transition-all duration-300 will-transform"
+            className="flex items-center gap-2 px-6 sm:px-8 py-3 sm:py-3.5 rounded-full bg-white/10 text-white font-bold text-sm sm:text-base transition-all duration-300 will-transform"
           >
             <Zap size={18} />
             Trending
@@ -315,7 +315,7 @@ export const HomePage: React.FC = memo(() => {
               ))}
             </div>
           ) : (
-            <div className="liquid-glass rounded-xl sm:rounded-2xl p-1 sm:p-2">
+            <div className="bg-white/10 rounded-xl sm:rounded-2xl p-1 sm:p-2">
               <SongTable songs={trending} />
             </div>
           )}
@@ -342,7 +342,7 @@ export const HomePage: React.FC = memo(() => {
                 <div
                   key={pl.id}
                   onClick={() => handlePlayPlaylist(pl)}
-                  className="group cursor-pointer liquid-glass rounded-xl sm:rounded-2xl p-3 sm:p-4 transition-all duration-300 hover:scale-[1.03] hover:-translate-y-1"
+                  className="group cursor-pointer bg-white/10 rounded-xl sm:rounded-2xl p-3 sm:p-4 transition-all duration-300 hover:scale-[1.03] hover:-translate-y-1"
                 >
                   <div className={`w-full aspect-square rounded-lg sm:rounded-xl bg-gradient-to-br ${pl.gradient} mb-2 sm:mb-3 flex items-center justify-center shadow-lg relative overflow-hidden`}>
                     <span className="text-2xl sm:text-4xl">{pl.emoji}</span>
@@ -385,7 +385,7 @@ export const HomePage: React.FC = memo(() => {
                   className={`flex-shrink-0 text-center group cursor-pointer transition-transform hover:scale-105 hover:-translate-y-1 ${selectedArtist === a.artist ? 'ring-2 ring-violet-500 rounded-full' : ''}`}
                 >
                   <div className="relative mb-2">
-                    <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-full overflow-hidden mx-auto liquid-glass p-1 group-hover:shadow-glow transition-all duration-300" onClick={() => handleArtistClick(a.artist)}>
+                    <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-full overflow-hidden mx-auto bg-white/10 p-1 group-hover:shadow-glow transition-all duration-300" onClick={() => handleArtistClick(a.artist)}>
                       <img 
                         src={a.coverArt} 
                         alt={a.artist} 
@@ -426,7 +426,7 @@ export const HomePage: React.FC = memo(() => {
               ))}
             </div>
           ) : (
-            <div className="liquid-glass rounded-xl sm:rounded-2xl p-1 sm:p-2">
+            <div className="bg-white/10 rounded-xl sm:rounded-2xl p-1 sm:p-2">
               <SongTable songs={filteredSongs} />
             </div>
           )}

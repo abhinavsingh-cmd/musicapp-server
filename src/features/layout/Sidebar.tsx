@@ -132,7 +132,7 @@ const UserProfile = memo(function UserProfile({ user, logout, onClose }: {
       <Link
         to="/settings"
         onClick={onClose}
-        className="flex items-center space-x-3 px-3 py-2 rounded-xl liquid-glass transition-all duration-300 hover:shadow-glow"
+        className="flex items-center space-x-3 px-3 py-2 rounded-xl bg-white/10 transition-all duration-300 hover:bg-white/15"
       >
         <motion.img
           whileHover={{ scale: 1.1 }}

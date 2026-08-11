@@ -57,15 +57,9 @@ public class BackgroundAudioPlugin extends Plugin {
 
     @PluginMethod
     public void startService(PluginCall call) {
-        // Check POST_NOTIFICATIONS permission on Android 13+ before starting
-        if (Build.VERSION.SDK_INT >= 33) {
-            int permResult = getContext().checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS);
-            if (permResult != PackageManager.PERMISSION_GRANTED) {
-                requestPermissionForAlias("notifications", call, "handlePermissionResult");
-                return;
-            }
-        }
-
+        // Always start the service immediately — notification may not show
+        // on Android 13+ without POST_NOTIFICATIONS permission, but the
+        // foreground service still keeps the app alive for background audio.
         startForegroundService(call);
     }
 
