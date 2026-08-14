@@ -1746,6 +1746,56 @@ app.get("/api/lyrics/:videoId", (req, res) => {
   return fail(res, 501, "NOT_IMPLEMENTED", "Lyrics provider not configured", { videoId });
 });
 
+// ---------------------------------------------------------------------------
+// JioSaavn api.php passthrough
+// ---------------------------------------------------------------------------
+// JioSaavn's public api.php sends no CORS headers, so browsers and Capacitor
+// WebViews cannot call it directly. This tiny whitelist forwards the read-only
+// operations the JioSaavn provider needs (`search.getResults`,
+// `song.getDetails`) and re-emits JSON. The upstream query is rebuilt
+// server-side — user input never reaches JioSaavn as a raw query string.
+const JIOSAAVN_UPSTREAM = "https://www.jiosaavn.com/api.php";
+const JIOSAAVN_CALLS = {
+  "search.getResults": "4",
+  "song.getDetails": "2",
+};
+const JIOSAAVN_ALLOWED_PARAMS = new Set(["q", "pids", "page", "n"]);
+app.get("/api/jiosaavn", async (req, res) => {
+  const call = req.query.__call;
+  if (typeof call !== "string" || !Object.prototype.hasOwnProperty.call(JIOSAAVN_CALLS, call)) {
+    return fail(res, 400, "INVALID_CALL", "Unsupported JioSaavn operation", { call });
+  }
+  try {
+    const upstream = new URL(JIOSAAVN_UPSTREAM);
+    upstream.searchParams.set("__call", call);
+    upstream.searchParams.set("api_version", JIOSAAVN_CALLS[call]);
+    upstream.searchParams.set("_format", "json");
+    for (const [key, value] of Object.entries(req.query)) {
+      if (JIOSAAVN_ALLOWED_PARAMS.has(key)) {
+        upstream.searchParams.set(key, Array.isArray(value) ? String(value[0]) : String(value));
+      }
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10000);
+    const upstreamRes = await fetch(upstream, {
+      signal: controller.signal,
+      headers: {
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+      },
+    });
+    clearTimeout(timer);
+    const text = await upstreamRes.text();
+    res.status(upstreamRes.status);
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.setHeader("Cache-Control", "public, max-age=120");
+    res.send(text);
+  } catch (upstreamErr) {
+    console.error("[Server] JioSaavn upstream failed:", upstreamErr && upstreamErr.message ? upstreamErr.message : upstreamErr);
+    return fail(res, 502, "UPSTREAM_ERROR", "JioSaavn upstream request failed");
+  }
+});
+
 // API root
 app.get("/api", (req, res) => {
   return ok(res, { songs: songs.length, version: "1.2.0", endpoints: ["/api/songs", "/api/search", "/api/genre/:genre", "/api/youtube/search", "/api/youtube/trending", "/api/charts/trending.json", "/api/stream/:videoId", "/api/download/:videoId", "/api/audio-info/:videoId", "/api/lyrics/:videoId", "/api/playlists", "/api/playlists/:id/songs", "/api/health"] }, "API ready");
