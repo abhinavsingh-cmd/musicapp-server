@@ -12,13 +12,19 @@ import android.content.IntentFilter;
 import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
+import android.media.MediaPlayer;
 import android.media.session.MediaSession;
 import android.media.session.PlaybackState;
+import android.net.Uri;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.PowerManager;
+import android.util.Log;
 
-public class MusicForegroundService extends Service {
+import androidx.annotation.Nullable;
+import androidx.core.content.ContextCompat;
+
+public class MusicForegroundService extends Service implements MediaPlayer.OnPreparedListener, MediaPlayer.OnCompletionListener, MediaPlayer.OnErrorListener, MediaPlayer.OnSeekCompleteListener, MediaPlayer.OnBufferingUpdateListener, MediaPlayer.OnInfoListener {
     private static final String CHANNEL_ID = "music_playback";
     private static final int NOTIFICATION_ID = 1;
     private static final String ACTION_PLAY = "com.abhinav.musicapp.action.PLAY";
@@ -29,6 +35,12 @@ public class MusicForegroundService extends Service {
     private static final String ACTION_HEADSET_PLUG = "android.intent.action.HEADSET_PLUG";
 
     public static MusicForegroundService instance;
+
+    // Native MediaPlayer for actual audio playback (survives WebView lifecycle)
+    private MediaPlayer mediaPlayer;
+    private String pendingAudioUrl;
+    private boolean isPrepared = false;
+    private boolean isBuffering = false;
 
     private NotificationManager notificationManager;
     private AudioManager audioManager;
@@ -56,9 +68,213 @@ public class MusicForegroundService extends Service {
             registerNotificationActionReceiver();
             initMediaSession();
             acquireWakeLock();
+
+            // Initialize native MediaPlayer for background playback
+            initMediaPlayer();
         } catch (Exception e) {
             System.err.println("[MusicForegroundService] onCreate failed: " + e.getMessage());
         }
+    }
+
+    private void initMediaPlayer() {
+        try {
+            mediaPlayer = new MediaPlayer();
+            mediaPlayer.setAudioAttributes(new AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .build());
+            mediaPlayer.setWakeMode(getApplicationContext(), PowerManager.PARTIAL_WAKE_LOCK);
+            mediaPlayer.setOnPreparedListener(this);
+            mediaPlayer.setOnCompletionListener(this);
+            mediaPlayer.setOnErrorListener(this);
+            mediaPlayer.setOnSeekCompleteListener(this);
+            mediaPlayer.setOnBufferingUpdateListener(this);
+            mediaPlayer.setOnInfoListener(this);
+            Log.i("MusicForegroundService", "Native MediaPlayer initialized");
+        } catch (Exception e) {
+            System.err.println("[MusicForegroundService] initMediaPlayer failed: " + e.getMessage());
+        }
+    }
+
+    // ─── Native MediaPlayer playback control ───
+
+    public void playAudioUrl(String audioUrl) {
+        if (mediaPlayer == null) return;
+        try {
+            pendingAudioUrl = audioUrl;
+            isPrepared = false;
+            isBuffering = true;
+            updateNativePlaybackState(PlaybackState.STATE_BUFFERING);
+
+            mediaPlayer.reset();
+            mediaPlayer.setDataSource(this, Uri.parse(audioUrl));
+            mediaPlayer.prepareAsync();
+            Log.i("MusicForegroundService", "Preparing native MediaPlayer for: " + audioUrl);
+        } catch (Exception e) {
+            System.err.println("[MusicForegroundService] playAudioUrl failed: " + e.getMessage());
+            isBuffering = false;
+            updateNativePlaybackState(PlaybackState.STATE_ERROR);
+        }
+    }
+
+    public void pausePlayback() {
+        if (mediaPlayer != null && mediaPlayer.isPlaying()) {
+            mediaPlayer.pause();
+            isPlaying = false;
+            updateNativePlaybackState(PlaybackState.STATE_PAUSED);
+            Log.i("MusicForegroundService", "Native playback paused");
+        }
+    }
+
+    public void resumePlayback() {
+        if (mediaPlayer != null && !mediaPlayer.isPlaying() && isPrepared) {
+            mediaPlayer.start();
+            isPlaying = true;
+            updateNativePlaybackState(PlaybackState.STATE_PLAYING);
+            Log.i("MusicForegroundService", "Native playback resumed");
+        }
+    }
+
+    public void stopPlayback() {
+        if (mediaPlayer != null) {
+            mediaPlayer.stop();
+            mediaPlayer.reset();
+            isPlaying = false;
+            isPrepared = false;
+            isBuffering = false;
+            pendingAudioUrl = null;
+            updateNativePlaybackState(PlaybackState.STATE_STOPPED);
+            Log.i("MusicForegroundService", "Native playback stopped");
+        }
+        abandonAudioFocus();
+    }
+
+    public void seekToPosition(long position) {
+        if (mediaPlayer != null && isPrepared) {
+            try {
+                mediaPlayer.seekTo((int) position);
+                Log.i("MusicForegroundService", "Native seek to: " + position);
+            } catch (Exception e) {
+                System.err.println("[MusicForegroundService] seekToPosition failed: " + e.getMessage());
+            }
+        }
+    }
+
+    public void setVolume(float volume) {
+        if (mediaPlayer != null) {
+            mediaPlayer.setVolume(volume, volume);
+        }
+    }
+
+    public long getCurrentPosition() {
+        if (mediaPlayer != null && isPrepared) {
+            try {
+                return mediaPlayer.getCurrentPosition();
+            } catch (Exception e) {
+                return 0;
+            }
+        }
+        return 0;
+    }
+
+    public long getDuration() {
+        if (mediaPlayer != null && isPrepared) {
+            try {
+                return mediaPlayer.getDuration();
+            } catch (Exception e) {
+                return 0;
+            }
+        }
+        return 0;
+    }
+
+    public boolean isNativePlaying() {
+        return mediaPlayer != null && mediaPlayer.isPlaying();
+    }
+
+    // Helper to update playback state for native MediaPlayer (used internally)
+    private void updateNativePlaybackState(int state) {
+        if (mediaSession != null) {
+            try {
+                PlaybackState.Builder stateBuilder = new PlaybackState.Builder()
+                    .setState(state, getCurrentPosition(), 1.0f)
+                    .setActions(
+                        PlaybackState.ACTION_PLAY |
+                        PlaybackState.ACTION_PAUSE |
+                        PlaybackState.ACTION_PLAY_PAUSE |
+                        PlaybackState.ACTION_SKIP_TO_NEXT |
+                        PlaybackState.ACTION_SKIP_TO_PREVIOUS |
+                        PlaybackState.ACTION_STOP |
+                        PlaybackState.ACTION_SEEK_TO
+                    );
+                mediaSession.setPlaybackState(stateBuilder.build());
+            } catch (Exception e) {
+                System.err.println("[MusicForegroundService] updateNativePlaybackState failed: " + e.getMessage());
+            }
+        }
+    }
+
+    // ─── MediaPlayer callbacks ───
+
+    @Override
+    public void onPrepared(MediaPlayer mp) {
+        isPrepared = true;
+        isBuffering = false;
+        if (pendingAudioUrl != null) {
+            mp.start();
+            isPlaying = true;
+            updateNativePlaybackState(PlaybackState.STATE_PLAYING);
+            Log.i("MusicForegroundService", "Native MediaPlayer prepared and started");
+        }
+    }
+
+    @Override
+    public void onCompletion(MediaPlayer mp) {
+        isPlaying = false;
+        isPrepared = false;
+        pendingAudioUrl = null;
+        updateNativePlaybackState(PlaybackState.STATE_STOPPED);
+        // Notify JS layer to handle next song
+        BackgroundAudioPlugin.notifyMediaAction("ended", -1);
+        Log.i("MusicForegroundService", "Native MediaPlayer completed");
+    }
+
+    @Override
+    public boolean onError(MediaPlayer mp, int what, int extra) {
+        System.err.println("[MusicForegroundService] Native MediaPlayer error: what=" + what + ", extra=" + extra);
+        isBuffering = false;
+        isPrepared = false;
+        isPlaying = false;
+        updateNativePlaybackState(PlaybackState.STATE_ERROR);
+        // Notify JS layer of error
+        BackgroundAudioPlugin.notifyMediaAction("error", -1);
+        return true; // Handled
+    }
+
+    @Override
+    public void onSeekComplete(MediaPlayer mp) {
+        Log.i("MusicForegroundService", "Native seek complete");
+    }
+
+    @Override
+    public void onBufferingUpdate(MediaPlayer mp, int percent) {
+        // Could emit buffering progress to JS if needed
+    }
+
+    @Override
+    public boolean onInfo(MediaPlayer mp, int what, int extra) {
+        if (what == MediaPlayer.MEDIA_INFO_BUFFERING_START) {
+            isBuffering = true;
+            updateNativePlaybackState(PlaybackState.STATE_BUFFERING);
+            Log.i("MusicForegroundService", "Native buffering started");
+        } else if (what == MediaPlayer.MEDIA_INFO_BUFFERING_END) {
+            isBuffering = false;
+            if (isPlaying) {
+                updateNativePlaybackState(PlaybackState.STATE_PLAYING);
+            }
+            Log.i("MusicForegroundService", "Native buffering ended");
+        }
+        return true;
     }
 
     // -----------------------------------------------------------------------
@@ -164,11 +380,8 @@ public class MusicForegroundService extends Service {
             filter.addAction(ACTION_NEXT);
             filter.addAction(ACTION_PREVIOUS);
             filter.addAction(ACTION_STOP);
-            if (Build.VERSION.SDK_INT >= 34) {
-                registerReceiver(notificationActionReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
-            } else {
-                registerReceiver(notificationActionReceiver, filter);
-            }
+            // Use ContextCompat for proper receiver flag handling on all API levels
+            androidx.core.content.ContextCompat.registerReceiver(this, notificationActionReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED);
         } catch (Exception e) {
             System.err.println("[MusicForegroundService] registerNotificationActionReceiver failed: " + e.getMessage());
         }
@@ -242,8 +455,7 @@ public class MusicForegroundService extends Service {
             System.err.println("[MusicForegroundService] releaseWakeLock failed: " + e.getMessage());
         }
     }
-
-    private void registerHeadsetReceiver() {
+private void registerHeadsetReceiver() {
         try {
             headsetReceiver = new BroadcastReceiver() {
                 @Override
@@ -265,14 +477,12 @@ public class MusicForegroundService extends Service {
                     }
                 }
             };
+
             IntentFilter filter = new IntentFilter();
             filter.addAction(ACTION_HEADSET_PLUG);
             filter.addAction("android.bluetooth.adapter.action.CONNECTION_STATE_CHANGED");
-            if (Build.VERSION.SDK_INT >= 34) {
-                registerReceiver(headsetReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
-            } else {
-                registerReceiver(headsetReceiver, filter);
-            }
+            // Use ContextCompat for proper receiver flag handling on all API levels
+            androidx.core.content.ContextCompat.registerReceiver(this, headsetReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED);
         } catch (Exception e) {
             System.err.println("[MusicForegroundService] registerHeadsetReceiver failed: " + e.getMessage());
         }
@@ -399,6 +609,39 @@ public class MusicForegroundService extends Service {
 
     private void dispatchMediaAction(String action, long position) {
         if (instance == null) return;
+
+        // Handle native MediaPlayer playback commands
+        if (ACTION_PLAY.equals(action)) {
+            if (pendingAudioUrl != null && !isPrepared) {
+                // First play - the audio URL was already set via playAudioUrl
+                resumePlayback();
+            } else if (!isPlaying && isPrepared) {
+                resumePlayback();
+            }
+            BackgroundAudioPlugin.notifyMediaAction("play", position);
+            return;
+        } else if (ACTION_PAUSE.equals(action)) {
+            pausePlayback();
+            BackgroundAudioPlugin.notifyMediaAction("pause", position);
+            return;
+        } else if (ACTION_STOP.equals(action)) {
+            stopPlayback();
+            BackgroundAudioPlugin.notifyMediaAction("stop", position);
+            return;
+        } else if (ACTION_NEXT.equals(action)) {
+            BackgroundAudioPlugin.notifyMediaAction("next", position);
+            return;
+        } else if (ACTION_PREVIOUS.equals(action)) {
+            BackgroundAudioPlugin.notifyMediaAction("previous", position);
+            return;
+        } else if ("seek".equals(action)) {
+            if (position >= 0) {
+                seekToPosition(position);
+            }
+            BackgroundAudioPlugin.notifyMediaAction("seek", position);
+            return;
+        }
+
         String eventAction;
         if (ACTION_PLAY.equals(action)) {
             eventAction = "play";
@@ -419,6 +662,14 @@ public class MusicForegroundService extends Service {
     public void updatePlaybackState(boolean isPlaying, long position, long duration) {
         this.isPlaying = isPlaying;
         this.duration = duration;
+        // Sync native MediaPlayer state if JS is controlling playback
+        if (mediaPlayer != null && isPrepared) {
+            if (isPlaying && !mediaPlayer.isPlaying()) {
+                resumePlayback();
+            } else if (!isPlaying && mediaPlayer.isPlaying()) {
+                pausePlayback();
+            }
+        }
         updateMediaSessionState();
         rebuildNotification();
     }
@@ -486,6 +737,13 @@ public class MusicForegroundService extends Service {
     public void onDestroy() {
         instance = null;
         BackgroundAudioPlugin.stopKeepAlive();
+        if (mediaPlayer != null) {
+            try {
+                mediaPlayer.stop();
+                mediaPlayer.release();
+            } catch (Exception ignored) {}
+            mediaPlayer = null;
+        }
         if (mediaSession != null) {
             try { mediaSession.setActive(false); } catch (Exception ignored) {}
             try { mediaSession.release(); } catch (Exception ignored) {}

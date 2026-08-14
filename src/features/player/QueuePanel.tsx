@@ -2,6 +2,7 @@ import React, { useState, useMemo, useCallback, memo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQueueStore } from '../../stores/queueStore';
 import { useAudioStore } from '../../stores/audioStore';
+import { useDownloadsStore } from '../../stores/downloadsStore';
 import { useShallow } from 'zustand/react/shallow';
 import { useSongContextMenu } from '../../components/SongContextMenu';
 import { cn } from '../../utils/cn';
@@ -143,7 +144,7 @@ const SortableSongRow = memo(({ song, index, isCurrent, isPlaying, section, onCo
       <span className="text-xs text-gray-600 flex-shrink-0">{formatDuration(song.duration)}</span>
 
       <button
-        onClick={(e) => { e.stopPropagation(); if (isDownloading) cancelDownload(); else if (!isDownloaded) downloadSong(song); }}
+        onClick={(e) => { e.stopPropagation(); if (isDownloading) cancelDownload(song.youtubeId || song.id); else if (!isDownloaded) downloadSong(song); }}
         disabled={isDownloaded && !isDownloading}
         className={cn("p-2 rounded-lg transition-all", isDownloaded ? "text-emerald-400" : isDownloading ? "text-violet-400" : "text-gray-500 hover:text-violet-400 hover:bg-white/5")}
         title={isDownloaded ? "Downloaded" : isDownloading ? "Cancel download" : "Download"}

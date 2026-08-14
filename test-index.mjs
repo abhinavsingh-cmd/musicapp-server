@@ -1,5 +1,4 @@
 import { registerHooks } from 'node:module';
-import { fileURLToPath } from 'node:url';
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -16,7 +15,7 @@ registerHooks({
 
 Object.defineProperty(globalThis, 'navigator', { value: { onLine: true, userAgent: 'node' }, configurable: true });
 globalThis.localStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
-globalThis.requestIdleCallback = (cb, opts) => {
+globalThis.requestIdleCallback = (cb) => {
   setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 }), 0);
   return 0;
 };

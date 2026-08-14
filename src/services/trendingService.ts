@@ -257,9 +257,18 @@ class TrendingService {
 
     console.warn(`[Trending] ❌ ALL RETRIES FAILED after ${MAX_RETRIES} attempts: ${lastError}`);
     this.recordFailure();
-    // Do not throw — fall through to best-available fallback below
-    // (disk cache → local library → builtin). This ensures the UI never
-    // shows an unhandled error and the user always sees something useful.
+    // Do not throw — return the best-available fallback
+    // (disk cache → memory cache → local library → builtin). This ensures
+    // the UI never shows an unhandled error and the user always sees
+    // something useful.
+    const disk = this.loadFromDisk();
+    const fallback = this.cache && isLiveSource(this.cache.source)
+      ? this.cache
+      : disk && isLiveSource(disk.source)
+        ? disk
+        : buildLocalFallback();
+    console.warn(`[Trending] Falling back to: source=${fallback.source}, songs=${fallback.songs.length}`);
+    return fallback;
   }
 
   // ── Metrics ──

@@ -122,7 +122,7 @@ test('full user journey (desktop)', async ({ page }) => {
 
     await player(page).locator('button:has(svg.lucide-skip-forward)').click();
     let after = before;
-    let spinHistory: number[] = [];
+    const spinHistory: number[] = [];
     for (let i = 0; i < 18 && after === before; i++) {
       await page.waitForTimeout(800);
       spinHistory.push(await player(page).locator('svg.animate-spin').count());

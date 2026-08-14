@@ -154,12 +154,12 @@ export const SongTable: React.FC<SongTableProps> = memo(({ songs, className }) =
 
   useEffect(() => {
     if (isLoading && songs.length === 0) {
-      setRetryState({
-        ...retryState,
+      setRetryState(prev => ({
+        ...prev,
         lastRetryTime: Date.now(),
         error: null,
         isRetrying: false
-      });
+      }));
     }
   }, [isLoading, songs.length]);
 
@@ -207,7 +207,7 @@ const shouldShowRetry = useMemo(() => {
     if (shouldShowRetry && !retryState.isRetrying) {
       handleTimeout();
     }
-  }, [shouldShowRetry, handleTimeout]);
+  }, [shouldShowRetry, handleTimeout, retryState.isRetrying]);
 
   const isLoadingRef = useRef(false);
 
@@ -221,7 +221,7 @@ const shouldShowRetry = useMemo(() => {
       loadSong(songToPlay, songs, index);
       setTimeout(() => { isLoadingRef.current = false; }, 500);
     }
-  }, [currentSongId, loadSong, togglePlayPause, songs]);
+  }, [currentSongId, loadSong, togglePlayPause, songs, downloadsMap]);
 
   if (songs.length === 0 && isLoading && !shouldShowRetry) {
     return (

@@ -584,7 +584,7 @@ export class DownloadManager {
       const chunks: Uint8Array[] = [];
       let loaded = 0;
       let lastProgressTime = Date.now();
-      let speedSamples: number[] = [];
+      const speedSamples: number[] = [];
 
       while (true) {
         if (controller.signal.aborted) {
@@ -660,8 +660,6 @@ export class DownloadManager {
         timestamp: Date.now(),
       });
 
-    } catch (error) {
-      throw error;
     } finally {
       this.abortControllers.delete(queueItem.id);
     }

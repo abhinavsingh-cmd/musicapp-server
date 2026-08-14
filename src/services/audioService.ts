@@ -3,18 +3,18 @@ import { backgroundPlaybackService } from './backgroundPlaybackService';
 import { audioEffectsService } from './audioEffectsService';
 import { backgroundAudio } from './backgroundAudio';
 import { youtubePlayerService } from './youtubePlayerService';
-import { extractAudioUrl, invalidateAudioUrl } from './youtubeAudioExtractor';
 import { showToast } from '../utils/toast';
 import { metricsCollector } from './metricsCollector';
+import {
+  resolvePlayableSource,
+  playableToEngineParams,
+  toTrack,
+  toSong,
+  type Track,
+} from '../providers';
 
 function isNativePlatform(): boolean {
   return !!(window as any).Capacitor;
-}
-
-const YT_ID_RE = /^[a-zA-Z0-9_-]{11}$/;
-
-function isValidYouTubeId(id: string | undefined): id is string {
-  return typeof id === 'string' && YT_ID_RE.test(id);
 }
 
 interface AudioState {
@@ -299,11 +299,15 @@ export class AudioService {
 
   private async _playInternal(song: Song, playlist: Song[], startIndex: number, startTime?: number): Promise<void> {
     const playbackId = ++this.currentPlaybackId;
+    // Normalize once — everything downstream consumes the provider-agnostic
+    // Track and PlayableSource shapes; the original Song is only used for
+    // events and state so store/UI consumers see no change.
+    const track = toTrack(song);
     try {
       const markId = `play_${song.id}_${Date.now()}`;
       this.streamStartTime = performance.now();
       this.pendingStartTime = startTime && isFinite(startTime) && startTime > 0 ? startTime : 0;
-      log('▶ play() called:', { title: song.title, youtubeId: song.youtubeId || 'NONE', startTime: this.pendingStartTime });
+      log('▶ play() called:', { title: song.title, provider: track.provider, externalId: track.externalId || 'NONE', startTime: this.pendingStartTime });
 
       // Start foreground service FIRST — before any audio work — so the app
       // process is protected by Android from being killed during backgrounding.
@@ -329,38 +333,29 @@ export class AudioService {
       });
       this.emit('loaded', { song, playlist, index: startIndex });
 
-      if (song.audioUrl && song.audioUrl.trim()) {
-        log('PATH 1: HTML audio via audioUrl');
-        this.useYoutubePlayer = false;
-        await this.playHtmlAudio(song, playbackId, markId);
+      // Resolve a playable source through the track's provider. The engine
+      // never inspects provider ids or endpoints — only the normalized
+      // PlayableSource shape.
+      const playable = await resolvePlayableSource(track);
+      if (this.currentPlaybackId !== playbackId) return;
+
+      if (!playable) {
+        logError('NO AUDIO SOURCE for:', song.title);
+        this.setState({ error: 'No audio source available', isLoading: false });
+        this.emit('error', 'No audio source available');
+        this.emit('ended');
         return;
       }
 
-      if (song.youtubeId && isValidYouTubeId(song.youtubeId)) {
-        log('Extracting audio URL for:', song.youtubeId);
-        let extractionResult: string | null = null;
-        try {
-          extractionResult = await extractAudioUrl(song.youtubeId);
-        } catch (err) {
-          logError('Extraction failed:', err);
-        }
-
-        if (extractionResult && this.currentPlaybackId === playbackId) {
-          log('✓ Extraction succeeded — playing as HTML audio');
-          this.useYoutubePlayer = false;
-          await this.playHtmlAudio({ ...song, audioUrl: extractionResult }, playbackId, markId);
-          return;
-        }
-
-        if (this.currentPlaybackId !== playbackId) return;
-
-        log('Extraction failed — falling back to YouTube IFrame');
+      const params = playableToEngineParams(playable);
+      if (params.mode === 'iframe') {
+        log('No direct stream — using embedded player (provider:', track.provider + ')');
         preconnectYouTube();
         this.useYoutubePlayer = true;
         try {
-          await this.playYouTube(song, playbackId, markId);
+          await this.playYouTube(song, track, params.videoId, playbackId, markId);
         } catch (ytErr) {
-          logError('YouTube IFrame also failed:', ytErr);
+          logError('Embedded player also failed:', ytErr);
           if (this.currentPlaybackId === playbackId) {
             this.emitPlaybackError(song, `Unable to play "${song.title}" — no audio source available`);
           }
@@ -368,10 +363,8 @@ export class AudioService {
         return;
       }
 
-      logError('NO AUDIO SOURCE for:', song.title);
-      this.setState({ error: 'No audio source available', isLoading: false });
-      this.emit('error', 'No audio source available');
-      this.emit('ended');
+      this.useYoutubePlayer = false;
+      await this.playHtmlAudio(song, track, params, playbackId, markId);
     } catch (err) {
       logError('_playInternal UNEXPECTED ERROR:', err);
       if (this.currentPlaybackId === playbackId) {
@@ -383,12 +376,20 @@ export class AudioService {
     }
   }
 
-  private async playHtmlAudio(song: Song, playbackId: number, markId: string): Promise<void> {
+  private async playHtmlAudio(
+    song: Song,
+    track: Track,
+    initialParams: { mode: 'html'; src: string; isLocalFile: boolean; expiresInMs?: number },
+    playbackId: number,
+    markId: string,
+  ): Promise<void> {
     const MAX_RETRIES = 3;
     // Proxy/extracted URLs need more time to start streaming than local files
-    const CANPLAY_TIMEOUT_MS = song.audioUrl?.includes('/proxy-audio') ? 10_000 : 8_000;
+    const CANPLAY_TIMEOUT_MS = initialParams.src.includes('/proxy-audio') ? 10_000 : 8_000;
 
     this.stopYouTubePlayer();
+
+    let params = initialParams;
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       if (this.currentPlaybackId !== playbackId) return;
@@ -397,7 +398,7 @@ export class AudioService {
 
       log(`▶ playHtmlAudio attempt ${attempt}/${MAX_RETRIES}:`, {
         title: song.title,
-        src: song.audioUrl ? `${song.audioUrl.substring(0, 80)}` : 'EMPTY',
+        src: params.src ? `${params.src.substring(0, 80)}` : 'EMPTY',
         volume: this.state.volume,
       });
 
@@ -450,7 +451,7 @@ export class AudioService {
       }
 
       // Assign source AFTER equalizer is ready
-      audio.src = song.audioUrl || '';
+      audio.src = params.src;
 
       if (audio.volume === 0 || Number.isNaN(audio.volume)) {
         const safe = this.state.volume || 0.7;
@@ -488,9 +489,9 @@ export class AudioService {
         if (attempt < MAX_RETRIES) {
           log('Retrying...');
           // The stream URL is likely stale/expired (403/416 upstream) — force a
-          // fresh extraction so the next attempt doesn't reuse the bad URL.
-          const freshUrl = await this.reExtractFreshUrl(song);
-          if (freshUrl) song.audioUrl = freshUrl;
+          // fresh resolution so the next attempt doesn't reuse the bad URL.
+          const fresh = await this.reExtractFreshParams(track, params);
+          if (fresh) params = fresh;
           continue;
         }
         this.emitPlaybackError(song, `Unable to play "${song.title}" — loading timed out`);
@@ -539,8 +540,8 @@ export class AudioService {
 
         if (attempt < MAX_RETRIES) {
           log('Retrying...');
-          const freshUrl = await this.reExtractFreshUrl(song);
-          if (freshUrl) song.audioUrl = freshUrl;
+          const fresh = await this.reExtractFreshParams(track, params);
+          if (fresh) params = fresh;
           continue;
         }
 
@@ -555,17 +556,29 @@ export class AudioService {
   }
 
   /**
-   * Force a fresh stream URL for a failed play attempt. The cached proxy URL may
-   * reference an expired/nerfed Googlevideo URL (403/416) — invalidating the
-   * extractor cache makes the next extractAudioUrl() call fetch a new one.
+   * Force a fresh playable source for a failed play attempt. The cached proxy
+   * URL may reference an expired/nerfed Googlevideo URL (403/416) — asking the
+   * provider to re-resolve bypasses any cached stream. Only non-local proxy
+   * streams are re-resolved (local files never expire).
    */
-  private async reExtractFreshUrl(song: Song): Promise<string | null> {
-    if (!song.youtubeId || !song.audioUrl?.includes('/proxy-audio')) return null;
-    invalidateAudioUrl(song.youtubeId);
-    return await extractAudioUrl(song.youtubeId).catch(() => null);
+  private async reExtractFreshParams(
+    track: Track,
+    current: { mode: 'html'; src: string; isLocalFile: boolean; expiresInMs?: number },
+  ): Promise<{ mode: 'html'; src: string; isLocalFile: boolean; expiresInMs?: number } | null> {
+    if (current.isLocalFile || !current.src.includes('/proxy-audio')) return null;
+    const playable = await resolvePlayableSource(track, { force: true });
+    if (!playable) return null;
+    const fresh = playableToEngineParams(playable);
+    return fresh.mode === 'html' ? fresh : null;
   }
 
-  private async playYouTube(song: Song, playbackId: number, markId: string): Promise<void> {
+  private async playYouTube(
+    song: Song,
+    track: Track,
+    videoId: string,
+    playbackId: number,
+    markId: string,
+  ): Promise<void> {
     const MAX_YT_RETRIES = 3;
 
     this.stopHtmlAudio();
@@ -590,7 +603,7 @@ export class AudioService {
       try {
         this.stopYouTubePlayer();
 
-        log(`▶ playYouTube attempt ${attempt}/${MAX_YT_RETRIES}:`, { title: song.title, youtubeId: song.youtubeId });
+        log(`▶ playYouTube attempt ${attempt}/${MAX_YT_RETRIES}:`, { title: song.title, videoId });
 
         const attemptMark = `ytAPI_${song.id}_${attempt}`;
         performance.mark(attemptMark);
@@ -642,11 +655,11 @@ export class AudioService {
           }
         });
 
-        await youtubePlayerService.load(song);
+        await youtubePlayerService.load(toSong(track));
 
         if (this.currentPlaybackId !== playbackId) return;
 
-        if (song.youtubeId) youtubePlayerService.markStreamWorking(song.youtubeId);
+        youtubePlayerService.markStreamWorking(videoId);
 
         if (this.pendingStartTime > 0) {
           try {
@@ -677,18 +690,18 @@ export class AudioService {
         }
 
         clearBufferingTimeout();
-        // Fallback: try Invidious audio extraction when YouTube IFrame fails
-        log('YouTube IFrame failed — attempting Invidious audio extraction fallback...');
-        try {
-          const extractedUrl = await extractAudioUrl(song.youtubeId!);
-          if (extractedUrl && this.currentPlaybackId === playbackId) {
-            log('Invidious fallback succeeded — playing as HTML audio:', extractedUrl.substring(0, 80));
+        // Fallback: ask the provider to re-resolve a direct stream (e.g. fresh
+        // extraction) now that the embedded player failed.
+        log('Embedded player failed — attempting fresh stream resolution via provider...');
+        const fresh = await resolvePlayableSource(track, { force: true });
+        if (fresh && this.currentPlaybackId === playbackId) {
+          const freshParams = playableToEngineParams(fresh);
+          if (freshParams.mode === 'html') {
+            log('Provider stream fallback succeeded — playing as HTML audio:', freshParams.src.substring(0, 80));
             this.useYoutubePlayer = false;
-            this.playHtmlAudio({ ...song, audioUrl: extractedUrl }, playbackId, markId);
+            await this.playHtmlAudio(song, track, freshParams, playbackId, markId);
             return;
           }
-        } catch (fallbackErr) {
-          logError('Invidious fallback also failed:', fallbackErr);
         }
         this.emitPlaybackError(song, `Cannot play "${song.title}": ${msg}`);
       }

@@ -258,9 +258,9 @@ public class BackgroundAudioPlugin extends Plugin {
         MusicForegroundService service = getService();
         if (service != null) {
             JSObject result = new JSObject();
-            result.put("isPlaying", service.isPlaying);
-            result.put("position", 0.0);
-            result.put("duration", 0.0);
+            result.put("isPlaying", service.isNativePlaying());
+            result.put("position", service.getCurrentPosition());
+            result.put("duration", service.getDuration());
             call.resolve(result);
         } else {
             JSObject result = new JSObject();
@@ -269,6 +269,69 @@ public class BackgroundAudioPlugin extends Plugin {
             result.put("duration", 0.0);
             call.resolve(result);
         }
+    }
+
+    @PluginMethod
+    public void playAudioUrl(PluginCall call) {
+        String audioUrl = call.getString("audioUrl", "");
+        MusicForegroundService service = getService();
+        if (service != null && !audioUrl.isEmpty()) {
+            service.playAudioUrl(audioUrl);
+            JSObject result = new JSObject();
+            result.put("started", true);
+            call.resolve(result);
+        } else {
+            JSObject result = new JSObject();
+            result.put("started", false);
+            call.resolve(result);
+        }
+    }
+
+    @PluginMethod
+    public void pauseAudio(PluginCall call) {
+        MusicForegroundService service = getService();
+        if (service != null) {
+            service.pausePlayback();
+        }
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void resumeAudio(PluginCall call) {
+        MusicForegroundService service = getService();
+        if (service != null) {
+            service.resumePlayback();
+        }
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void stopAudio(PluginCall call) {
+        MusicForegroundService service = getService();
+        if (service != null) {
+            service.stopPlayback();
+        }
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void seekAudio(PluginCall call) {
+        double position = call.getDouble("position", 0.0);
+        MusicForegroundService service = getService();
+        if (service != null) {
+            service.seekToPosition((long) position);
+        }
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void setVolume(PluginCall call) {
+        double volume = call.getDouble("volume", 1.0);
+        MusicForegroundService service = getService();
+        if (service != null) {
+            service.setVolume((float) volume);
+        }
+        call.resolve();
     }
 
     private MusicForegroundService getService() {

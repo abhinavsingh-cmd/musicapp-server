@@ -17,6 +17,12 @@ export interface BackgroundAudioPlugin extends Plugin {
   setRepeat(): Promise<void>;
   getPlaybackState(): Promise<{ isPlaying: boolean; position: number; duration: number }>;
   requestPermissions(): Promise<{ notifications: string }>;
+  playAudioUrl(options: { audioUrl: string }): Promise<{ started: boolean }>;
+  pauseAudio(): Promise<void>;
+  resumeAudio(): Promise<void>;
+  stopAudio(): Promise<void>;
+  seekAudio(options: { position: number }): Promise<void>;
+  setVolume(options: { volume: number }): Promise<void>;
   addListener(
     eventName: 'mediaAction',
     listenerFunc: (event: MediaActionEvent) => void,
@@ -95,6 +101,54 @@ export const backgroundAudio = {
       return await BackgroundAudio.getPlaybackState();
     } catch {
       return { isPlaying: false, position: 0, duration: 0 };
+    }
+  },
+  playAudioUrl: async (options: { audioUrl: string }): Promise<{ started: boolean }> => {
+    try {
+      if (!BackgroundAudio) return { started: false };
+      return await BackgroundAudio.playAudioUrl(options);
+    } catch {
+      return { started: false };
+    }
+  },
+  pauseAudio: async (): Promise<void> => {
+    try {
+      if (!BackgroundAudio) return;
+      await BackgroundAudio.pauseAudio();
+    } catch {
+      // ignore
+    }
+  },
+  resumeAudio: async (): Promise<void> => {
+    try {
+      if (!BackgroundAudio) return;
+      await BackgroundAudio.resumeAudio();
+    } catch {
+      // ignore
+    }
+  },
+  stopAudio: async (): Promise<void> => {
+    try {
+      if (!BackgroundAudio) return;
+      await BackgroundAudio.stopAudio();
+    } catch {
+      // ignore
+    }
+  },
+  seekAudio: async (options: { position: number }): Promise<void> => {
+    try {
+      if (!BackgroundAudio) return;
+      await BackgroundAudio.seekAudio(options);
+    } catch {
+      // ignore
+    }
+  },
+  setVolume: async (options: { volume: number }): Promise<void> => {
+    try {
+      if (!BackgroundAudio) return;
+      await BackgroundAudio.setVolume(options);
+    } catch {
+      // ignore
     }
   },
   onMediaAction: async (listener: (event: MediaActionEvent) => void): Promise<PluginListenerHandle | null> => {

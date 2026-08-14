@@ -71,6 +71,22 @@ export function LoadingWrapper({
     onTimeout?.();
   }, [onTimeout]);
 
+  const onLoadRef = useRef(onLoad);
+  const maxRetriesRef = useRef(maxRetries);
+  const timeoutRef = useRef(timeout);
+  const handleSuccessRef = useRef(handleSuccess);
+  const handleErrorRef = useRef(handleError);
+  const handleTimeoutRef = useRef(handleTimeout);
+
+  useEffect(() => {
+    onLoadRef.current = onLoad;
+    maxRetriesRef.current = maxRetries;
+    timeoutRef.current = timeout;
+    handleSuccessRef.current = handleSuccess;
+    handleErrorRef.current = handleError;
+    handleTimeoutRef.current = handleTimeout;
+  });
+
   useEffect(() => {
     mountedRef.current = true;
 
@@ -86,32 +102,32 @@ export function LoadingWrapper({
       }));
 
       try {
-        await onLoad();
-        if (mountedRef.current) handleSuccess();
+        await onLoadRef.current();
+        if (mountedRef.current) handleSuccessRef.current();
       } catch (err) {
         if (!mountedRef.current) return;
-        if (attempt < maxRetries) {
+        if (attempt < maxRetriesRef.current) {
           retryTimerRef.current = setTimeout(() => runLoad(attempt + 1), 1000);
         } else {
-          handleError(String(err) || 'Failed to load');
+          handleErrorRef.current(String(err) || 'Failed to load');
         }
       }
     };
 
     runLoad(0);
 
-    if (timeout > 0) {
+    if (timeoutRef.current > 0) {
       timeoutTimerRef.current = setTimeout(() => {
         if (mountedRef.current) {
           setLoadingState(prev => {
             if (prev.isLoading) {
-              handleTimeout();
+              handleTimeoutRef.current();
               return { ...prev, isLoading: false, isTimeout: true };
             }
             return prev;
           });
         }
-      }, timeout);
+      }, timeoutRef.current);
     }
 
     return () => {

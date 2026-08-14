@@ -14,7 +14,9 @@
  *   - Thumbnail prefetch alongside song download
  */
 
-import { api } from '../config/api';
+import { toTrack } from '../providers/adapters';
+import { resolveDownloadDescriptor } from '../providers/resolve';
+import type { Track } from '../providers/types';
 
 const DB_NAME = 'music-app-offline';
 const DB_VERSION = 2;
@@ -225,29 +227,36 @@ function verifyAudioBlob(blob: Blob): boolean {
 // Download a song with progress, pause, resume, cancel, and verification
 // ---------------------------------------------------------------------------
 
+/**
+ * The download system consumes a normalized track (or a legacy Song-like
+ * object, which is normalized first). The actual download URL comes from the
+ * track's provider via `resolveDownloadDescriptor` — the downloader never
+ * knows whether the track is a YouTube video, a server-hosted library file,
+ * or a future provider's stream.
+ */
+export type DownloadableInput =
+  | Track
+  | {
+      id: string;
+      youtubeId: string;
+      title: string;
+      artist: string;
+      genre: string;
+      duration: number;
+      coverArt: string;
+      audioUrl?: string;
+    };
+
 export async function downloadSongWithProgress(
-  song: {
-    id: string;
-    youtubeId: string;
-    title: string;
-    artist: string;
-    genre: string;
-    duration: number;
-    coverArt: string;
-    audioUrl?: string;
-  },
+  input: DownloadableInput,
   onProgress?: (p: DownloadProgress) => void,
   signal?: AbortSignal,
 ): Promise<DownloadedSong> {
-  // YouTube songs have a valid 11-char youtubeId → route through server endpoint.
-  // Library songs (no youtubeId) → use audioUrl directly as a permanent file URL.
-  // The audioUrl for YouTube songs is a temporary streaming URL (not downloadable).
-  const isYouTubeId = song.youtubeId && /^[A-Za-z0-9_-]{11}$/.test(song.youtubeId);
-  const downloadUrl = isYouTubeId
-    ? api(`/download/${song.youtubeId}?title=${encodeURIComponent(song.title)}`)
-    : song.audioUrl || '';
+  const track = toTrack(input);
+  const descriptor = await resolveDownloadDescriptor(track);
+  const downloadUrl = descriptor?.url || '';
 
-  console.log('[Download] Starting:', { title: song.title, youtubeId: song.youtubeId, isYouTubeId, url: downloadUrl.substring(0, 120) });
+  console.log('[Download] Starting:', { title: track.title, provider: track.provider, externalId: track.externalId || 'NONE', url: downloadUrl.substring(0, 120) });
 
   if (!downloadUrl) {
     throw new Error('No download URL available for this song');
@@ -263,7 +272,7 @@ export async function downloadSongWithProgress(
     });
   } catch (fetchErr: any) {
     console.error('[Download] fetch() failed:', fetchErr?.message || fetchErr);
-    throw new Error(`Network error: ${fetchErr?.message || fetchErr}`);
+    throw new Error(`Network error: ${fetchErr?.message || fetchErr}`, { cause: fetchErr });
   }
 
   console.log('[Download] Response:', { status: res.status, type: res.headers.get('content-type'), len: res.headers.get('content-length'), body: !!res.body });
@@ -278,7 +287,7 @@ export async function downloadSongWithProgress(
 
   if (contentType && !contentType.startsWith('audio/') && contentType !== 'application/octet-stream') {
     if (contentType.startsWith('application/json')) {
-      let msg = '';
+      let msg: string;
       try { msg = (await res.clone().json())?.message || 'Server returned an error'; } catch { msg = 'Server returned an error'; }
       throw new Error(msg);
     }
@@ -300,7 +309,7 @@ export async function downloadSongWithProgress(
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 
     // Check pause state
-    const ctrl = activeControllers.get(song.youtubeId);
+    const ctrl = activeControllers.get(track.externalId || track.id);
     if (ctrl?.paused && ctrl.pausePromise) {
       await new Promise<void>((resolve) => {
         ctrl.pausePromise = { resolve };
@@ -330,7 +339,13 @@ export async function downloadSongWithProgress(
   // Persist to IndexedDB
   const db = await openDB();
   const entry: DownloadedSong = {
-    ...song,
+    id: track.id,
+    youtubeId: track.externalId || '',
+    title: track.title,
+    artist: track.artist,
+    genre: track.genre,
+    duration: track.duration,
+    coverArt: track.artwork,
     audioBlob: blob,
     audioUrl: '',
     downloadedAt: Date.now(),
@@ -343,19 +358,29 @@ export async function downloadSongWithProgress(
     // IndexedDB throws DOMException with name "QuotaExceededError" when storage
     // is full.  Surface a clear message instead of a generic failure.
     if (err?.name === 'QuotaExceededError' || err?.message?.includes('quota')) {
-      throw new Error('Storage full — free up space and try again');
+      throw new Error('Storage full — free up space and try again', { cause: err });
     }
-    throw new Error(`Failed to save to local storage: ${err?.message || err}`);
+    throw new Error(`Failed to save to local storage: ${err?.message || err}`, { cause: err });
   }
   db.close();
 
   entry.audioUrl = URL.createObjectURL(blob);
 
   // Cache thumbnail in background
-  cacheThumbnail(song.coverArt).catch(() => {});
+  cacheThumbnail(track.artwork).catch(() => {});
 
   // Cache metadata
-  cacheMetadata(song).catch(() => {});
+  cacheMetadata({
+    id: track.id,
+    title: track.title,
+    artist: track.artist,
+    album: track.album,
+    genre: track.genre,
+    duration: track.duration,
+    coverArt: track.artwork,
+    youtubeId: track.externalId,
+    releaseYear: track.releaseYear,
+  }).catch(() => {});
 
   return entry;
 }

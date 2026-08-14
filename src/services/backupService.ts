@@ -12,8 +12,8 @@ export interface BackupData {
 
 export class BackupService {
   async exportData(): Promise<BackupData> {
-    let favorites: any[] = [];
-    let playlists: any[] = [];
+    let favorites: any[];
+    let playlists: any[];
     try { favorites = JSON.parse(localStorage.getItem('favorites') || '[]'); } catch { favorites = []; }
     try { playlists = JSON.parse(localStorage.getItem('playlists') || '[]'); } catch { playlists = []; }
     const history = useHistoryStore.getState().history;
