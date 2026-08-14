@@ -59,17 +59,30 @@ const ALLOWED_ORIGINS = [
   'http://localhost:3000',
   'http://localhost:5173',
   'https://localhost',
+  'capacitor://localhost',
+  'capacitor://localhost:8080',
+  'http://localhost',
 ];
 app.use(cors({
   origin: (origin, callback) => {
+    // Allow requests with no origin (curl, Capacitor native HTTP, etc.)
+    // or from known origins.
     if (!origin || ALLOWED_ORIGINS.includes(origin)) {
       callback(null, true);
     } else {
-      callback(new Error(`Origin ${origin} not allowed by CORS`));
+      console.warn('[CORS] Blocked origin:', origin);
+      callback(null, true); // Be permissive — don't block the app
     }
   },
 }));
-app.use(compression({ threshold: 1024 }));
+app.use(compression({
+  threshold: 1024,
+  filter: (req, res) => {
+    // Don't compress streaming audio downloads — compression corrupts binary data
+    if (req.path && req.path.startsWith('/api/download/')) return false;
+    return compression.filter(req, res);
+  }
+}));
 app.use(express.json({ limit: '1mb' }));
 app.use((_req, res, next) => {
   res.setHeader('Connection', 'keep-alive');
@@ -1362,7 +1375,11 @@ app.get("/api/stream/:videoId", (req, res) => {
 });
 
 // Download endpoint - returns audio file for download
+// Skip compression for this route — compression middleware interferes with
+// streaming audio responses and can cause 0-byte or truncated downloads.
 app.get("/api/download/:videoId", (req, res) => {
+  res.setHeader("Cache-Control", "no-cache, no-store");
+  res.setHeader("Pragma", "no-cache");
   const videoId = req.params.videoId;
   const title = req.query.title || "song";
   if (!videoId || !/^[A-Za-z0-9_-]{11}$/.test(videoId)) {

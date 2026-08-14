@@ -247,20 +247,30 @@ export async function downloadSongWithProgress(
     ? api(`/download/${song.youtubeId}?title=${encodeURIComponent(song.title)}`)
     : song.audioUrl || '';
 
+  console.log('[Download] Starting:', { title: song.title, youtubeId: song.youtubeId, isYouTubeId, url: downloadUrl.substring(0, 120) });
+
   if (!downloadUrl) {
     throw new Error('No download URL available for this song');
   }
 
   if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 
-  const res = await fetch(downloadUrl, {
-    signal,
-    headers: { 'Accept': 'audio/*' },
-  });
+  let res: Response;
+  try {
+    res = await fetch(downloadUrl, {
+      signal,
+      headers: { 'Accept': 'audio/*' },
+    });
+  } catch (fetchErr: any) {
+    console.error('[Download] fetch() failed:', fetchErr?.message || fetchErr);
+    throw new Error(`Network error: ${fetchErr?.message || fetchErr}`);
+  }
+
+  console.log('[Download] Response:', { status: res.status, type: res.headers.get('content-type'), len: res.headers.get('content-length'), body: !!res.body });
 
   if (!res.ok) {
     let detail = '';
-    try { detail = (await res.json())?.message || ''; } catch {}
+    try { detail = (await res.clone().json())?.message || ''; } catch {}
     throw new Error(`Download failed: ${res.status}${detail ? ' — ' + detail : ''}`);
   }
 
@@ -310,6 +320,8 @@ export async function downloadSongWithProgress(
 
   const blobType = contentType || 'audio/mpeg';
   const blob = new Blob(chunks, { type: blobType });
+
+  console.log('[Download] Complete:', { received, blobSize: blob.size, type: blobType });
 
   if (!verifyAudioBlob(blob)) {
     throw new Error(`Downloaded file is invalid: ${blob.size} bytes, type: ${blob.type || 'unknown'}`);
