@@ -287,7 +287,14 @@ public class MusicForegroundService extends Service {
                 return START_STICKY;
             }
 
+            // Always ensure wake lock and keepalive are running — even on
+            // service restart with null intent (system killed + restarted us).
+            acquireWakeLock();
+            startKeepAlive();
+
             if (intent == null && instance != null) {
+                // Service was restarted by the OS — rebuild notification with
+                // the last known metadata and return early.
                 rebuildNotification();
                 return START_STICKY;
             }
@@ -308,22 +315,21 @@ public class MusicForegroundService extends Service {
             updateMediaSessionMetadata();
             Notification notification = buildNotification(title, artist, album);
             startForeground(NOTIFICATION_ID, notification);
-            acquireWakeLock();
-
-            // Start WebView keepalive to prevent JS thread suspension when
-            // the app is in the background — keeps HTMLAudioElement alive
-            try {
-                BackgroundAudioPlugin plugin = BackgroundAudioPlugin.getInstance();
-                if (plugin != null) {
-                    plugin.startKeepAlive();
-                }
-            } catch (Exception e) {
-                System.err.println("[MusicForegroundService] Failed to start keepalive: " + e.getMessage());
-            }
         } catch (Exception e) {
             System.err.println("[MusicForegroundService] onStartCommand failed: " + e.getMessage());
         }
         return START_STICKY;
+    }
+
+    private void startKeepAlive() {
+        try {
+            BackgroundAudioPlugin plugin = BackgroundAudioPlugin.getInstance();
+            if (plugin != null) {
+                plugin.startKeepAlive();
+            }
+        } catch (Exception e) {
+            System.err.println("[MusicForegroundService] Failed to start keepalive: " + e.getMessage());
+        }
     }
 
     private Notification buildNotification(String title, String artist, String album) {

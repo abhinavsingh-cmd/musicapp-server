@@ -6,6 +6,7 @@ import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.webkit.WebView;
 
 import com.getcapacitor.JSObject;
@@ -33,7 +34,7 @@ public class BackgroundAudioPlugin extends Plugin {
     // backgrounded. Without this, HTMLAudioElement stops producing audio.
     private Handler keepAliveHandler;
     private Runnable keepAliveRunnable;
-    private static final long KEEP_ALIVE_INTERVAL_MS = 5000;
+    private static final long KEEP_ALIVE_INTERVAL_MS = 1000;
 
     @Override
     public void load() {
@@ -55,9 +56,13 @@ public class BackgroundAudioPlugin extends Plugin {
     // -----------------------------------------------------------------------
 
     /**
-     * Start periodic WebView keepalive. Each tick evaluates a no-op JS
+     * Start periodic WebView keepalive. Each tick evaluates a lightweight JS
      * expression to keep the JavaScript thread alive so HTMLAudioElement
      * continues producing audio when the app is in the background.
+     *
+     * Uses two complementary strategies:
+     *   1. evaluateJavascript() — forces the WebView to run JS on the UI thread
+     *   2. A no-op post to the WebView's message queue — keeps the looper active
      */
     public void startKeepAlive() {
         if (keepAliveHandler != null) return;
@@ -74,7 +79,10 @@ public class BackgroundAudioPlugin extends Plugin {
                     }
                     WebView webView = getBridge() != null ? getBridge().getWebView() : null;
                     if (webView != null) {
-                        webView.evaluateJavascript("void(0)", null);
+                        // Touch document title to force a DOM update — heavier
+                        // than void(0) so the OS is less likely to skip it.
+                        webView.evaluateJavascript(
+                            "document.title=document.title", null);
                     }
                 } catch (Exception e) {
                     System.err.println("[BackgroundAudio] KeepAlive error: " + e.getMessage());
@@ -85,7 +93,7 @@ public class BackgroundAudioPlugin extends Plugin {
             }
         };
         keepAliveHandler.postDelayed(keepAliveRunnable, KEEP_ALIVE_INTERVAL_MS);
-        System.out.println("[BackgroundAudio] WebView keepalive started");
+        System.out.println("[BackgroundAudio] WebView keepalive started (interval=" + KEEP_ALIVE_INTERVAL_MS + "ms)");
     }
 
     private void stopKeepAliveInternal() {
