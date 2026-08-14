@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, memo } from 'react';
+import React, { useState, useCallback, useEffect, useRef, memo } from 'react';
 import { PlayerControls } from './controls/PlayerControls';
 import { ProgressBar } from './controls/ProgressBar';
 import { SongInfo } from './controls/SongInfo';
@@ -9,10 +9,89 @@ import { ErrorBoundary } from '../../components/ErrorBoundary';
 import { cn } from '../../utils/cn';
 import { Mic2, X, Sliders, ListMusic, ChevronUp, ChevronDown, AlertCircle, RefreshCw } from 'lucide-react';
 import { useAudioStore } from '../../stores/audioStore';
+import { usePlayerLayout } from '../../hooks/usePlayerLayout';
 
 interface PlayerProps {
   className?: string;
 }
+
+/**
+ * Panel shell — wraps Queue/Lyrics/Equalizer in a consistent modal container.
+ *
+ * Desktop: floating card above the player bar, centered or right-aligned.
+ * Mobile (< lg): full-width bottom sheet with safe-area padding.
+ *
+ * z-index hierarchy (intentional):
+ *   z-[55]  backdrop (dims background, catches clicks)
+ *   z-[60]  panel card (above player bar at z-50)
+ */
+const PanelShell: React.FC<{
+  title: string;
+  icon: React.ReactNode;
+  onClose: () => void;
+  children: React.ReactNode;
+  /** Extra classes for the inner content area (e.g. padding, overflow) */
+  contentClassName?: string;
+  /** Whether the content itself handles scrolling (default: true) */
+  scrollable?: boolean;
+}> = ({ title, icon, onClose, children, contentClassName, scrollable = true }) => (
+  <>
+    {/* ── Backdrop ── */}
+    <div
+      className="fixed inset-0 z-[55] bg-black/50 backdrop-blur-sm transition-opacity"
+      onClick={onClose}
+      aria-hidden="true"
+    />
+
+    {/* ── Panel card ── */}
+    <div
+      className={cn(
+        // Positioning — bottom-sheet on mobile (above player bar), floating card on desktop
+        "fixed z-[60] left-0 right-0 bottom-[var(--player-h,72px)]",
+        "lg:left-auto lg:right-4 lg:bottom-[calc(var(--player-h,72px)+2rem)] lg:w-96",
+        // Shape & appearance
+        "bg-[#1a1a2e] border border-white/10",
+        "rounded-t-3xl lg:rounded-3xl",
+        // Layout
+        "flex flex-col",
+        // Height: fill viewport on mobile (minus player bar), constrained on desktop
+        "max-h-[calc(85vh-var(--player-h,72px))] lg:max-h-[min(70vh,600px)]",
+        // Safe-area on mobile
+        "pb-safe",
+      )}
+      style={{
+        boxShadow: '0 25px 80px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.08)',
+      }}
+      role="dialog"
+      aria-label={title}
+    >
+      {/* ── Header ── */}
+      <div className="flex items-center justify-between px-4 py-3 border-b border-white/5 flex-shrink-0">
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded-full bg-gradient-to-br from-violet-500 to-fuchsia-500 flex items-center justify-center">
+            {icon}
+          </div>
+          <span className="text-white font-semibold">{title}</span>
+        </div>
+        <button
+          onClick={onClose}
+          className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-gray-400 hover:text-white hover:bg-white/20 transition-all active:scale-90"
+          aria-label={`Close ${title}`}
+        >
+          <X size={16} />
+        </button>
+      </div>
+
+      {/* ── Content ── */}
+      <div className={cn(
+        scrollable ? "flex-1 overflow-y-auto" : "flex-1 overflow-hidden",
+        contentClassName,
+      )}>
+        {children}
+      </div>
+    </div>
+  </>
+);
 
 export const Player: React.FC<PlayerProps> = memo(({ className }) => {
   const [showLyrics, setShowLyrics] = useState(false);
@@ -22,12 +101,20 @@ export const Player: React.FC<PlayerProps> = memo(({ className }) => {
   const error = useAudioStore((s) => s.error);
   const currentSong = useAudioStore((s) => s.currentSong);
   const retry = useAudioStore((s) => s.retry);
+  const playerBarRef = useRef<HTMLDivElement>(null);
+  usePlayerLayout(playerBarRef);
 
   const handleRetry = useCallback(() => {
     if (currentSong) {
       retry();
     }
   }, [currentSong, retry]);
+
+  const closeAll = useCallback(() => {
+    setShowLyrics(false);
+    setShowEqualizer(false);
+    setShowQueue(false);
+  }, []);
 
   const togglePanel = useCallback((panel: 'lyrics' | 'equalizer' | 'queue') => {
     if (panel === 'lyrics') {
@@ -47,11 +134,7 @@ export const Player: React.FC<PlayerProps> = memo(({ className }) => {
 
   useEffect(() => {
     const handleToggleLyrics = () => togglePanel('lyrics');
-    const handleClosePanels = () => {
-      setShowLyrics(false);
-      setShowEqualizer(false);
-      setShowQueue(false);
-    };
+    const handleClosePanels = closeAll;
 
     window.addEventListener('toggle-lyrics', handleToggleLyrics);
     window.addEventListener('close-panels', handleClosePanels);
@@ -59,97 +142,63 @@ export const Player: React.FC<PlayerProps> = memo(({ className }) => {
       window.removeEventListener('toggle-lyrics', handleToggleLyrics);
       window.removeEventListener('close-panels', handleClosePanels);
     };
-  }, [togglePanel]);
+  }, [togglePanel, closeAll]);
 
+  // Lock body scroll when any panel is open
   const hasOpenPanel = showQueue || showLyrics || showEqualizer;
+  useEffect(() => {
+    if (hasOpenPanel) {
+      document.body.style.overflow = 'hidden';
+    } else {
+      document.body.style.overflow = '';
+    }
+    return () => { document.body.style.overflow = ''; };
+  }, [hasOpenPanel]);
 
   return (
     <>
-      {/* Side panels — rendered inline, visibility toggled via CSS */}
+      {/* ── Queue panel ── */}
       {showQueue && (
-        <div
-           className="fixed bottom-28 right-4 w-96 h-[500px] rounded-3xl overflow-hidden z-40 bg-[#1a1a2e] border border-white/10 flex flex-col lg:bottom-32 lg:right-4"
-          style={{ boxShadow: '0 25px 80px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.1)' }}
+        <PanelShell
+          title="Queue"
+          icon={<ListMusic size={14} className="text-white" />}
+          onClose={closeAll}
+          scrollable={false}
         >
-          <div className="flex items-center justify-between p-4 border-b border-white/5 flex-shrink-0">
-            <div className="flex items-center gap-3">
-              <div className="w-8 h-8 rounded-full bg-gradient-to-br from-violet-500 to-fuchsia-500 flex items-center justify-center">
-                <ListMusic size={14} className="text-white" />
-              </div>
-              <span className="text-white font-semibold">Queue</span>
-            </div>
-            <button
-              onClick={() => setShowQueue(false)}
-              className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-gray-400 hover:text-white hover:bg-white/20 transition-all active:scale-90"
-            >
-              <X size={16} />
-            </button>
-          </div>
-          <div className="flex-1 overflow-hidden">
-            <QueuePanel />
-          </div>
-        </div>
+          <QueuePanel />
+        </PanelShell>
       )}
 
+      {/* ── Lyrics panel ── */}
       {showLyrics && (
-        <div
-           className="fixed bottom-28 right-4 w-80 rounded-3xl overflow-hidden z-40 bg-[#1a1a2e] border border-white/10 lg:bottom-32 lg:right-4"
-          style={{ boxShadow: '0 25px 80px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.1)' }}
+        <PanelShell
+          title="Lyrics"
+          icon={<Mic2 size={14} className="text-white" />}
+          onClose={closeAll}
+          scrollable={false}
         >
-          <div className="flex items-center justify-between p-4 border-b border-white/10">
-            <div className="flex items-center gap-3">
-              <div className="w-8 h-8 rounded-full bg-gradient-to-br from-violet-500 to-fuchsia-500 flex items-center justify-center">
-                <Mic2 size={14} className="text-white" />
-              </div>
-              <span className="text-white font-semibold">Lyrics</span>
-            </div>
-            <button
-              onClick={() => setShowLyrics(false)}
-              className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-gray-400 hover:text-white hover:bg-white/20 transition-all active:scale-90"
-            >
-              <X size={16} />
-            </button>
-          </div>
           <LyricsDisplay />
-        </div>
+        </PanelShell>
       )}
 
+      {/* ── Equalizer panel ── */}
       {showEqualizer && (
-        <div
-           className="fixed bottom-28 right-4 w-96 rounded-3xl overflow-hidden z-40 bg-[#1a1a2e] border border-white/10 lg:bottom-32 lg:right-4"
-          style={{ boxShadow: '0 25px 80px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.1)' }}
+        <PanelShell
+          title="Equalizer"
+          icon={<Sliders size={14} className="text-white" />}
+          onClose={closeAll}
+          contentClassName="p-4"
+          scrollable={false}
         >
-          <div className="flex items-center justify-between p-4 border-b border-white/10">
-            <div className="flex items-center gap-3">
-              <div className="w-8 h-8 rounded-full bg-gradient-to-br from-violet-500 to-fuchsia-500 flex items-center justify-center">
-                <Sliders size={14} className="text-white" />
-              </div>
-              <span className="text-white font-semibold">Equalizer</span>
-            </div>
-            <button
-              onClick={() => setShowEqualizer(false)}
-              className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-gray-400 hover:text-white hover:bg-white/20 transition-all active:scale-90"
-            >
-              <X size={16} />
-            </button>
-          </div>
-          <div className="p-4">
-            <ErrorBoundary level="section">
-              <EqualizerUI />
-            </ErrorBoundary>
-          </div>
-        </div>
+          <ErrorBoundary level="section">
+            <EqualizerUI />
+          </ErrorBoundary>
+        </PanelShell>
       )}
 
-      {/* Click-away backdrop for panels */}
-      {hasOpenPanel && (
-        <div
-          className="fixed inset-0 z-30"
-          onClick={() => { setShowLyrics(false); setShowEqualizer(false); setShowQueue(false); }}
-        />
-      )}
-
+      {/* ── Player bar ── */}
       <div
+        ref={playerBarRef}
         className={cn(
           "fixed bottom-0 left-0 right-0 z-50",
           "bg-[#121220] border-t border-white/10",
@@ -267,9 +316,6 @@ export const Player: React.FC<PlayerProps> = memo(({ className }) => {
                   <span className="text-sm font-medium">Queue</span>
                 </button>
               </div>
-              {showLyrics && <LyricsDisplay />}
-              {showEqualizer && <div className="bg-[#1a1a2e] border border-white/10 rounded-2xl p-4"><ErrorBoundary level="section"><EqualizerUI /></ErrorBoundary></div>}
-              {showQueue && <div className="bg-[#1a1a2e] border border-white/10 rounded-2xl p-4 max-h-96 overflow-auto"><ErrorBoundary level="section"><QueuePanel /></ErrorBoundary></div>}
             </div>
           </div>
         )}

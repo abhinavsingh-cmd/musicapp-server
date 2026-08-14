@@ -12,6 +12,8 @@ import android.content.IntentFilter;
 import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
+import android.media.session.MediaSession;
+import android.media.session.PlaybackState;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.PowerManager;
@@ -33,6 +35,8 @@ public class MusicForegroundService extends Service {
     private AudioFocusRequest audioFocusRequest;
     private PowerManager.WakeLock wakeLock;
     private BroadcastReceiver headsetReceiver;
+    private BroadcastReceiver notificationActionReceiver;
+    private MediaSession mediaSession;
     private String currentTitle = "MusicApp";
     private String currentArtist = "Playing music";
     private String currentAlbum = "MusicApp Album";
@@ -49,9 +53,124 @@ public class MusicForegroundService extends Service {
             createNotificationChannel();
             requestAudioFocus();
             registerHeadsetReceiver();
+            registerNotificationActionReceiver();
+            initMediaSession();
             acquireWakeLock();
         } catch (Exception e) {
             System.err.println("[MusicForegroundService] onCreate failed: " + e.getMessage());
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // MediaSession — required for Bluetooth/lock-screen/notification transport
+    // controls. Android routes ALL media button events through this session.
+    // -----------------------------------------------------------------------
+    private void initMediaSession() {
+        try {
+            mediaSession = new MediaSession(this, "MusicAppPlayback");
+            mediaSession.setCallback(new MediaSession.Callback() {
+                @Override public void onPlay() {
+                    dispatchMediaAction(ACTION_PLAY, -1);
+                }
+                @Override public void onPause() {
+                    dispatchMediaAction(ACTION_PAUSE, -1);
+                }
+                @Override public void onStop() {
+                    dispatchMediaAction(ACTION_STOP, -1);
+                }
+                @Override public void onSkipToNext() {
+                    dispatchMediaAction(ACTION_NEXT, -1);
+                }
+                @Override public void onSkipToPrevious() {
+                    dispatchMediaAction(ACTION_PREVIOUS, -1);
+                }
+                @Override public void onSeekTo(long pos) {
+                    dispatchMediaAction("seek", pos);
+                }
+            });
+            mediaSession.setActive(true);
+
+            // Initial playback state so the system knows we support transport controls
+            PlaybackState.Builder stateBuilder = new PlaybackState.Builder()
+                .setActions(
+                    PlaybackState.ACTION_PLAY |
+                    PlaybackState.ACTION_PAUSE |
+                    PlaybackState.ACTION_PLAY_PAUSE |
+                    PlaybackState.ACTION_SKIP_TO_NEXT |
+                    PlaybackState.ACTION_SKIP_TO_PREVIOUS |
+                    PlaybackState.ACTION_STOP |
+                    PlaybackState.ACTION_SEEK_TO
+                )
+                .setState(PlaybackState.STATE_PAUSED, 0, 1.0f);
+            mediaSession.setPlaybackState(stateBuilder.build());
+        } catch (Exception e) {
+            System.err.println("[MusicForegroundService] initMediaSession failed: " + e.getMessage());
+            mediaSession = null;
+        }
+    }
+
+    private void updateMediaSessionState() {
+        if (mediaSession == null) return;
+        try {
+            int state = isPlaying ? PlaybackState.STATE_PLAYING : PlaybackState.STATE_PAUSED;
+            PlaybackState.Builder stateBuilder = new PlaybackState.Builder()
+                .setActions(
+                    PlaybackState.ACTION_PLAY |
+                    PlaybackState.ACTION_PAUSE |
+                    PlaybackState.ACTION_PLAY_PAUSE |
+                    PlaybackState.ACTION_SKIP_TO_NEXT |
+                    PlaybackState.ACTION_SKIP_TO_PREVIOUS |
+                    PlaybackState.ACTION_STOP |
+                    PlaybackState.ACTION_SEEK_TO
+                )
+                .setState(state, 0, 1.0f);
+            mediaSession.setPlaybackState(stateBuilder.build());
+        } catch (Exception e) {
+            System.err.println("[MusicForegroundService] updateMediaSessionState failed: " + e.getMessage());
+        }
+    }
+
+    private void updateMediaSessionMetadata() {
+        if (mediaSession == null) return;
+        try {
+            android.media.MediaMetadata.Builder metaBuilder = new android.media.MediaMetadata.Builder()
+                .putString(android.media.MediaMetadata.METADATA_KEY_TITLE, currentTitle)
+                .putString(android.media.MediaMetadata.METADATA_KEY_ARTIST, currentArtist)
+                .putString(android.media.MediaMetadata.METADATA_KEY_ALBUM, currentAlbum);
+            mediaSession.setMetadata(metaBuilder.build());
+        } catch (Exception e) {
+            System.err.println("[MusicForegroundService] updateMediaSessionMetadata failed: " + e.getMessage());
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Notification action button receiver — handles play/pause/next/prev taps
+    // from the notification shade and lock screen.
+    // -----------------------------------------------------------------------
+    private void registerNotificationActionReceiver() {
+        try {
+            notificationActionReceiver = new BroadcastReceiver() {
+                @Override
+                public void onReceive(Context context, Intent intent) {
+                    String action = intent.getAction();
+                    if (action != null) {
+                        dispatchMediaAction(action, -1);
+                    }
+                }
+            };
+            IntentFilter filter = new IntentFilter();
+            filter.addAction(ACTION_PLAY);
+            filter.addAction(ACTION_PAUSE);
+            filter.addAction(ACTION_NEXT);
+            filter.addAction(ACTION_PREVIOUS);
+            filter.addAction(ACTION_STOP);
+            if (Build.VERSION.SDK_INT >= 34) {
+                registerReceiver(notificationActionReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                registerReceiver(notificationActionReceiver, filter);
+            }
+        } catch (Exception e) {
+            System.err.println("[MusicForegroundService] registerNotificationActionReceiver failed: " + e.getMessage());
         }
     }
 
@@ -186,9 +305,21 @@ public class MusicForegroundService extends Service {
             currentArtist = artist;
             currentAlbum = album;
 
+            updateMediaSessionMetadata();
             Notification notification = buildNotification(title, artist, album);
             startForeground(NOTIFICATION_ID, notification);
             acquireWakeLock();
+
+            // Start WebView keepalive to prevent JS thread suspension when
+            // the app is in the background — keeps HTMLAudioElement alive
+            try {
+                BackgroundAudioPlugin plugin = BackgroundAudioPlugin.getInstance();
+                if (plugin != null) {
+                    plugin.startKeepAlive();
+                }
+            } catch (Exception e) {
+                System.err.println("[MusicForegroundService] Failed to start keepalive: " + e.getMessage());
+            }
         } catch (Exception e) {
             System.err.println("[MusicForegroundService] onStartCommand failed: " + e.getMessage());
         }
@@ -209,17 +340,55 @@ public class MusicForegroundService extends Service {
             builder = new Notification.Builder(this);
         }
 
-        return builder
-                .setContentTitle(title)
-                .setContentText(artist)
-                .setSubText(album)
-                .setSmallIcon(android.R.drawable.ic_media_play)
-                .setContentIntent(pendingIntent)
-                .setOngoing(true)
-                .setVisibility(Notification.VISIBILITY_PUBLIC)
-                .setPriority(Notification.PRIORITY_LOW)
-                .setCategory(Notification.CATEGORY_TRANSPORT)
-                .build();
+        // Previous button
+        PendingIntent prevPI = PendingIntent.getBroadcast(this, 1,
+            new Intent(this, MusicForegroundService.class).setAction(ACTION_PREVIOUS),
+            PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        builder.addAction(android.R.drawable.ic_media_previous, "Previous", prevPI);
+
+        // Play/Pause toggle button
+        if (isPlaying) {
+            PendingIntent pausePI = PendingIntent.getBroadcast(this, 2,
+                new Intent(this, MusicForegroundService.class).setAction(ACTION_PAUSE),
+                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+            builder.addAction(android.R.drawable.ic_media_pause, "Pause", pausePI);
+        } else {
+            PendingIntent playPI = PendingIntent.getBroadcast(this, 2,
+                new Intent(this, MusicForegroundService.class).setAction(ACTION_PLAY),
+                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+            builder.addAction(android.R.drawable.ic_media_play, "Play", playPI);
+        }
+
+        // Next button
+        PendingIntent nextPI = PendingIntent.getBroadcast(this, 3,
+            new Intent(this, MusicForegroundService.class).setAction(ACTION_NEXT),
+            PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        builder.addAction(android.R.drawable.ic_media_next, "Next", nextPI);
+
+        builder
+            .setContentTitle(title)
+            .setContentText(artist)
+            .setSubText(album)
+            .setSmallIcon(android.R.drawable.ic_media_play)
+            .setContentIntent(pendingIntent)
+            .setOngoing(true)
+            .setVisibility(Notification.VISIBILITY_PUBLIC)
+            .setPriority(Notification.PRIORITY_LOW)
+            .setCategory(Notification.CATEGORY_TRANSPORT);
+
+        // Attach MediaSession token via MediaStyle so the system shows proper
+        // transport controls on the lock screen and notification shade
+        if (mediaSession != null) {
+            try {
+                builder.setStyle(new Notification.MediaStyle()
+                    .setMediaSession(mediaSession.getSessionToken())
+                    .setShowActionsInCompactView(0, 1, 2));
+            } catch (Exception e) {
+                System.err.println("[MusicForegroundService] setMediaStyle failed: " + e.getMessage());
+            }
+        }
+
+        return builder.build();
     }
 
     private void dispatchMediaAction(String action, long position) {
@@ -244,6 +413,8 @@ public class MusicForegroundService extends Service {
     public void updatePlaybackState(boolean isPlaying, long position, long duration) {
         this.isPlaying = isPlaying;
         this.duration = duration;
+        updateMediaSessionState();
+        rebuildNotification();
     }
 
     public void updateNotification(String title, String artist, String album, String albumArt) {
@@ -251,6 +422,7 @@ public class MusicForegroundService extends Service {
         currentTitle = title;
         currentArtist = artist;
         currentAlbum = album;
+        updateMediaSessionMetadata();
         rebuildNotification();
     }
 
@@ -279,15 +451,47 @@ public class MusicForegroundService extends Service {
 
     @Override
     public void onTaskRemoved(Intent rootIntent) {
+        instance = null;
+        BackgroundAudioPlugin.stopKeepAlive();
+        if (mediaSession != null) {
+            try { mediaSession.setActive(false); } catch (Exception ignored) {}
+            try { mediaSession.release(); } catch (Exception ignored) {}
+            mediaSession = null;
+        }
+        if (headsetReceiver != null) {
+            try { unregisterReceiver(headsetReceiver); } catch (Exception ignored) {}
+            headsetReceiver = null;
+        }
+        if (notificationActionReceiver != null) {
+            try { unregisterReceiver(notificationActionReceiver); } catch (Exception ignored) {}
+            notificationActionReceiver = null;
+        }
+        abandonAudioFocus();
+        releaseWakeLock();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE);
+        } else {
+            stopForeground(true);
+        }
         super.onTaskRemoved(rootIntent);
     }
 
     @Override
     public void onDestroy() {
         instance = null;
+        BackgroundAudioPlugin.stopKeepAlive();
+        if (mediaSession != null) {
+            try { mediaSession.setActive(false); } catch (Exception ignored) {}
+            try { mediaSession.release(); } catch (Exception ignored) {}
+            mediaSession = null;
+        }
         if (headsetReceiver != null) {
             try { unregisterReceiver(headsetReceiver); } catch (Exception ignored) {}
             headsetReceiver = null;
+        }
+        if (notificationActionReceiver != null) {
+            try { unregisterReceiver(notificationActionReceiver); } catch (Exception ignored) {}
+            notificationActionReceiver = null;
         }
         abandonAudioFocus();
         releaseWakeLock();

@@ -413,3 +413,44 @@ html, body, #root {
   background: var(--color-accent);
   color: white;
 }
+
+/* ============================================
+   PLAYER LAYOUT — dynamic via CSS custom properties
+   --player-h   : set by usePlayerLayout (ResizeObserver)
+   --safe-bottom: env(safe-area-inset-bottom)
+   --keyboard-h : set by usePlayerLayout (VisualViewport)
+   ============================================ */
+
+:root {
+  --player-h: 72px;
+  --mobile-nav-h: 64px;
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --keyboard-h: 0px;
+}
+
+/* Safe-area padding (iOS notch / Android gesture bar) */
+.pb-safe {
+  padding-bottom: var(--safe-bottom);
+}
+
+/* Scroll container: accounts for player bar + safe area */
+.pb-content {
+  padding-bottom: calc(var(--player-h) + var(--safe-bottom) + var(--keyboard-h));
+}
+/* On mobile, also account for the fixed bottom nav bar */
+@media (max-width: 1023px) {
+  .pb-content {
+    padding-bottom: calc(var(--player-h) + var(--mobile-nav-h) + var(--safe-bottom) + var(--keyboard-h));
+  }
+}
+
+/* Mobile bottom nav: sits above the player bar */
+.mobile-nav {
+  bottom: var(--player-h);
+  padding-bottom: var(--safe-bottom);
+}
+
+/* Hide mobile nav when keyboard is open */
+[data-keyboard] .mobile-nav {
+  display: none;
+}

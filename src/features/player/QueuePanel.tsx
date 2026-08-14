@@ -33,6 +33,9 @@ import {
   Music,
   Play,
   Pause,
+  Download,
+  Check,
+  Loader2,
 } from 'lucide-react';
 
 const formatDuration = (sec: number) => {
@@ -54,6 +57,12 @@ interface SortableSongRowProps {
 const SortableSongRow = memo(({ song, index, isCurrent, isPlaying, section, onContextMenu, onTouchStart }: SortableSongRowProps) => {
   const playAtIndex = useQueueStore((s) => s.playAtIndex);
   const removeFromQueue = useQueueStore((s) => s.removeFromQueue);
+  const { isDownloaded, isDownloading, downloadSong, cancelDownload } = useDownloadsStore(useShallow((s) => ({
+    isDownloaded: s.isDownloaded(song.youtubeId || song.id),
+    isDownloading: s.isDownloading(song.youtubeId || song.id),
+    downloadSong: s.downloadSong,
+    cancelDownload: s.cancelDownload,
+  })));
 
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: song.id + '-' + index });
 
@@ -133,6 +142,15 @@ const SortableSongRow = memo(({ song, index, isCurrent, isPlaying, section, onCo
 
       <span className="text-xs text-gray-600 flex-shrink-0">{formatDuration(song.duration)}</span>
 
+      <button
+        onClick={(e) => { e.stopPropagation(); if (isDownloading) cancelDownload(); else if (!isDownloaded) downloadSong(song); }}
+        disabled={isDownloaded && !isDownloading}
+        className={cn("p-2 rounded-lg transition-all", isDownloaded ? "text-emerald-400" : isDownloading ? "text-violet-400" : "text-gray-500 hover:text-violet-400 hover:bg-white/5")}
+        title={isDownloaded ? "Downloaded" : isDownloading ? "Cancel download" : "Download"}
+      >
+        {isDownloaded ? <Check size={14} /> : isDownloading ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+      </button>
+
       {section !== 'recent' && (
         <button
           onClick={() => removeFromQueue(index)}
@@ -196,7 +214,7 @@ export const QueuePanel: React.FC = memo(() => {
   const RepeatIcon = repeatMode === 'one' ? Repeat1 : Repeat;
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col">
       <div className="flex items-center justify-between px-4 py-3 border-b border-white/5">
         <div className="flex items-center gap-1">
           <button

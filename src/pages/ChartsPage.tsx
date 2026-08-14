@@ -1,4 +1,4 @@
-import React, { useEffect, useCallback, useMemo, memo, useRef, useState } from 'react';
+import React, { useEffect, useCallback, useMemo, memo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useGoBack } from '../hooks/useGoBack';
 import { useChartsStore, ChartSong, TrendingSource } from '../stores/chartsStore';
@@ -8,9 +8,6 @@ import { TrendingUp, TrendingDown, Minus, Sparkles, Music, ArrowLeft, RefreshCw,
 import CachedImage from '../components/CachedImage';
 import { useSongContextMenu } from '../components/SongContextMenu';
 import { useDownloadsStore } from '../stores/downloadsStore';
-
-const ROW_HEIGHT = 60;
-const BUFFER = 8;
 
 const SOURCE_LABELS: Record<TrendingSource, string> = {
   youtube_music: 'Live from YouTube Music',
@@ -46,7 +43,7 @@ const ChartRow = memo(({ song, index, onPlay, getTrendIcon, onContextMenu, onTou
     onContextMenu={onContextMenu}
     onTouchStart={onTouchStart}
     className="flex items-center gap-4 p-3 rounded-xl bg-white/5 hover:bg-white/10 cursor-pointer transition-colors group"
-    style={{ height: ROW_HEIGHT }}
+    style={{ height: 60 }}
   >
     <div className="w-8 text-center flex-shrink-0">
       <span className={`text-lg font-bold ${
@@ -108,10 +105,6 @@ export const ChartsPage: React.FC = () => {
   const fetchCharts = useChartsStore((s) => s.fetchCharts);
   const loadSong = useAudioStore((s) => s.loadSong);
   const [activeTab, setActiveTab] = React.useState<'top' | 'global' | 'bollywood'>('top');
-  const scrollContainerRef = useRef<HTMLDivElement>(null);
-  const [scrollTop, setScrollTop] = useState(0);
-  const [containerHeight, setContainerHeight] = useState(600);
-  const rafRef = useRef<number>(0);
 
   const { handleContextMenu, handleLongPress, ContextMenu } = useSongContextMenu(
     (artist) => navigate(`/search?q=${encodeURIComponent(artist)}`),
@@ -151,36 +144,6 @@ export const ChartsPage: React.FC = () => {
     (activeTab === 'top' ? topCharts : activeTab === 'global' ? globalCharts : bollywoodCharts) || [],
     [activeTab, topCharts, globalCharts, bollywoodCharts]
   );
-
-  const handleScroll = useCallback(() => {
-    if (rafRef.current) return;
-    rafRef.current = requestAnimationFrame(() => {
-      if (scrollContainerRef.current) {
-        setScrollTop(scrollContainerRef.current.scrollTop);
-      }
-      rafRef.current = 0;
-    });
-  }, []);
-
-  useEffect(() => {
-    const el = scrollContainerRef.current;
-    if (!el) return;
-    el.addEventListener('scroll', handleScroll, { passive: true });
-    const observer = new ResizeObserver(([entry]) => {
-      if (entry) setContainerHeight(entry.contentRect.height);
-    });
-    observer.observe(el);
-    setContainerHeight(el.clientHeight);
-    return () => {
-      el.removeEventListener('scroll', handleScroll);
-      observer.disconnect();
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    };
-  }, [handleScroll, activeTab]);
-
-  const startIndex = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - BUFFER);
-  const visibleCount = Math.min(charts.length - startIndex, Math.ceil(containerHeight / ROW_HEIGHT) + BUFFER * 2);
-  const visibleCharts = charts.slice(startIndex, startIndex + visibleCount);
 
   const handlePlay = useCallback((song: ChartSong, index: number) => {
     const filteredChart = charts[index] || charts.find((c) => c.id === song.id);
@@ -304,36 +267,31 @@ export const ChartsPage: React.FC = () => {
       )}
 
       {charts.length > 0 && (
-        <div ref={scrollContainerRef} style={{ maxHeight: '70vh', overflowY: 'auto' }}>
-          <div style={{ height: charts.length * ROW_HEIGHT, position: 'relative' }}>
-            <div style={{ transform: `translateY(${startIndex * ROW_HEIGHT}px)` }}>
-              {visibleCharts.map((song, i) => {
-                const actualIndex = startIndex + i;
-                return (
-                  <ChartRow
-                    key={song.id}
-                    song={song}
-                    index={actualIndex}
-                    onPlay={() => handlePlay(song, actualIndex)}
-                    getTrendIcon={getTrendIcon}
-                    onContextMenu={(e) => handleContextMenu(e, {
-                      id: song.id, title: song.title, artist: song.artist, album: 'Charts',
-                      duration: song.duration || 200, genre: 'Pop', coverArt: song.thumbnail,
-                      audioUrl: '', youtubeId: song.youtubeId, releaseYear: new Date().getFullYear(),
-                    })}
-                    onTouchStart={(e) => handleLongPress(e, {
-                      id: song.id, title: song.title, artist: song.artist, album: 'Charts',
-                      duration: song.duration || 200, genre: 'Pop', coverArt: song.thumbnail,
-                      audioUrl: '', youtubeId: song.youtubeId, releaseYear: new Date().getFullYear(),
-                    })}
-                    isDownloaded={isDownloadedFn(song.youtubeId || song.id)}
-                    isDownloading={isDownloadingFn(song.youtubeId || song.id)}
-                    onDownload={() => handleDownload(song)}
-                  />
-                );
-              })}
-            </div>
-          </div>
+        <div>
+          {charts.map((song, i) => {
+            return (
+              <ChartRow
+                key={song.id}
+                song={song}
+                index={i}
+                onPlay={() => handlePlay(song, i)}
+                getTrendIcon={getTrendIcon}
+                onContextMenu={(e) => handleContextMenu(e, {
+                  id: song.id, title: song.title, artist: song.artist, album: 'Charts',
+                  duration: song.duration || 200, genre: 'Pop', coverArt: song.thumbnail,
+                  audioUrl: '', youtubeId: song.youtubeId, releaseYear: new Date().getFullYear(),
+                })}
+                onTouchStart={(e) => handleLongPress(e, {
+                  id: song.id, title: song.title, artist: song.artist, album: 'Charts',
+                  duration: song.duration || 200, genre: 'Pop', coverArt: song.thumbnail,
+                  audioUrl: '', youtubeId: song.youtubeId, releaseYear: new Date().getFullYear(),
+                })}
+                isDownloaded={isDownloadedFn(song.youtubeId || song.id)}
+                isDownloading={isDownloadingFn(song.youtubeId || song.id)}
+                onDownload={() => handleDownload(song)}
+              />
+            );
+          })}
         </div>
       )}
       <ContextMenu />

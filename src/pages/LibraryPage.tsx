@@ -285,7 +285,6 @@ export const LibraryPage: React.FC = () => {
           )}
         </motion.div>
       </AnimatePresence>
-      <div className="pb-20" />
     </div>
   );
 };

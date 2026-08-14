@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect, type ReactNode } from 'react';
+import { createContext, useContext, useState, useEffect, useRef, type ReactNode } from 'react';
 import { User } from '../types/music';
 
 interface AuthContextType {
@@ -29,12 +29,18 @@ function generateAvatar(name: string): string {
 export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const mounted = useRef(true);
+
+  useEffect(() => {
+    return () => { mounted.current = false; };
+  }, []);
 
   useEffect(() => {
     const deferInit = typeof requestIdleCallback === 'function'
       ? requestIdleCallback
       : (cb: IdleRequestCallback) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 } as IdleDeadline), 0);
     deferInit(() => {
+      if (!mounted.current) return;
       try {
         const savedUser = localStorage.getItem('musicAppUser');
         if (savedUser) {
@@ -43,7 +49,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       } catch {
         localStorage.removeItem('musicAppUser');
       } finally {
-        setLoading(false);
+        if (mounted.current) setLoading(false);
       }
     });
   }, []);

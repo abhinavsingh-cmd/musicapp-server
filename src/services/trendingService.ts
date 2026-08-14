@@ -1,5 +1,5 @@
 import { Song } from '../types/music';
-import { api, apiFetch } from '../config/api';
+import { api, apiFetch, clearResponseCache } from '../config/api';
 import { useSongsStore } from '../stores/songsStore';
 
 export interface TrendingResult {
@@ -31,9 +31,9 @@ const CACHE_MAX_AGE = 60 * 60 * 1000;     // 60 min max for loading stale
 const BACKGROUND_INTERVAL = 15 * 60 * 1000; // 15 min
 const MAX_BACKOFF_MS = 16_000;
 const BASE_BACKOFF_MS = 1_000;
-const MAX_RETRIES = 3;
-const REQUEST_TIMEOUT_MS = 12_000;
-const TOTAL_TIMEOUT_MS = 25_000;
+const MAX_RETRIES = 2;
+const REQUEST_TIMEOUT_MS = 15_000;
+const TOTAL_TIMEOUT_MS = 30_000;
 
 // ── Built-in fallback (20 popular songs) ───────────────────────────────────
 const BUILTIN: TrendingResult = {
@@ -66,7 +66,6 @@ const BUILTIN: TrendingResult = {
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 function mapServerResults(data: any): Song[] {
-  // Server wraps response in { success, message, code, details: { results, source, lastUpdated } }
   const payload = data.details || data;
   const results = (payload.results || [])
     .filter((r: any) => r && r.id && r.title)
@@ -103,6 +102,11 @@ function buildLocalFallback(): TrendingResult {
   };
 }
 
+/** Check if a source came from the network (not a local fallback). */
+function isLiveSource(source: string): boolean {
+  return source === 'youtube_music' || source === 'charts' || source === 'cache';
+}
+
 // ── TrendingService (singleton) ────────────────────────────────────────────
 
 class TrendingService {
@@ -112,8 +116,6 @@ class TrendingService {
   private inFlight: Promise<TrendingResult> | null = null;
   private listeners = new Set<() => void>();
   private backgroundTimer: ReturnType<typeof setInterval> | null = null;
-
-  // ── Metrics ──
   private metrics: TrendingMetrics = {
     totalAttempts: 0,
     successes: 0,
@@ -143,7 +145,7 @@ class TrendingService {
   }
 
   isFresh(): boolean {
-    return this.cache !== null && Date.now() - this.cacheTime < CACHE_TTL;
+    return this.cache !== null && isLiveSource(this.cache.source) && Date.now() - this.cacheTime < CACHE_TTL;
   }
 
   // ── Persistence ──
@@ -168,7 +170,15 @@ class TrendingService {
     } catch { /* quota exceeded */ }
   }
 
+  /**
+   * Cache live results in memory + disk. Never caches local_library or
+   * builtin results so they never masquerade as live data.
+   */
   private setCache(result: TrendingResult): void {
+    if (!isLiveSource(result.source)) {
+      console.log(`[Trending] Skipping cache for non-live source: ${result.source}`);
+      return;
+    }
     this.cache = result;
     this.cacheTime = Date.now();
     this.saveToDisk(result);
@@ -180,11 +190,9 @@ class TrendingService {
   private async fetchFromNetwork(): Promise<TrendingResult> {
     const startTime = Date.now();
     let lastError: string = '';
-    let retryCount = 0;
 
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       if (Date.now() - startTime > TOTAL_TIMEOUT_MS) break;
-      retryCount = attempt;
 
       const reqStart = Date.now();
       try {
@@ -201,29 +209,45 @@ class TrendingService {
 
         const data = await res.json();
         const songs = mapServerResults(data);
+        const payload = data.details || data;
         const reqTime = Date.now() - reqStart;
 
         if (songs.length > 0) {
-          const payload = data.details || data;
           const result: TrendingResult = {
             songs,
             source: payload.source || 'youtube_music',
             lastUpdated: payload.lastUpdated || Date.now(),
           };
-          console.log(`[Trending] ✅ LIVE SUCCESS: ${songs.length} songs, source=${result.source}, responseTime=${reqTime}ms, retries=${retryCount}`);
+          console.log(`[Trending] ✅ LIVE SUCCESS: ${songs.length} songs, source=${result.source}, responseTime=${reqTime}ms`);
           this.recordSuccess(Date.now() - startTime);
           return result;
         }
 
-        lastError = 'Empty results';
-        console.warn(`[Trending] ⚠️ Empty results from server (attempt ${attempt + 1}), reqTime=${reqTime}ms`);
+        // Server returned HTTP 200 but with zero results. This is NOT a
+        // network failure — the server simply has no trending data yet.
+        // Do NOT retry (retries hit the same cached empty response in
+        // apiFetch) and do NOT throw (that would trigger fallback caching).
+        // Return an empty result with a cache source so the UI shows
+        // "Cached" / "Offline" rather than falling through to local_library.
+        console.warn(`[Trending] ⚠️ Server returned empty results (attempt ${attempt + 1}, reqTime=${reqTime}ms). Treating as server-side empty state.`);
+        // Clear the apiFetch memory cache so the next call fetches fresh data
+        // instead of returning the same cached empty response.
+        clearResponseCache('/charts');
+        clearResponseCache('/youtube');
+        const emptyResult: TrendingResult = {
+          songs: [],
+          source: 'cache',
+          lastUpdated: Date.now(),
+        };
+        console.log(`[Trending] 📭 Empty trending result returned, source=${emptyResult.source}`);
+        return emptyResult;
       } catch (err) {
         const reqTime = Date.now() - reqStart;
         lastError = err instanceof Error ? err.message : 'Unknown error';
         console.warn(`[Trending] ❌ Request failed (attempt ${attempt + 1}): ${lastError}, reqTime=${reqTime}ms`);
       }
 
-      // Exponential backoff: 1s, 2s, 4s, 8s (capped at MAX_BACKOFF_MS)
+      // Exponential backoff: 1s, 2s, 4s (capped at MAX_BACKOFF_MS)
       if (attempt < MAX_RETRIES - 1) {
         const delay = Math.min(BASE_BACKOFF_MS * Math.pow(2, attempt), MAX_BACKOFF_MS);
         console.log(`[Trending] Backing off ${delay}ms before retry...`);
@@ -233,7 +257,9 @@ class TrendingService {
 
     console.warn(`[Trending] ❌ ALL RETRIES FAILED after ${MAX_RETRIES} attempts: ${lastError}`);
     this.recordFailure();
-    throw new Error(`Trending fetch failed after ${MAX_RETRIES} attempts: ${lastError}`);
+    // Do not throw — fall through to best-available fallback below
+    // (disk cache → local library → builtin). This ensures the UI never
+    // shows an unhandled error and the user always sees something useful.
   }
 
   // ── Metrics ──
@@ -260,15 +286,20 @@ class TrendingService {
   // ── Public API ──
 
   /**
-   * Get trending data. Returns immediately from cache if fresh.
-   * If stale or missing, fetches from network in the background.
+   * Get trending data. Returns immediately from cache if fresh AND live.
+   * If stale, missing, or contains only fallback data, fetches from network.
    * Always returns the best available data (never empty).
    */
   async getTrending(): Promise<TrendingResult> {
-    // 1. Return fresh cache immediately
-    if (this.cache && Date.now() - this.cacheTime < CACHE_TTL) {
-      console.log(`[Trending] Cache HIT: ${this.cache.songs.length} songs, source=${this.cache.source}, age=${Math.round((Date.now() - this.cacheTime) / 1000)}s`);
+    // 1. Return fresh live cache immediately
+    if (this.cache && isLiveSource(this.cache.source) && Date.now() - this.cacheTime < CACHE_TTL) {
+      console.log(`[Trending] Cache HIT (live): ${this.cache.songs.length} songs, source=${this.cache.source}, age=${Math.round((Date.now() - this.cacheTime) / 1000)}s`);
       return this.cache;
+    }
+
+    // If cache exists but contains fallback data, log it clearly
+    if (this.cache && !isLiveSource(this.cache.source)) {
+      console.log(`[Trending] Cache contains fallback data (source=${this.cache.source}). Attempting live fetch...`);
     }
 
     console.log(`[Trending] Cache MISS or stale (age=${this.cache ? Math.round((Date.now() - this.cacheTime) / 1000) + 's' : 'null'}), fetching from network...`);
@@ -286,10 +317,15 @@ class TrendingService {
         console.log(`[Trending] Network fetch complete: ${result.songs.length} songs, source=${result.source}`);
         return result;
       })
-      .catch(() => {
-        // Network failed — return best available (never empty)
-        const fallback = this.cache ?? this.loadFromDisk() ?? buildLocalFallback();
-        console.warn(`[Trending] Falling back to: source=${fallback.source}, songs=${fallback.songs.length}`);
+.catch((err) => {
+        // Network failed — return best available, but do NOT cache it
+        const disk = this.loadFromDisk();
+        const fallback = this.cache && isLiveSource(this.cache.source)
+          ? this.cache
+          : disk && isLiveSource(disk.source)
+            ? disk
+            : buildLocalFallback();
+        console.warn(`[Trending] Falling back to: source=${fallback.source}, songs=${fallback.songs.length}, reason=${err.message || err}`);
         return fallback;
       })
       .finally(() => {
@@ -313,20 +349,16 @@ class TrendingService {
    * Initialize: load from disk, start background refresh.
    */
   init(): TrendingResult {
-    // Load from disk synchronously, but preserve the original cachedAt time
-    // so the data's actual age is respected (don't set cacheTime = Date.now()
-    // which would make stale disk data appear "fresh" and block network fetches).
     const disk = this.loadFromDisk();
     if (disk) {
       this.cache = disk;
-      // Use the disk entry's cachedAt time, or if missing, treat as stale
       const raw = localStorage.getItem(CACHE_KEY);
       if (raw) {
         try {
           const entry: CacheEntry = JSON.parse(raw);
           this.cacheTime = entry.cachedAt || 0;
         } catch {
-          this.cacheTime = 0; // stale — will trigger network fetch
+          this.cacheTime = 0;
         }
       } else {
         this.cacheTime = 0;
@@ -337,7 +369,6 @@ class TrendingService {
       console.log('[Trending] init: no disk cache, using builtin');
     }
 
-    // Start background refresh
     this.startBackgroundRefresh();
 
     return this.cache ?? BUILTIN;
@@ -348,7 +379,7 @@ class TrendingService {
     console.log(`[Trending] Background refresh started (interval: ${BACKGROUND_INTERVAL / 1000}s)`);
     this.backgroundTimer = setInterval(() => {
       console.log('[Trending] Background refresh triggered');
-      this.getTrending(); // silent background refresh
+      this.getTrending();
     }, BACKGROUND_INTERVAL);
   }
 

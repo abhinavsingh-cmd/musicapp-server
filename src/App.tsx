@@ -5,6 +5,7 @@ import { LayoutProvider } from './contexts/LayoutContext';
 import { AppLayout } from './features/layout/AppLayout';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { useAudioStore } from './stores/audioStore';
+import { useDownloadsStore } from './stores/downloadsStore';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { backgroundAudio } from './services/backgroundAudio';
 
@@ -55,7 +56,10 @@ const App: React.FC = () => {
     // This ensures the foreground service can show its notification
     backgroundAudio.requestNotificationPermission().catch(() => {});
 
-    // Restore playback state in background — never blocks render
+    // Restore playback state and downloads in background — never blocks render.
+    // loadDownloads() MUST run on startup so isDownloaded()/getBlobUrl() work
+    // from any page. Without this, downloaded songs appear as non-downloaded
+    // after app restart and the app re-requests YouTube unnecessarily.
     const defer = typeof requestIdleCallback === 'function'
       ? requestIdleCallback
       : (cb: IdleRequestCallback) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 } as IdleDeadline), 0);
@@ -64,6 +68,11 @@ const App: React.FC = () => {
         useAudioStore.getState().restoreFromPersistence();
       } catch (e) {
         console.error('Failed to restore playback state:', e);
+      }
+      try {
+        useDownloadsStore.getState().loadDownloads();
+      } catch (e) {
+        console.error('Failed to load downloads:', e);
       }
     });
   }, []);

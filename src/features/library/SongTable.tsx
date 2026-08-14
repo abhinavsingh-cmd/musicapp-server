@@ -7,6 +7,7 @@ import { cn } from '../../utils/cn';
 import { Heart, Play, Pause, Clock, Download, Check, X, AlertTriangle } from 'lucide-react';
 import CachedImage from '../../components/CachedImage';
 import { useSongContextMenu } from '../../components/SongContextMenu';
+import { useShallow } from 'zustand/react/shallow';
 
 interface SongTableProps {
   songs: Song[];
@@ -14,7 +15,6 @@ interface SongTableProps {
 }
 
 const ROW_HEIGHT = 56;
-const BUFFER = 10;
 
 const Equalizer: React.FC = memo(() => (
   <div className="playing-indicator text-violet-400 flex items-end gap-[2px] h-4">
@@ -35,13 +35,13 @@ const SongRow = memo(({ song, index, isActive, isCurrentlyPlaying, isLoading, on
 }) => {
   return (
     <div
-      className={cn("grid grid-cols-12 gap-4 px-6 py-2 text-sm cursor-pointer song-row", isActive && "bg-violet-500/10", "group transition-colors duration-100")}
+      className={cn("flex items-center gap-3 sm:gap-4 px-4 sm:px-6 py-2 text-sm cursor-pointer song-row", isActive && "bg-violet-500/10", "group transition-colors duration-100")}
       style={{ height: ROW_HEIGHT }}
       onClick={onClick}
       onContextMenu={onContextMenu}
       onTouchStart={onTouchStart}
     >
-      <div className="col-span-1 flex items-center">
+      <div className="w-6 flex items-center justify-center flex-shrink-0">
         {isCurrentlyPlaying ? <Equalizer /> : isActive && isLoading ? (
           <div className="w-4 h-4 border-2 border-violet-400 border-t-transparent rounded-full animate-spin" />
         ) : isActive ? <div className="text-violet-400"><Pause size={16} /></div> : (
@@ -51,20 +51,20 @@ const SongRow = memo(({ song, index, isActive, isCurrentlyPlaying, isLoading, on
           </div>
         )}
       </div>
-      <div className="col-span-5 flex items-center space-x-3 min-w-0">
+      <div className="flex items-center space-x-3 min-w-0 flex-1">
         <CachedImage src={song.coverArt} alt="" className={cn("w-10 h-10 rounded-lg object-cover flex-shrink-0 transition-all duration-200", isCurrentlyPlaying && "ring-2 ring-violet-500 ring-offset-1 ring-offset-[var(--color-bg)] shadow-md shadow-violet-500/20")} />
         <div className="min-w-0">
           <div className={cn("font-medium truncate transition-colors", isActive ? "text-violet-400" : "text-white")}>{song.title}</div>
           <div className="text-sm text-gray-400 truncate">{song.artist}</div>
         </div>
       </div>
-      <div className="col-span-3 hidden md:flex items-center text-sm text-gray-500 truncate">{song.album}</div>
-      <div className="col-span-2 hidden sm:flex items-center text-sm text-gray-500"><Clock size={12} className="mr-1" />{fmt(song.duration)}</div>
-      <div className="col-span-1 flex items-center justify-end gap-1">
+      <div className="hidden md:block w-40 flex items-center text-sm text-gray-500 truncate flex-shrink-0">{song.album}</div>
+      <div className="hidden sm:flex items-center w-20 text-sm text-gray-500 flex-shrink-0"><Clock size={12} className="mr-1" />{fmt(song.duration)}</div>
+      <div className="flex items-center justify-end gap-1 flex-shrink-0">
         <button
           onClick={(e) => { e.stopPropagation(); if (isDownloading) onCancelDownload(); else if (!isDownloaded) onDownload(); }}
           disabled={isDownloaded && !isDownloading}
-          className={cn("p-1.5 rounded-lg transition-all", isDownloaded ? "text-emerald-400 opacity-100" : isDownloading ? "text-violet-400 opacity-100" : "text-gray-500 opacity-0 group-hover:opacity-100 hover:text-violet-400 hover:bg-white/5")}
+          className={cn("p-1.5 rounded-lg transition-all", isDownloaded ? "text-emerald-400" : isDownloading ? "text-violet-400" : "text-gray-500 hover:text-violet-400 hover:bg-white/5")}
           title={isDownloaded ? "Downloaded" : isDownloading ? "Cancel download" : "Download"}
         >
           {isDownloaded ? <Check size={14} /> : isDownloading ? <X size={14} /> : <Download size={14} />}
@@ -100,22 +100,24 @@ const MAX_RETRY_ATTEMPTS = 3;
 
 export const SongTable: React.FC<SongTableProps> = memo(({ songs, className }) => {
   const navigate = useNavigate();
-  const currentSongId = useAudioStore((s) => s.currentSong?.id ?? null);
-  const isPlaying = useAudioStore((s) => s.isPlaying);
-  const isLoading = useAudioStore((s) => s.isLoading);
-  const loadSong = useAudioStore((s) => s.loadSong);
-  const togglePlayPause = useAudioStore((s) => s.togglePlayPause);
-  const toggleFavorite = useAudioStore((s) => s.toggleFavorite);
-  const favorites = useAudioStore((s) => s.favorites);
-  const downloadSong = useDownloadsStore((s) => s.downloadSong);
-  const cancelDownload = useDownloadsStore((s) => s.cancelDownload);
-  const downloads = useDownloadsStore((s) => s.downloads);
+  const { currentSongId, isPlaying, isLoading, loadSong, togglePlayPause, toggleFavorite, favorites } = useAudioStore(useShallow((s) => ({
+    currentSongId: s.currentSong?.id ?? null,
+    isPlaying: s.isPlaying,
+    isLoading: s.isLoading,
+    loadSong: s.loadSong,
+    togglePlayPause: s.togglePlayPause,
+    toggleFavorite: s.toggleFavorite,
+    favorites: s.favorites,
+  })));
+  const { downloads, downloadingIds, downloadSong, cancelDownload } = useDownloadsStore(useShallow((s) => ({
+    downloads: s.downloads,
+    downloadingIds: s.downloadingIds,
+    downloadSong: s.downloadSong,
+    cancelDownload: s.cancelDownload,
+  })));
   const containerRef = useRef<HTMLDivElement>(null);
-  const [scrollTop, setScrollTop] = useState(0);
-  const [containerHeight, setContainerHeight] = useState(600);
-  const rafRef = useRef<number>(0);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const retryStateRef = useRef<RetryState>({
+  const [retryState, setRetryState] = useState<RetryState>({
     lastRetryTime: 0,
     retryCount: 0,
     isRetrying: false,
@@ -138,8 +140,6 @@ export const SongTable: React.FC<SongTableProps> = memo(({ songs, className }) =
     return m;
   }, [downloads]);
 
-  const downloadingIds = useDownloadsStore((s) => s.downloadingIds);
-
   const downloadingSet = useMemo(() => {
     const ids = new Set<string>();
     for (const id of downloadingIds) ids.add(id);
@@ -152,102 +152,62 @@ export const SongTable: React.FC<SongTableProps> = memo(({ songs, className }) =
     return ids;
   }, [downloads]);
 
-  const handleScroll = useCallback(() => {
-    if (rafRef.current) return;
-    rafRef.current = requestAnimationFrame(() => {
-      if (containerRef.current) {
-        setScrollTop(containerRef.current.scrollTop);
-      }
-      rafRef.current = 0;
-    });
-  }, [containerRef]);
-
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    el.addEventListener('scroll', handleScroll, { passive: true });
-    const observer = new ResizeObserver(entries => {
-      for (const entry of entries) {
-        setContainerHeight(entry.contentRect.height);
-      }
-    });
-    observer.observe(el);
-    return () => {
-      el.removeEventListener('scroll', handleScroll);
-      observer.disconnect();
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
-      if (timeoutRef.current) clearTimeout(timeoutRef.current);
-    };
-  }, [handleScroll, containerRef]);
-
   useEffect(() => {
     if (isLoading && songs.length === 0) {
-      retryStateRef.current = {
-        ...retryStateRef.current,
+      setRetryState({
+        ...retryState,
         lastRetryTime: Date.now(),
         error: null,
         isRetrying: false
-      };
+      });
     }
   }, [isLoading, songs.length]);
 
-  const shouldShowRetry = useMemo(() => {
-    const state = retryStateRef.current;
+const shouldShowRetry = useMemo(() => {
+    const state = retryState;
     const now = Date.now();
     const timeSinceLastRetry = now - state.lastRetryTime;
     const isTimeout = timeSinceLastRetry >= state.timeout;
     const maxRetriesReached = state.retryCount >= MAX_RETRY_ATTEMPTS;
     
     return songs.length === 0 && isLoading && (isTimeout || maxRetriesReached);
-  }, [songs.length, isLoading]);
+  }, [songs.length, isLoading, retryState]);
 
   const handleRetry = useCallback(() => {
-    retryStateRef.current = {
-      ...retryStateRef.current,
+    setRetryState({
+      ...retryState,
       isRetrying: true,
       error: null
-    };
+    });
     
     timeoutRef.current = setTimeout(() => {
-      retryStateRef.current = {
-        ...retryStateRef.current,
+      setRetryState({
+        ...retryState,
         isRetrying: false,
-        retryCount: retryStateRef.current.retryCount + 1,
+        retryCount: retryState.retryCount + 1,
         lastRetryTime: Date.now()
-      };
+      });
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('retry-library'));
       }
     }, 1000);
-  }, []);
+  }, [retryState]);
 
   const handleTimeout = useCallback(() => {
-    retryStateRef.current = {
-      ...retryStateRef.current,
+    setRetryState({
+      ...retryState,
       error: `Loading timed out after ${RETRY_TIMEOUT_MS / 1000}s. Unable to load your library.`,
       isRetrying: false
-    };
+    });
     
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
-  }, []);
+  }, [retryState]);
 
   useEffect(() => {
-    if (shouldShowRetry && !retryStateRef.current.isRetrying) {
+    if (shouldShowRetry && !retryState.isRetrying) {
       handleTimeout();
     }
   }, [shouldShowRetry, handleTimeout]);
-
-  const startIndex = useMemo(() => {
-    return Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - BUFFER);
-  }, [scrollTop]);
-
-  const visibleCount = useMemo(() => {
-    return Math.min(songs.length - startIndex, Math.ceil(containerHeight / ROW_HEIGHT) + BUFFER * 2);
-  }, [songs.length, startIndex, containerHeight]);
-
-  const visibleSongs = useMemo(() => {
-    return songs.slice(startIndex, startIndex + visibleCount);
-  }, [songs, startIndex, visibleCount]);
 
   const isLoadingRef = useRef(false);
 
@@ -274,7 +234,7 @@ export const SongTable: React.FC<SongTableProps> = memo(({ songs, className }) =
     );
   }
 
-  if (songs.length === 0 && retryStateRef.current.error && !retryStateRef.current.isRetrying) {
+  if (songs.length === 0 && retryState.error && !retryState.isRetrying) {
     return (
       <div className={cn("w-full flex items-center justify-center py-16", className)}>
         <div className="max-w-md w-full text-center space-y-4">
@@ -283,15 +243,15 @@ export const SongTable: React.FC<SongTableProps> = memo(({ songs, className }) =
           </div>
           <div>
             <h3 className="text-lg font-semibold text-white mb-2">Failed to load library</h3>
-            <p className="text-gray-400 text-sm mb-4">{retryStateRef.current.error}</p>
+            <p className="text-gray-400 text-sm mb-4">{retryState.error}</p>
           </div>
           <div className="flex items-center justify-center gap-3">
             <button
               onClick={handleRetry}
-              disabled={retryStateRef.current.isRetrying}
+              disabled={retryState.isRetrying}
               className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-violet-500/10 hover:bg-violet-500/20 text-violet-400 text-sm font-medium transition-all disabled:opacity-50"
             >
-              {retryStateRef.current.isRetrying ? (
+              {retryState.isRetrying ? (
                 <div className="w-4 h-4 border-2 border-violet-400 border-t-transparent rounded-full animate-spin" />
               ) : (
                 "Try Again"
@@ -305,7 +265,7 @@ export const SongTable: React.FC<SongTableProps> = memo(({ songs, className }) =
             </button>
           </div>
           <p className="text-gray-600 text-xs">
-            Retry attempts: {retryStateRef.current.retryCount}/{MAX_RETRY_ATTEMPTS}
+            Retry attempts: {retryState.retryCount}/{MAX_RETRY_ATTEMPTS}
           </p>
         </div>
       </div>
@@ -314,29 +274,24 @@ export const SongTable: React.FC<SongTableProps> = memo(({ songs, className }) =
 
   return (
     <div className={cn("w-full", className)}>
-      <div className="grid grid-cols-12 gap-4 px-6 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 border-b border-white/5">
-        <div className="col-span-1">#</div>
-        <div className="col-span-5">TITLE</div>
-        <div className="col-span-3 hidden md:block">ALBUM</div>
-        <div className="col-span-2 hidden sm:block">DURATION</div>
-        <div className="col-span-1 text-right"><Download size={14} className="inline" /></div>
+      <div className="flex items-center gap-3 sm:gap-4 px-4 sm:px-6 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500 border-b border-white/5">
+        <div className="w-6 text-center flex-shrink-0">#</div>
+        <div className="flex-1">TITLE</div>
+        <div className="hidden md:block w-40 flex-shrink-0">ALBUM</div>
+        <div className="hidden sm:flex w-20 flex-shrink-0">DURATION</div>
+        <div className="flex-shrink-0"><Download size={14} /></div>
       </div>
-      <div ref={containerRef} style={{ maxHeight: '70vh', overflowY: 'auto' }}>
-        <div style={{ height: songs.length * ROW_HEIGHT, position: 'relative' }}>
-          <div style={{ transform: `translateY(${startIndex * ROW_HEIGHT}px)` }}>
-            {visibleSongs.map((song, i) => {
-              const actualIndex = startIndex + i;
-              const isActive = currentSongId === song.id;
-              return (
-                <SongRow key={song.id} song={song} index={actualIndex} isActive={isActive} isCurrentlyPlaying={isActive && isPlaying} isLoading={isActive && isLoading}
-                  onClick={() => handleRowClick(song, actualIndex)} onFavToggle={() => toggleFavorite(song.youtubeId || song.id)} isFav={favSet.has(song.youtubeId || song.id)}
-                  isDownloaded={song.youtubeId ? downloadedSet.has(song.youtubeId) : false} isDownloading={song.youtubeId ? downloadingSet.has(song.youtubeId) : false}
-                  onDownload={() => downloadSong(song)} onCancelDownload={() => song.youtubeId && cancelDownload(song.youtubeId)}
-                  onContextMenu={(e) => handleContextMenu(e, song)} onTouchStart={(e) => handleLongPress(e, song)} />
-              );
-            })}
-          </div>
-        </div>
+      <div ref={containerRef}>
+        {songs.map((song, i) => {
+          const isActive = currentSongId === song.id;
+          return (
+            <SongRow key={song.id} song={song} index={i} isActive={isActive} isCurrentlyPlaying={isActive && isPlaying} isLoading={isActive && isLoading}
+              onClick={() => handleRowClick(song, i)} onFavToggle={() => toggleFavorite(song.youtubeId || song.id)} isFav={favSet.has(song.youtubeId || song.id)}
+              isDownloaded={song.youtubeId ? downloadedSet.has(song.youtubeId) : false} isDownloading={song.youtubeId ? downloadingSet.has(song.youtubeId) : false}
+              onDownload={() => downloadSong(song)} onCancelDownload={() => song.youtubeId && cancelDownload(song.youtubeId)}
+              onContextMenu={(e) => handleContextMenu(e, song)} onTouchStart={(e) => handleLongPress(e, song)} />
+          );
+        })}
       </div>
       <ContextMenu />
     </div>

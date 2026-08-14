@@ -51,11 +51,11 @@ export const MainContent = memo(() => {
         </div>
       </header>
 
-      <div className="flex-1 overflow-y-auto relative pb-28 lg:pb-4">
+      <div className="flex-1 overflow-y-auto relative pb-content">
         <Outlet />
       </div>
 
-      <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-50 bg-[#121220] border-t border-white/10 px-2 pb-safe">
+      <nav className="lg:hidden fixed left-0 right-0 z-50 bg-[#121220] border-t border-white/10 px-2 mobile-nav">
         <div className="flex items-center justify-around h-16">
           {mobileNavItems.map((item) => {
             const Icon = item.icon;

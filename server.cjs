@@ -1376,32 +1376,34 @@ app.get("/api/download/:videoId", (req, res) => {
 
   let attempt = 1;
   const maxAttempts = 2;
+  const MIN_BYTES = 10240;
 
   const attemptDownload = () => {
-    let headersSent = false;
+    let streamStarted = false;
     let totalBytes = 0;
-    let firstChunk = true;
     let stderrOutput = "";
+    let detectedExt = "mp3";
+    let detectedMime = "audio/mpeg";
+    const buffer = [];
 
-    const yt = spawn("yt-dlp", [
-      "-f", "bestaudio[ext=m4a]/bestaudio",
-      "--extract-audio",
-      "--audio-format", "mp3",
-      "--audio-quality", "0",
+    const ytArgs = [
+      "-f", "bestaudio/best",
       "-o", "-",
       "--no-check-certificates",
       "--age-limit", "18",
       "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
       audioUrl
-    ], { stdio: ["ignore", "pipe", "pipe"] });
+    ];
+
+    console.log("[Download] Attempt", attempt + "/" + maxAttempts, "for:", videoId);
+    const yt = spawn("yt-dlp", ytArgs, { stdio: ["ignore", "pipe", "pipe"] });
 
     const startupTimeout = setTimeout(() => {
-      if (!headersSent) {
+      if (!streamStarted) {
         yt.kill("SIGTERM");
         if (!res.headersSent) {
           console.error("[Download] Timed out for:", videoId, "attempt", attempt);
           if (attempt < maxAttempts) {
-            console.log("[Download] Retrying... attempt", attempt + 1);
             attempt++;
             setTimeout(attemptDownload, 1000);
           } else {
@@ -1411,19 +1413,44 @@ app.get("/api/download/:videoId", (req, res) => {
       }
     }, 60000);
 
-    yt.stdout.on("data", (chunk) => {
-      if (firstChunk) {
-        firstChunk = false;
-        headersSent = true;
-        clearTimeout(startupTimeout);
-        res.setHeader("Content-Disposition", 'attachment; filename="' + safeName + '.mp3"');
-        res.setHeader("Content-Type", "audio/mpeg");
+    function startStream() {
+      if (streamStarted) return;
+      streamStarted = true;
+      clearTimeout(startupTimeout);
+
+      if (totalBytes >= 4) {
+        const first = buffer[0];
+        if (first[0] === 0x49 && first[1] === 0x44 && first[2] === 0x33) { detectedMime = "audio/mpeg"; detectedExt = "mp3"; }
+        else if (first[0] === 0xFF && (first[1] === 0xFB || first[1] === 0xF3 || first[1] === 0xF2)) { detectedMime = "audio/mpeg"; detectedExt = "mp3"; }
+        else if (first.length >= 8 && first[4] === 0x66 && first[5] === 0x74 && first[6] === 0x79 && first[7] === 0x70) { detectedMime = "audio/mp4"; detectedExt = "m4a"; }
+        else { detectedMime = "audio/webm"; detectedExt = "webm"; }
       }
+
+      res.setHeader("Content-Disposition", 'attachment; filename="' + safeName + '.' + detectedExt + '"');
+      res.setHeader("Content-Type", detectedMime);
+      res.setHeader("Accept-Ranges", "bytes");
+      res.setHeader("Cache-Control", "no-cache");
+      console.log("[Download] Streaming for:", videoId, "MIME:", detectedMime, "buffered:", totalBytes, "bytes");
+
+      for (const chunk of buffer) {
+        res.write(chunk);
+      }
+      buffer.length = 0;
+    }
+
+    yt.stdout.on("data", (chunk) => {
       totalBytes += chunk.length;
+      if (!streamStarted) {
+        buffer.push(chunk);
+        if (totalBytes >= MIN_BYTES) {
+          startStream();
+        }
+      } else {
+        res.write(chunk);
+      }
     });
 
-    yt.stdout.pipe(res);
-
+    let killed = false;
     yt.stderr.on("data", (data) => {
       const msg = data.toString().trim();
       if (msg) console.error("[Download]", msg);
@@ -1435,7 +1462,6 @@ app.get("/api/download/:videoId", (req, res) => {
       console.error("[Download] Process error:", err.message, "attempt", attempt);
       if (!res.headersSent) {
         if (attempt < maxAttempts) {
-          console.log("[Download] Retrying... attempt", attempt + 1);
           attempt++;
           setTimeout(attemptDownload, 1000);
         } else {
@@ -1446,29 +1472,46 @@ app.get("/api/download/:videoId", (req, res) => {
 
     yt.on("close", (code) => {
       clearTimeout(startupTimeout);
-      if (code !== 0 && code !== null && !headersSent) {
-        console.error("[Download] yt-dlp exited with code:", code, "for:", videoId, "attempt", attempt);
+      if (killed) return;
+
+      if (!streamStarted && totalBytes > 0) {
+        startStream();
+      }
+
+      if (streamStarted) {
+        if (totalBytes < MIN_BYTES) {
+          console.error("[Download] Too few bytes:", totalBytes, "for:", videoId, "code:", code);
+          if (!res.headersSent) {
+            fail(res, 500, "DOWNLOAD_EMPTY", "Download produced no audio data", { videoId, bytes: totalBytes, code, detail: stderrOutput.slice(0, 500), attempts: maxAttempts });
+          } else {
+            res.end();
+          }
+        } else {
+          console.log("[Download] Completed for:", videoId, "bytes:", totalBytes, "MIME:", detectedMime);
+          res.end();
+        }
+      } else {
+        if (code !== 0 && code !== null) {
+          console.error("[Download] yt-dlp exited with code:", code, "for:", videoId, "attempt", attempt);
+        } else if (code === null) {
+          console.error("[Download] yt-dlp killed (signal) for:", videoId, "attempt", attempt);
+        } else {
+          console.error("[Download] No audio data received for:", videoId, "attempt", attempt);
+        }
         if (!res.headersSent) {
           if (attempt < maxAttempts) {
-            console.log("[Download] Retrying... attempt", attempt + 1);
             attempt++;
             setTimeout(attemptDownload, 1000);
           } else {
             fail(res, 500, "DOWNLOAD_FAILED", "Download failed after retries", { videoId, code, detail: stderrOutput.slice(0, 500), attempts: maxAttempts });
           }
         }
-      } else if (headersSent) {
-        if (code !== 0 && code !== null) {
-          console.error("[Download] Exited with non-zero code:", code, "for:", videoId, "but data was partially sent");
-        } else {
-          console.log("[Download] Completed for:", videoId, "bytes:", totalBytes);
-        }
-        res.end();
       }
     });
 
     req.on("close", () => {
       clearTimeout(startupTimeout);
+      killed = true;
       yt.kill("SIGTERM");
     });
   };

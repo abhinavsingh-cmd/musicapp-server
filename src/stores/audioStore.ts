@@ -12,6 +12,7 @@ import { preloadNextSongs, prewarmOnFirstInteraction } from '../services/preload
 
 const LOADING_TIMEOUT_MS = 30_000;
 let loadingTimeoutId: ReturnType<typeof setTimeout> | null = null;
+let initPromise: Promise<void> | null = null;
 
 function startLoadingTimeout() {
   if (loadingTimeoutId) clearTimeout(loadingTimeoutId);
@@ -56,6 +57,7 @@ export interface AudioStore {
   toggleFavorite: (songId: string) => void;
   restoreFromPersistence: () => void;
 }
+
 function loadFavorites(): string[] {
   try {
     return (JSON.parse(localStorage.getItem('favorites') || '[]') as string[])
@@ -97,20 +99,26 @@ function resolveDownloadUrl(song: Song): Song {
 
 /**
  * Resolve an entire queue array, injecting blob URLs for any downloaded songs.
- * Uses a Map for O(1) lookups instead of per-song find().
+ * After an app restart `blobUrlCache` is empty, so we call getBlobUrl() which
+ * creates ObjectURLs on-demand from the persisted IndexedDB blobs.
+ * Uses a Map for O(1) lookups to avoid repeated linear scans.
  */
 function resolveQueueDownloads(queue: Song[]): Song[] {
-  const downloadsState = useDownloadsStore.getState();
-  const blobUrlMap = new Map<string, string>();
-  for (const d of downloadsState.downloads) {
-    const key = d.youtubeId || d.id;
-    const url = downloadsState.blobUrlCache[d.id];
-    if (url) blobUrlMap.set(key, url);
-  }
+  const downloadsStore = useDownloadsStore.getState();
+  const resolvedMap = new Map<string, string>();
   let resolved = false;
   const result = queue.map(song => {
-    const blobUrl = blobUrlMap.get(song.youtubeId || song.id);
+    const key = song.youtubeId || song.id;
+    // Check cache first (fast path)
+    const cached = resolvedMap.get(key);
+    if (cached) {
+      resolved = true;
+      return { ...song, audioUrl: cached };
+    }
+    // getBlobUrl() creates the ObjectURL on-demand from IndexedDB blob data
+    const blobUrl = downloadsStore.getBlobUrl(key);
     if (blobUrl) {
+      resolvedMap.set(key, blobUrl);
       resolved = true;
       return { ...song, audioUrl: blobUrl };
     }
@@ -143,6 +151,8 @@ const PROGRESS_THROTTLE_MS = 250;
 const MAX_CONSECUTIVE_FAILURES = 5;
 let consecutivePlayFailures = 0;
 let nextSongRetryTimeout: ReturnType<typeof setTimeout> | null = null;
+let isNextSongPending = false;
+let isPreviousSongPending = false;
 let pendingResumePosition: number | null = null;
 let lastHistorySongId: string | null = null;
 let volumePersistTimer: ReturnType<typeof setTimeout> | null = null;
@@ -159,6 +169,9 @@ function scheduleVolumePersist(vol: number) {
 
 function chainAdvance(fn: () => Promise<void>): Promise<void> {
   const next = advanceChain.then(fn, fn);
+  // Reset after the chained promise settles — not immediately — to prevent
+  // a second chainAdvance call from slipping in before the first one's
+  // promise handler has been installed.
   advanceChain = next.then(() => {}, () => {});
   return next;
 }
@@ -176,136 +189,223 @@ function clearNextSongRetry() {
 }
 
 function initAudioServiceHandler() {
-  if (audioServiceUnsub) return;
+  // Use initPromise pattern to make init atomic — prevents double-subscription
+  // from concurrent loadSong calls and across HMR reloads.
+  if (initPromise) return initPromise;
+  initPromise = (async () => {
+    if (audioServiceUnsub) return;
 
-  audioServiceUnsub = audioService.subscribe((event, data) => {
-    const state = useAudioStore.getState();
+    audioServiceUnsub = audioService.subscribe((event, data) => {
+      const state = useAudioStore.getState();
 
-    switch (event) {
-      case 'play': {
-        clearNextSongRetry();
-        if (data?.song) {
-          consecutivePlayFailures = 0;
-        }
-        const newSong = data?.song ?? state.currentSong;
-        useAudioStore.setState({
-          isPlaying: true,
-          isLoading: false,
-          currentSong: newSong,
-          duration: audioService.getDuration(),
-          error: null,
-        });
-        if (data?.song) {
-          try { mediaSessionService.updateMetadata(data.song); } catch {}
-          try { mediaSessionService.updatePlaybackState(true, audioService.getCurrentTime(), audioService.getDuration()); } catch {}
-          try { backgroundAudio.updateMetadata({
-            title: data.song.title,
-            artist: data.song.artist,
-            album: data.song.album || 'MusicApp',
-            albumArt: data.song.coverArt,
-          }).catch(() => {}); } catch {}
-          try { backgroundAudio.updatePlaybackState({
-            isPlaying: true,
-            position: audioService.getCurrentTime(),
-            duration: audioService.getDuration(),
-          }).catch(() => {}); } catch {}
+      switch (event) {
+        case 'play': {
+          clearNextSongRetry();
           if (data?.song) {
-            const songId = data.song.id || '';
-            if (songId !== lastHistorySongId) {
-              lastHistorySongId = songId;
-              useHistoryStore.getState().addSong(data.song);
-            }
-            const qs = useQueueStore.getState();
-            preloadNextSongs(qs.queue, qs.currentIndex, { count: 3 }).catch(() => {});
+            consecutivePlayFailures = 0;
           }
-        }
-        break;
-      }
-      case 'playing': {
-        clearNextSongRetry();
-        consecutivePlayFailures = 0;
-        useAudioStore.setState({ isPlaying: true, isLoading: false });
-        break;
-      }
-      case 'pause':
-        useAudioStore.setState({ isPlaying: false });
-        try { mediaSessionService.updatePlaybackState(false, audioService.getCurrentTime(), audioService.getDuration()); } catch {}
-        break;
-      case 'ended': {
-        const repeatMode = useQueueStore.getState().repeatMode;
-        if (repeatMode === 'one') {
-          const currentSong = useAudioStore.getState().currentSong;
-          if (currentSong) {
-            const queue = useQueueStore.getState().queue;
-            const idx = useQueueStore.getState().currentIndex;
-            audioService.play(currentSong, queue, idx).catch((err) => {
-              console.error('[AudioStore] repeat-one play() failed:', err);
-              clearLoadingTimeout();
-              useAudioStore.setState({ isLoading: false, isPlaying: false, error: 'Playback failed' });
-              autoSkipNextSong();
-            });
-          }
-        } else {
-          useAudioStore.getState().nextSong();
-        }
-        break;
-      }
-      case 'progress': {
-        const now = Date.now();
-        if (now - lastProgressUpdate < PROGRESS_THROTTLE_MS) return;
-        lastProgressUpdate = now;
-        if (typeof data !== 'number') return;
-        useAudioStore.setState({ progress: data });
-        if (now - lastMediaUpdate > 1000) {
-          lastMediaUpdate = now;
-          try { mediaSessionService.updatePlaybackState(
-            useAudioStore.getState().isPlaying,
-            data,
-            audioService.getDuration(),
-          ); } catch {}
-          try { backgroundAudio.updatePlaybackState({
-            isPlaying: useAudioStore.getState().isPlaying,
-            position: data,
+          const newSong = data?.song ?? state.currentSong;
+          useAudioStore.setState({
+            isPlaying: true,
+            isLoading: false,
+            currentSong: newSong,
             duration: audioService.getDuration(),
-          }).catch(() => {}); } catch {}
+            error: null,
+          });
+          if (data?.song) {
+            try { mediaSessionService.updateMetadata(data.song); } catch {}
+            try { mediaSessionService.updatePlaybackState(true, audioService.getCurrentTime(), audioService.getDuration()); } catch {}
+            try { backgroundAudio.updateMetadata({
+              title: data.song.title,
+              artist: data.song.artist,
+              album: data.song.album || 'MusicApp',
+              albumArt: data.song.coverArt,
+            }).catch(() => {}); } catch {}
+            try { backgroundAudio.updatePlaybackState({
+              isPlaying: true,
+              position: audioService.getCurrentTime(),
+              duration: audioService.getDuration(),
+            }).catch(() => {}); } catch {}
+            if (data?.song) {
+              const songId = data.song.id || '';
+              if (songId !== lastHistorySongId) {
+                lastHistorySongId = songId;
+                useHistoryStore.getState().addSong(data.song);
+              }
+              const qs = useQueueStore.getState();
+              const resolvedQueue = resolveQueueDownloads(qs.queue);
+              preloadNextSongs(resolvedQueue, qs.currentIndex, { count: 3 }).catch(() => {});
+            }
+          }
+          break;
         }
-        // Persist position every 5s while playing (throttled)
-        if (now - lastProgressPersist > 5_000) {
-          lastProgressPersist = now;
+        case 'playing': {
+          clearNextSongRetry();
+          consecutivePlayFailures = 0;
+          useAudioStore.setState({ isPlaying: true, isLoading: false });
+          break;
+        }
+        case 'pause':
+          useAudioStore.setState({ isPlaying: false });
+          try { mediaSessionService.updatePlaybackState(false, audioService.getCurrentTime(), audioService.getDuration()); } catch {}
+          break;
+        case 'ended': {
+          const repeatMode = useQueueStore.getState().repeatMode;
+          if (repeatMode === 'one') {
+            const currentSong = useAudioStore.getState().currentSong;
+            if (currentSong) {
+              const queue = useQueueStore.getState().queue;
+              const idx = useQueueStore.getState().currentIndex;
+              audioService.play(currentSong, queue, idx).catch((err) => {
+                console.error('[AudioStore] repeat-one play() failed:', err);
+                clearLoadingTimeout();
+                useAudioStore.setState({ isLoading: false, isPlaying: false, error: 'Playback failed' });
+                autoSkipNextSong();
+              });
+            }
+          } else {
+            useAudioStore.getState().nextSong();
+          }
+          break;
+        }
+        case 'progress': {
+          const now = Date.now();
+          if (now - lastProgressUpdate < PROGRESS_THROTTLE_MS) return;
+          lastProgressUpdate = now;
+          if (typeof data !== 'number') return;
+          useAudioStore.setState({ progress: data });
+          if (now - lastMediaUpdate > 1000) {
+            lastMediaUpdate = now;
+            try { mediaSessionService.updatePlaybackState(
+              useAudioStore.getState().isPlaying,
+              data,
+              audioService.getDuration(),
+            ); } catch {}
+            try { backgroundAudio.updatePlaybackState({
+              isPlaying: useAudioStore.getState().isPlaying,
+              position: data,
+              duration: audioService.getDuration(),
+            }).catch(() => {}); } catch {}
+          }
+          if (now - lastProgressPersist > 5_000) {
+            lastProgressPersist = now;
+            persistPlaybackState();
+          }
+          break;
+        }
+        case 'loaded': {
+          const newSong = data?.song ?? state.currentSong;
+          useAudioStore.setState({
+            currentSong: newSong,
+            duration: audioService.getDuration(),
+            error: null,
+          });
+          if (data?.song) {
+            try { mediaSessionService.updateMetadata(data.song); } catch {}
+          }
+          break;
+        }
+        case 'error':
+          console.error('[AudioStore] Playback error:', data);
+          clearLoadingTimeout();
+          useAudioStore.setState({
+            error: typeof data === 'string' ? data : 'Playback error',
+            isLoading: false,
+          });
+          break;
+        case 'waiting':
+          useAudioStore.setState({ isLoading: true });
+          startLoadingTimeout();
+          break;
+        case 'canplay':
+          clearLoadingTimeout();
+          useAudioStore.setState({ isLoading: false });
+          break;
+      }
+    });
+
+    // ── Background listeners — each calls useAudioStore.getState() inside
+    try { backgroundAudio.onMediaAction((event) => {
+        const store = useAudioStore.getState();
+        switch (event.action) {
+          case 'play':
+            if (!store.currentSong) {
+              serviceRequestedPlay = true;
+              return;
+            }
+            if (store.isPlaying || store.isLoading) return;
+            store.play();
+            break;
+          case 'pause':
+          case 'stop':
+            serviceRequestedPlay = false;
+            store.pause();
+            break;
+          case 'next':
+            store.nextSong();
+            break;
+          case 'previous':
+            store.previousSong();
+            break;
+          case 'seek':
+            if (typeof event.position === 'number' && Number.isFinite(event.position)) {
+              store.seek(event.position);
+            }
+            break;
+        }
+      }).catch(() => {}); } catch {}
+
+    try {
+      backgroundPlaybackService.onInterruption((type) => {
+        if (type === 'headphone-unplug' || type === 'bluetooth-disconnect') {
+          useAudioStore.getState().pause();
+        }
+      });
+    } catch {}
+
+    try {
+      backgroundPlaybackService.onReconnect(() => {
+        const state = useAudioStore.getState();
+        if (state.currentSong && !state.isPlaying) {
+          audioService.resume().catch(() => {});
+        }
+      });
+    } catch {}
+
+    try {
+      backgroundPlaybackService.onBackgroundChange((isBackground) => {
+        if (isBackground) {
           persistPlaybackState();
         }
-        break;
-      }
-      case 'loaded': {
-        const newSong = data?.song ?? state.currentSong;
-        useAudioStore.setState({
-          currentSong: newSong,
-          duration: audioService.getDuration(),
-          error: null,
-        });
-        if (data?.song) {
-          try { mediaSessionService.updateMetadata(data.song); } catch {}
+      });
+    } catch {}
+
+    // ── Persist every 10s while playing
+    const persistIntervalId = setInterval(() => {
+      try {
+        const state = useAudioStore.getState();
+        if (state.isPlaying && state.currentSong) {
+          persistPlaybackState();
         }
-        break;
-      }
-      case 'error':
-        console.error('[AudioStore] Playback error:', data);
-        clearLoadingTimeout();
-        useAudioStore.setState({
-          error: typeof data === 'string' ? data : 'Playback error',
-          isLoading: false,
-        });
-        break;
-      case 'waiting':
-        useAudioStore.setState({ isLoading: true });
-        startLoadingTimeout();
-        break;
-      case 'canplay':
-        clearLoadingTimeout();
-        useAudioStore.setState({ isLoading: false });
-        break;
+      } catch {}
+    }, 10_000); // Persist every 10s while playing (was 30s)
+    if ((globalThis as any).__audioPersistInterval) {
+      clearInterval((globalThis as any).__audioPersistInterval);
     }
-  });
+    (globalThis as any).__audioPersistInterval = persistIntervalId;
+
+    // ── Queue store subscription for media session actions
+    useQueueStore.subscribe((state) => {
+      try {
+        mediaSessionService.updateActions(
+          state.currentIndex < state.queue.length - 1,
+          state.currentIndex > 0,
+        );
+      } catch {}
+    });
+
+initPromise = null;
+  })();
 }
 
 // Guard against double-init on HMR — wrapped in try/catch so module-level failures
@@ -432,6 +532,7 @@ function autoSkipNextSong() {
   clearNextSongRetry();
   const state = useAudioStore.getState();
   if (!state.currentSong) return;
+  if (isNextSongPending) return;  // Prevent duplicate next-song transitions
   
   consecutivePlayFailures++;
   
@@ -510,7 +611,8 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
       console.error('[AudioStore] loadSong play() failed:', msg);
       clearLoadingTimeout();
       set({ error: msg, isLoading: false, isPlaying: false });
-      autoSkipNextSong();
+      // autoSkipNextSong() is handled by the 'error' event handler below —
+      // do NOT call it here to avoid double-fire.
     });
   },
 
@@ -579,66 +681,78 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
   },
 
   nextSong: () => {
+    if (isNextSongPending) return;
+    isNextSongPending = true;
     clearNextSongRetry();
     pendingResumePosition = null;
     return chainAdvance(async () => {
-      const song = await useQueueStore.getState().nextSong();
-      if (song) {
-        const resolved = resolveDownloadUrl(song);
-        // Read queue + index synchronously right after nextSong() set them
-        const qs = useQueueStore.getState();
-        const resolvedQueue = resolveQueueDownloads(qs.queue);
-        set({
-          currentSong: resolved,
-          progress: 0,
-          isLoading: true,
-          duration: resolved.duration,
-          error: null,
-        });
-        startLoadingTimeout();
-        audioService.play(resolved, resolvedQueue, qs.currentIndex).catch(err => {
-          const msg = err instanceof Error ? err.message : 'Playback failed';
-          console.error('[AudioStore] nextSong play() failed:', msg);
+      try {
+        const song = await useQueueStore.getState().nextSong();
+        if (song) {
+          const resolved = resolveDownloadUrl(song);
+          // Read queue + index synchronously right after nextSong() set them
+          const qs = useQueueStore.getState();
+          const resolvedQueue = resolveQueueDownloads(qs.queue);
+          set({
+            currentSong: resolved,
+            progress: 0,
+            isLoading: true,
+            duration: resolved.duration,
+            error: null,
+          });
+          startLoadingTimeout();
+          audioService.play(resolved, resolvedQueue, qs.currentIndex).catch(err => {
+            const msg = err instanceof Error ? err.message : 'Playback failed';
+            console.error('[AudioStore] nextSong play() failed:', msg);
+            clearLoadingTimeout();
+            set({ error: msg, isLoading: false, isPlaying: false });
+            autoSkipNextSong();
+          });
+        } else {
+          clearNextSongRetry();
           clearLoadingTimeout();
-          set({ error: msg, isLoading: false, isPlaying: false });
-          autoSkipNextSong();
-        });
-      } else {
-        clearNextSongRetry();
-        clearLoadingTimeout();
-        set({ isPlaying: false, progress: 0, isLoading: false });
-        syncMediaSessionEnded();
+          set({ isPlaying: false, progress: 0, isLoading: false });
+          syncMediaSessionEnded();
+        }
+      } finally {
+        isNextSongPending = false;
       }
     });
   },
 
   previousSong: () => {
+    if (isPreviousSongPending) return;
+    isPreviousSongPending = true;
     clearNextSongRetry();
     pendingResumePosition = null;
     return chainAdvance(async () => {
-      const song = await useQueueStore.getState().previousSong();
-      if (song) {
-        const resolved = resolveDownloadUrl(song);
-        const qs = useQueueStore.getState();
-        const resolvedQueue = resolveQueueDownloads(qs.queue);
-        set({
-          currentSong: resolved,
-          progress: 0,
-          isLoading: true,
-          duration: resolved.duration,
-          error: null,
-        });
-        startLoadingTimeout();
-        audioService.play(resolved, resolvedQueue, qs.currentIndex).catch(err => {
-          const msg = err instanceof Error ? err.message : 'Playback failed';
-          console.error('[AudioStore] previousSong play() failed:', msg);
+      try {
+        const song = await useQueueStore.getState().previousSong();
+        if (song) {
+          const resolved = resolveDownloadUrl(song);
+          const qs = useQueueStore.getState();
+          const resolvedQueue = resolveQueueDownloads(qs.queue);
+          set({
+            currentSong: resolved,
+            progress: 0,
+            isLoading: true,
+            duration: resolved.duration,
+            error: null,
+          });
+          startLoadingTimeout();
+          audioService.play(resolved, resolvedQueue, qs.currentIndex).catch(err => {
+            const msg = err instanceof Error ? err.message : 'Playback failed';
+            console.error('[AudioStore] previousSong play() failed:', msg);
+            clearLoadingTimeout();
+            set({ error: msg, isLoading: false, isPlaying: false });
+            autoSkipNextSong();
+          });
+        } else {
           clearLoadingTimeout();
-          set({ error: msg, isLoading: false, isPlaying: false });
-          autoSkipNextSong();
-        });
-      } else {
-        clearLoadingTimeout();
-        set({ isLoading: false });
+          set({ isLoading: false });
+        }
+      } finally {
+        isPreviousSongPending = false;
       }
     });
   },

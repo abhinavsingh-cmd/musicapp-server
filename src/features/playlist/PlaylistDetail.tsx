@@ -128,7 +128,7 @@ const SortablePlaylistSongRow: React.FC<SortablePlaylistSongRowProps> = React.me
           onClick={(e) => { e.stopPropagation(); toggleFavorite(favoriteKey(song)); }}
           className={cn(
             "p-1.5 rounded-lg transition-all",
-            favorites.includes(favoriteKey(song)) ? "text-red-500" : "text-gray-500 opacity-0 group-hover:opacity-100 hover:text-red-400"
+            favorites.includes(favoriteKey(song)) ? "text-red-500" : "text-gray-500 hover:text-red-400"
           )}
         >
           <Heart size={14} fill={favorites.includes(favoriteKey(song)) ? "currentColor" : "none"} />
@@ -138,7 +138,7 @@ const SortablePlaylistSongRow: React.FC<SortablePlaylistSongRowProps> = React.me
           disabled={isDownloadedFn(song.youtubeId || song.id) && !isDownloadingFn(song.youtubeId || song.id)}
           className={cn(
             "p-1.5 rounded-lg transition-all",
-            isDownloadedFn(song.youtubeId || song.id) ? "text-emerald-400" : isDownloadingFn(song.youtubeId || song.id) ? "text-violet-400" : "text-gray-500 opacity-0 group-hover:opacity-100 hover:text-violet-400"
+            isDownloadedFn(song.youtubeId || song.id) ? "text-emerald-400" : isDownloadingFn(song.youtubeId || song.id) ? "text-violet-400" : "text-gray-500 hover:text-violet-400"
           )}
         >
           {isDownloadedFn(song.youtubeId || song.id) ? <Check size={14} /> : isDownloadingFn(song.youtubeId || song.id) ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}

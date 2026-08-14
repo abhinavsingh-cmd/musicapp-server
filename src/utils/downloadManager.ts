@@ -239,7 +239,17 @@ export async function downloadSongWithProgress(
   onProgress?: (p: DownloadProgress) => void,
   signal?: AbortSignal,
 ): Promise<DownloadedSong> {
-  const downloadUrl = song.audioUrl || api(`/download/${song.youtubeId}?title=${encodeURIComponent(song.title)}`);
+  // YouTube songs have a valid 11-char youtubeId → route through server endpoint.
+  // Library songs (no youtubeId) → use audioUrl directly as a permanent file URL.
+  // The audioUrl for YouTube songs is a temporary streaming URL (not downloadable).
+  const isYouTubeId = song.youtubeId && /^[A-Za-z0-9_-]{11}$/.test(song.youtubeId);
+  const downloadUrl = isYouTubeId
+    ? api(`/download/${song.youtubeId}?title=${encodeURIComponent(song.title)}`)
+    : song.audioUrl || '';
+
+  if (!downloadUrl) {
+    throw new Error('No download URL available for this song');
+  }
 
   if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 
@@ -248,9 +258,28 @@ export async function downloadSongWithProgress(
     headers: { 'Accept': 'audio/*' },
   });
 
-  if (!res.ok) throw new Error(`Download failed: ${res.status}`);
+  if (!res.ok) {
+    let detail = '';
+    try { detail = (await res.json())?.message || ''; } catch {}
+    throw new Error(`Download failed: ${res.status}${detail ? ' — ' + detail : ''}`);
+  }
+
+  const contentType = res.headers.get('content-type')?.split(';', 1)[0]?.toLowerCase() || '';
+
+  if (contentType && !contentType.startsWith('audio/') && contentType !== 'application/octet-stream') {
+    if (contentType.startsWith('application/json')) {
+      let msg = '';
+      try { msg = (await res.clone().json())?.message || 'Server returned an error'; } catch { msg = 'Server returned an error'; }
+      throw new Error(msg);
+    }
+    throw new Error(`Unexpected response type: ${contentType}`);
+  }
 
   const contentLength = Number(res.headers.get('content-length')) || 0;
+  if (contentLength === 0 && !res.body) {
+    throw new Error('Server returned an empty response');
+  }
+
   const reader = res.body?.getReader();
   if (!reader) throw new Error('No response body');
 
@@ -275,10 +304,13 @@ export async function downloadSongWithProgress(
     onProgress?.({ loaded: received, total: contentLength || received, percent: contentLength ? Math.round((received / contentLength) * 100) : 0 });
   }
 
-  const contentType = res.headers.get('content-type')?.split(';', 1)[0] || 'audio/mpeg';
-  const blob = new Blob(chunks, { type: contentType });
+  if (received < MIN_AUDIO_SIZE) {
+    throw new Error(`Downloaded file is too small: ${received} bytes (minimum ${MIN_AUDIO_SIZE})`);
+  }
 
-  // Verify the downloaded file
+  const blobType = contentType || 'audio/mpeg';
+  const blob = new Blob(chunks, { type: blobType });
+
   if (!verifyAudioBlob(blob)) {
     throw new Error(`Downloaded file is invalid: ${blob.size} bytes, type: ${blob.type || 'unknown'}`);
   }
@@ -292,7 +324,17 @@ export async function downloadSongWithProgress(
     downloadedAt: Date.now(),
     size: blob.size,
   };
-  await txPut(db, STORE_SONGS, entry);
+  try {
+    await txPut(db, STORE_SONGS, entry);
+  } catch (err: any) {
+    db.close();
+    // IndexedDB throws DOMException with name "QuotaExceededError" when storage
+    // is full.  Surface a clear message instead of a generic failure.
+    if (err?.name === 'QuotaExceededError' || err?.message?.includes('quota')) {
+      throw new Error('Storage full — free up space and try again');
+    }
+    throw new Error(`Failed to save to local storage: ${err?.message || err}`);
+  }
   db.close();
 
   entry.audioUrl = URL.createObjectURL(blob);
@@ -379,6 +421,47 @@ export async function getAllCachedMetadata(): Promise<CachedMeta[]> {
   const results = await txGetAll<CachedMeta>(db, STORE_META);
   db.close();
   return results.sort((a, b) => b.cachedAt - a.cachedAt);
+}
+
+// ---------------------------------------------------------------------------
+// Blob integrity verification
+// ---------------------------------------------------------------------------
+
+/**
+ * Check if a downloaded entry has a valid audio blob that can be played.
+ * Returns true if the blob exists and has a reasonable minimum size.
+ */
+export function isValidBlob(blob: unknown): blob is Blob {
+  return blob instanceof Blob && blob.size >= MIN_AUDIO_SIZE;
+}
+
+// ---------------------------------------------------------------------------
+// Database repair
+// ---------------------------------------------------------------------------
+
+/**
+ * Iterate all downloaded songs and remove entries whose audio blobs are
+ * missing or too small to be valid audio files.  This fixes phantom
+ * "downloaded" status that appears when IndexedDB entries become corrupted
+ * (e.g. after a WebView crash, storage eviction, or failed write).
+ *
+ * Returns the number of entries removed so callers can notify the user.
+ */
+export async function repairDownloads(): Promise<number> {
+  const db = await openDB();
+  const all = await txGetAll<DownloadedSong>(db, STORE_SONGS);
+  let removed = 0;
+  for (const entry of all) {
+    if (!isValidBlob(entry.audioBlob)) {
+      await txDelete(db, STORE_SONGS, entry.id);
+      removed++;
+    }
+  }
+  db.close();
+  if (removed > 0) {
+    console.warn(`[Downloads] Repaired: removed ${removed} corrupted/empty download entries`);
+  }
+  return removed;
 }
 
 // ---------------------------------------------------------------------------

@@ -12,6 +12,8 @@ import {
   clearThumbnailCache,
   pauseDownload,
   resumeDownload,
+  repairDownloads,
+  isValidBlob,
   DownloadedSong,
   DownloadProgress,
 } from '../utils/downloadManager';
@@ -88,10 +90,15 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
     if (state.downloads.length > 0 && !state.loading) return;
     set({ loading: true });
     try {
+      // Remove entries with corrupted/missing blobs before loading
+      await repairDownloads();
       const all = await getAllDownloads();
-      all.sort((a, b) => b.downloadedAt - a.downloadedAt);
+      // Belt-and-suspenders: filter out any entries with invalid blobs
+      // that repairDownloads might have missed
+      const valid = all.filter(d => isValidBlob(d.audioBlob));
+      valid.sort((a, b) => b.downloadedAt - a.downloadedAt);
       const cacheSize = await getCacheSize();
-      set({ downloads: all, loading: false, cacheSize });
+      set({ downloads: valid, loading: false, cacheSize });
     } catch {
       set({ loading: false });
     }
@@ -281,7 +288,13 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
 
   clearFailed: () => set({ failedDownloads: [] }),
 
-  isDownloaded: (youtubeId) => get().downloads.some((d) => d.youtubeId === youtubeId || d.id === youtubeId),
+  isDownloaded: (youtubeId) => {
+    const state = get();
+    const download = state.downloads.find((d) => d.youtubeId === youtubeId || d.id === youtubeId);
+    // Must verify the blob is actually valid — a corrupted/evicted blob means
+    // the song is NOT truly downloaded for offline playback.
+    return !!download && isValidBlob(download.audioBlob);
+  },
   isDownloading: (youtubeId) => get().downloadingIds.has(youtubeId),
   isPaused: (youtubeId) => get().pausedIds.has(youtubeId),
   getProgress: (youtubeId) => get().progressMap[youtubeId] || null,
@@ -289,7 +302,9 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
   getBlobUrl: (youtubeId) => {
     const state = get();
     const download = state.downloads.find((d) => d.youtubeId === youtubeId || d.id === youtubeId);
-    if (!download?.audioBlob) return null;
+    // Verify the blob is valid before creating an ObjectURL — a corrupted or
+    // evicted blob would create a URL that silently fails to play.
+    if (!download || !isValidBlob(download.audioBlob)) return null;
     const cached = state.blobUrlCache[download.id];
     if (cached) return cached;
     const url = URL.createObjectURL(download.audioBlob);

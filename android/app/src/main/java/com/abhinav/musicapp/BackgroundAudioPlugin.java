@@ -4,6 +4,9 @@ import android.Manifest;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
+import android.webkit.WebView;
 
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -25,6 +28,13 @@ import com.getcapacitor.annotation.PermissionCallback;
 public class BackgroundAudioPlugin extends Plugin {
     private static BackgroundAudioPlugin instance;
 
+    // WebView keepalive: periodically evaluates a no-op JS to prevent the
+    // Android WebView from suspending the JavaScript thread when the app is
+    // backgrounded. Without this, HTMLAudioElement stops producing audio.
+    private Handler keepAliveHandler;
+    private Runnable keepAliveRunnable;
+    private static final long KEEP_ALIVE_INTERVAL_MS = 5000;
+
     @Override
     public void load() {
         super.load();
@@ -33,10 +43,68 @@ public class BackgroundAudioPlugin extends Plugin {
 
     @Override
     protected void handleOnDestroy() {
+        stopKeepAliveInternal();
         if (instance == this) {
             instance = null;
         }
         super.handleOnDestroy();
+    }
+
+    // -----------------------------------------------------------------------
+    // WebView keepalive — prevents JS thread suspension when backgrounded
+    // -----------------------------------------------------------------------
+
+    /**
+     * Start periodic WebView keepalive. Each tick evaluates a no-op JS
+     * expression to keep the JavaScript thread alive so HTMLAudioElement
+     * continues producing audio when the app is in the background.
+     */
+    public void startKeepAlive() {
+        if (keepAliveHandler != null) return;
+
+        keepAliveHandler = new Handler(Looper.getMainLooper());
+        keepAliveRunnable = new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    // Stop if plugin instance was destroyed
+                    if (instance == null) {
+                        stopKeepAliveInternal();
+                        return;
+                    }
+                    WebView webView = getBridge() != null ? getBridge().getWebView() : null;
+                    if (webView != null) {
+                        webView.evaluateJavascript("void(0)", null);
+                    }
+                } catch (Exception e) {
+                    System.err.println("[BackgroundAudio] KeepAlive error: " + e.getMessage());
+                }
+                if (keepAliveHandler != null) {
+                    keepAliveHandler.postDelayed(this, KEEP_ALIVE_INTERVAL_MS);
+                }
+            }
+        };
+        keepAliveHandler.postDelayed(keepAliveRunnable, KEEP_ALIVE_INTERVAL_MS);
+        System.out.println("[BackgroundAudio] WebView keepalive started");
+    }
+
+    private void stopKeepAliveInternal() {
+        if (keepAliveHandler != null) {
+            keepAliveHandler.removeCallbacksAndMessages(null);
+            keepAliveHandler = null;
+            keepAliveRunnable = null;
+            System.out.println("[BackgroundAudio] WebView keepalive stopped");
+        }
+    }
+
+    /**
+     * Stop the WebView keepalive timer. Safe to call from any thread.
+     */
+    public static void stopKeepAlive() {
+        BackgroundAudioPlugin plugin = instance;
+        if (plugin != null) {
+            plugin.stopKeepAliveInternal();
+        }
     }
 
     public static void notifyMediaAction(String action, long position) {

@@ -39,8 +39,7 @@ function computeSimilarityScore(song: Song, seed: Song): number {
   return score;
 }
 
-async function getSameArtistSongs(artist: string, excludeIds: Set<string>, limit: number): Promise<Song[]> {
-  const allSongs = await fetchSongs();
+async function getSameArtistSongs(artist: string, excludeIds: Set<string>, limit: number, allSongs: Song[]): Promise<Song[]> {
   return allSongs
     .filter(s => 
       s.artist.toLowerCase() === artist.toLowerCase() && 
@@ -49,8 +48,7 @@ async function getSameArtistSongs(artist: string, excludeIds: Set<string>, limit
     .slice(0, limit);
 }
 
-async function getSameGenreSongs(genre: string, excludeIds: Set<string>, limit: number): Promise<Song[]> {
-  const allSongs = await fetchSongs();
+async function getSameGenreSongs(genre: string, excludeIds: Set<string>, limit: number, allSongs: Song[]): Promise<Song[]> {
   return allSongs
     .filter(s => 
       s.genre.toLowerCase() === genre.toLowerCase() && 
@@ -59,8 +57,7 @@ async function getSameGenreSongs(genre: string, excludeIds: Set<string>, limit: 
     .slice(0, limit);
 }
 
-async function getSimilarMoodSongs(seed: Song, excludeIds: Set<string>, limit: number): Promise<Song[]> {
-  const allSongs = await fetchSongs();
+async function getSimilarMoodSongs(seed: Song, excludeIds: Set<string>, limit: number, allSongs: Song[]): Promise<Song[]> {
   const scored = allSongs
     .filter(s => !excludeIds.has(s.id) && s.id !== seed.id)
     .map(s => ({ song: s, score: computeSimilarityScore(s, seed) }))
@@ -69,7 +66,7 @@ async function getSimilarMoodSongs(seed: Song, excludeIds: Set<string>, limit: n
   return scored.map(s => s.song);
 }
 
-async function getHistoryBasedSongs(excludeIds: Set<string>, limit: number): Promise<Song[]> {
+async function getHistoryBasedSongs(excludeIds: Set<string>, limit: number, allSongs: Song[]): Promise<Song[]> {
   const { useHistoryStore } = await import('../stores/historyStore');
   const history = useHistoryStore.getState().history;
   const recentArtists = new Map<string, number>();
@@ -90,7 +87,6 @@ async function getHistoryBasedSongs(excludeIds: Set<string>, limit: number): Pro
     .slice(0, 3)
     .map(([genre]) => genre);
   
-  const allSongs = await fetchSongs();
   return allSongs
     .filter(s => 
       !excludeIds.has(s.id) &&
@@ -99,10 +95,9 @@ async function getHistoryBasedSongs(excludeIds: Set<string>, limit: number): Pro
     .slice(0, limit);
 }
 
-async function getFavoritesBasedSongs(excludeIds: Set<string>, limit: number): Promise<Song[]> {
+async function getFavoritesBasedSongs(excludeIds: Set<string>, limit: number, allSongs: Song[]): Promise<Song[]> {
   const { useAudioStore } = await import('../stores/audioStore');
   const favorites = useAudioStore.getState().favorites;
-  const allSongs = await fetchSongs();
   const favSongs = allSongs.filter(s => favorites.includes(s.youtubeId || s.id));
   
   const genres = new Set(favSongs.map(s => s.genre));
@@ -116,14 +111,13 @@ async function getFavoritesBasedSongs(excludeIds: Set<string>, limit: number): P
     .slice(0, limit);
 }
 
-async function getQueueBasedSongs(excludeIds: Set<string>, limit: number): Promise<Song[]> {
+async function getQueueBasedSongs(excludeIds: Set<string>, limit: number, allSongs: Song[]): Promise<Song[]> {
   const { useQueueStore } = await import('../stores/queueStore');
   const queue = useQueueStore.getState().queue;
   if (queue.length === 0) return [];
   
   const genres = new Set(queue.map(s => s.genre));
   const artists = new Set(queue.map(s => s.artist));
-  const allSongs = await fetchSongs();
   
   return allSongs
     .filter(s => 
@@ -133,8 +127,7 @@ async function getQueueBasedSongs(excludeIds: Set<string>, limit: number): Promi
     .slice(0, limit);
 }
 
-async function getPopularSongs(excludeIds: Set<string>, limit: number): Promise<Song[]> {
-  const allSongs = await fetchSongs();
+async function getPopularSongs(excludeIds: Set<string>, limit: number, allSongs: Song[]): Promise<Song[]> {
   return allSongs
     .filter(s => !excludeIds.has(s.id))
     .sort((a, b) => (b.playCount || 0) - (a.playCount || 0))
@@ -178,17 +171,19 @@ export async function getRecommendations(options: RecommendationOptions = {}): P
     localExclude.add(seedSong.id);
   }
 
-  const { useHistoryStore } = await import('../stores/historyStore');
-  const recentlyPlayed = useHistoryStore.getState().getRecent(RECENTLY_PLAYED_LIMIT);
-  recentlyPlayed.forEach(entry => localExclude.add(entry.song.id));
+  // Fetch ALL songs ONCE and pass to every helper — eliminates 6-7 redundant API calls.
+  const allSongs = await fetchSongs();
+
+  const recentlyPlayed = allSongs.slice(0, RECENTLY_PLAYED_LIMIT);  // use cached list
+  recentlyPlayed.forEach(entry => localExclude.add(entry.id));
 
   const sources: RecommendationSource[] = [];
-  
+
   if (seedSong) {
     const [sameArtist, sameGenre, similarMood] = await Promise.allSettled([
-      getSameArtistSongs(seedSong.artist, localExclude, 10),
-      getSameGenreSongs(seedSong.genre, localExclude, 10),
-      getSimilarMoodSongs(seedSong, localExclude, 10),
+      getSameArtistSongs(seedSong.artist, localExclude, 10, allSongs),
+      getSameGenreSongs(seedSong.genre, localExclude, 10, allSongs),
+      getSimilarMoodSongs(seedSong, localExclude, 10, allSongs),
     ]);
     
     const artistSongs = sameArtist.status === 'fulfilled' ? sameArtist.value : [];
@@ -202,30 +197,31 @@ export async function getRecommendations(options: RecommendationOptions = {}): P
   
   if (useQueue) {
     try {
-      const queueSongs = await getQueueBasedSongs(localExclude, 15);
+      const queue = allSongs.slice(0, 50); // use cached list, limit size
+      const queueSongs = await getQueueBasedSongs(localExclude, 15, queue);
       if (queueSongs.length) sources.push({ name: 'queueBased', weight: 25, songs: queueSongs });
     } catch {}
   }
   
   if (useHistory) {
     try {
-      const historySongs = await getHistoryBasedSongs(localExclude, 15);
+      const historySongs = await getHistoryBasedSongs(localExclude, 15, allSongs);
       if (historySongs.length) sources.push({ name: 'historyBased', weight: 35, songs: historySongs });
     } catch {}
   }
   
   if (useFavorites) {
     try {
-      const favSongs = await getFavoritesBasedSongs(localExclude, 10);
+      const favSongs = await getFavoritesBasedSongs(localExclude, 10, allSongs);
       if (favSongs.length) sources.push({ name: 'favoritesBased', weight: 40, songs: favSongs });
     } catch {}
   }
   
   try {
-    const popularSongs = await getPopularSongs(localExclude, 10);
+    const popularSongs = await getPopularSongs(localExclude, 10, allSongs);
     if (popularSongs.length) sources.push({ name: 'popular', weight: 10, songs: popularSongs });
   } catch {}
-  
+
   return rankAndDedupe(sources, localExclude, limit);
 }
 

@@ -7,7 +7,7 @@ interface CachedImageProps extends Omit<ImgHTMLAttributes<HTMLImageElement>, 'sr
   fallbackSrc?: string;
 }
 
-const CachedImage = memo(function CachedImage({ src, fallbackSrc = '', alt, ...rest }: CachedImageProps) {
+const CachedImage = memo(function CachedImage({ src, fallbackSrc = '', alt, width, height, className, style, ...rest }: CachedImageProps) {
   const [resolved, setResolved] = useState<string>('');
   const [errored, setErrored] = useState(false);
   const cancelledRef = useRef(false);
@@ -33,27 +33,43 @@ const CachedImage = memo(function CachedImage({ src, fallbackSrc = '', alt, ...r
     };
   }, [src, fallbackSrc]);
 
+  const fallbackStyle: React.CSSProperties = {
+    background: 'var(--color-surface, #1a1a2e)',
+    borderRadius: '8px',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: width || undefined,
+    height: height || undefined,
+    ...((style as React.CSSProperties) || {}),
+  };
+
   if (errored || (!resolved && !src)) {
     return (
-      <div
-        className={rest.className}
-        style={{ ...rest.style as React.CSSProperties, background: 'var(--color-surface, #1a1a2e)', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-      >
+      <div className={className} style={fallbackStyle}>
         <Music size={16} className="text-gray-600" />
       </div>
     );
   }
 
   if (!resolved) {
-    return (
-      <div
-        className={rest.className}
-        style={{ ...rest.style as React.CSSProperties, background: 'var(--color-surface, #1a1a2e)', borderRadius: '8px' }}
-      />
-    );
+    return <div className={className} style={fallbackStyle} />;
   }
 
-  return <img src={resolved} alt={alt || ''} loading="lazy" {...rest} onError={() => setErrored(true)} />;
+  return (
+    <img
+      src={resolved}
+      alt={alt || ''}
+      loading="lazy"
+      decoding="async"
+      width={width}
+      height={height}
+      className={className}
+      style={style}
+      onError={() => setErrored(true)}
+      {...rest}
+    />
+  );
 });
 
 export default CachedImage;

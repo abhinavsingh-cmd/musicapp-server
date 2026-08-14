@@ -59,7 +59,7 @@ export const DiscoverPage: React.FC = () => {
     </div>
   );
 
-  return (
+return (
     <div className="p-6 space-y-8">
       <div>
         <h2 className="text-2xl font-bold text-white flex items-center gap-3 mb-6">

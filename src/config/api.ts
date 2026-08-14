@@ -82,7 +82,11 @@ const inFlightRequests = new Map<string, Promise<Response>>();
 // ---------------------------------------------------------------------------
 
 interface CacheEntry {
-  response: Response;
+  /** Raw response body as text — safe to re-parse multiple times. */
+  bodyText: string;
+  status: number;
+  ok: boolean;
+  headers: Headers;
   expiresAt: number;
 }
 
@@ -118,15 +122,22 @@ function getCachedResponse(url: string): Response | null {
     return null;
   }
   metricsCollector.pushCacheEvent(true, url);
-  return entry.response.clone();
+  // Return a fresh Response object with the cached body text
+  return new Response(entry.bodyText, {
+    status: entry.status,
+    statusText: entry.ok ? 'OK' : 'Unknown',
+    headers: entry.headers,
+  });
 }
 
-function setCachedResponse(url: string, response: Response): void {
+async function setCachedResponse(url: string, response: Response): Promise<void> {
+  const text = await response.text();
   const ttl = getCacheTTL(url);
-  // Store a clone so every consumer receives an unread response body.
-  const clone = response.clone();
   responseCache.set(url, {
-    response: clone,
+    bodyText: text,
+    status: response.status,
+    ok: response.ok,
+    headers: response.headers,
     expiresAt: Date.now() + ttl,
   });
 }
@@ -210,7 +221,7 @@ export async function apiFetch(
 
   // Cache successful GET responses
   if (method === 'GET' && response.ok && cacheTTL !== 0) {
-    setCachedResponse(url, response);
+    await setCachedResponse(url, response);
   }
 
   return response;

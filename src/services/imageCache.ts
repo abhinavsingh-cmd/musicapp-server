@@ -6,7 +6,7 @@
 
 const CACHE_NAME = 'music-app-images-v1';
 const MEMORY_CACHE = new Map<string, string>(); // url → blob URL
-const MAX_MEMORY_ENTRIES = 200;
+const MAX_MEMORY_ENTRIES = 100;
 
 let cacheStorage: Cache | null = null;
 

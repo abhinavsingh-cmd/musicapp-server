@@ -23,6 +23,7 @@ interface ChainNodes {
   trebleFilter: BiquadFilterNode;
   midGain: GainNode;
   sideGain: GainNode;
+  sideInvert: GainNode;
   outL: GainNode;
   outR: GainNode;
   merger: ChannelMergerNode;
@@ -37,6 +38,7 @@ export class AudioEffectsService {
   private audioElement: HTMLAudioElement | null = null;
   private filters: BiquadFilterNode[] = [];
   private chain: ChainNodes | null = null;
+  private connected = false;
   private listeners: Array<() => void> = [];
 
   private _enabled = false;
@@ -81,7 +83,7 @@ export class AudioEffectsService {
   get gains(): number[] { return [...this._gains]; }
   get preset(): string { return this._preset; }
   get isReady(): boolean {
-    return this.context !== null && this.sourceNode !== null && this.chain !== null;
+    return this.context !== null && this.sourceNode !== null && this.chain !== null && this.connected;
   }
   get audioContextState(): string {
     return this.context ? this.context.state : 'null';
@@ -96,20 +98,24 @@ export class AudioEffectsService {
   async init(audioElement: HTMLAudioElement): Promise<void> {
     if (!this._supported) return;
     try {
-    // Already attached to this exact element and running — just resume.
+    // Already attached to this exact element and running — just resume and
+    // re-apply gains to make sure filters are at the correct values.
     if (
       this.context &&
-      this.context.state === 'running' &&
       this.sourceNode &&
-      this.audioElement === audioElement
+      this.audioElement === audioElement &&
+      this.connected
     ) {
+      if (this.context.state === 'suspended') {
+        try { await this.context.resume(); } catch {}
+        this.applyAllForce();
+      }
       return;
     }
 
+    // A different element is now the playback source — full rebuild.
     if (this.context && this.audioElement && this.audioElement !== audioElement) {
-      // A different element is now the playback source — rebuild the source.
-      this.disconnectChain();
-      this.chain = null;
+      this.fullDisconnect();
       try { this.sourceNode?.disconnect(); } catch {}
       try {
         this.sourceNode = this.context.createMediaElementSource(audioElement);
@@ -121,11 +127,14 @@ export class AudioEffectsService {
         this.audioElement = null;
         this.filters = [];
         this.chain = null;
+        this.connected = false;
         return;
       }
       this.audioElement = audioElement;
       this.buildChain();
+      this.connected = true;
     } else if (!this.context) {
+      // First time — create everything from scratch.
       this.context = new AudioContext();
       try {
         this.sourceNode = this.context.createMediaElementSource(audioElement);
@@ -137,6 +146,7 @@ export class AudioEffectsService {
       }
       this.audioElement = audioElement;
       this.buildChain();
+      this.connected = true;
     }
 
     if (this.context.state === 'suspended') {
@@ -147,7 +157,8 @@ export class AudioEffectsService {
       }
     }
 
-    this.applyAll();
+    // Force-apply gains after context is confirmed running.
+    this.applyAllForce();
     } catch {
       // Equalizer init failed — continue without it
     }
@@ -157,8 +168,41 @@ export class AudioEffectsService {
     try {
       if (this.context && this.context.state === 'suspended' && this.sourceNode) {
         await this.context.resume();
+        // Re-apply gains immediately after resume so filters are at correct values.
+        this.applyAllForce();
       }
     } catch {}
+  }
+
+  /**
+   * Force-apply all gain values to the filter chain using `setValueAtTime`
+   * instead of `setTargetAtTime`. This ensures the values are set immediately
+   * regardless of AudioContext timing state (suspended, running, etc.).
+   */
+  private applyAllForce(): void {
+    if (!this.context || !this.chain) return;
+    const t = this.context.currentTime;
+
+    for (let i = 0; i < this.filters.length && i < this._gains.length; i++) {
+      const target = this._enabled ? this._gains[i] : 0;
+      this.filters[i].gain.setValueAtTime(target, t);
+    }
+    this.chain.bassFilter.gain.setValueAtTime(this._enabled ? this._bassBoost : 0, t);
+    this.chain.trebleFilter.gain.setValueAtTime(this._enabled ? this._treble : 0, t);
+
+    const width = this._enabled ? this._stereoWidth + (this._virtualizer ? 0.25 : 0) : 0;
+    const side = 0.5 * Math.max(0, Math.min(1, width));
+    this.chain.sideGain.gain.setValueAtTime(side, t);
+    this.chain.midGain.gain.setValueAtTime(1 - side, t);
+
+    const limiterOn = this._enabled && this._limiter;
+    this.chain.compressor.ratio.setValueAtTime(limiterOn ? 20 : 1, t);
+    this.chain.compressor.threshold.setValueAtTime(limiterOn ? -6 : 0, t);
+
+    this.chain.loudnessGain.gain.setValueAtTime(
+      this._enabled && this._loudnessMode ? 1.12 : 1,
+      t,
+    );
   }
 
   private buildChain(): void {
@@ -246,6 +290,7 @@ export class AudioEffectsService {
       trebleFilter,
       midGain,
       sideGain,
+      sideInvert,
       outL,
       outR,
       merger,
@@ -255,69 +300,48 @@ export class AudioEffectsService {
     };
   }
 
-  private applyAll(): void {
-    if (!this.context || !this.chain) return;
-    const t = this.context.currentTime;
-
-    for (let i = 0; i < this.filters.length && i < this._gains.length; i++) {
-      const target = this._enabled ? this._gains[i] : 0;
-      this.filters[i].gain.setTargetAtTime(target, t, 0.02);
-    }
-    this.chain.bassFilter.gain.setTargetAtTime(this._enabled ? this._bassBoost : 0, t, 0.02);
-    this.chain.trebleFilter.gain.setTargetAtTime(this._enabled ? this._treble : 0, t, 0.02);
-
-    const width = this._enabled ? this._stereoWidth + (this._virtualizer ? 0.25 : 0) : 0;
-    const side = 0.5 * Math.max(0, Math.min(1, width));
-    this.chain.sideGain.gain.setTargetAtTime(side, t, 0.02);
-    this.chain.midGain.gain.setTargetAtTime(1 - side, t, 0.02);
-
-    const limiterOn = this._enabled && this._limiter;
-    this.chain.compressor.ratio.setTargetAtTime(limiterOn ? 20 : 1, t, 0.02);
-    this.chain.compressor.threshold.setTargetAtTime(limiterOn ? -6 : 0, t, 0.02);
-
-    this.chain.loudnessGain.gain.setTargetAtTime(
-      this._enabled && this._loudnessMode ? 1.12 : 1,
-      t,
-      0.02,
-    );
-  }
-
   setBand(index: number, gainValue: number): void {
     if (index < 0 || index >= this._gains.length) return;
     const clamped = Math.max(-30, Math.min(30, gainValue));
     this._gains[index] = clamped;
     this._preset = 'Custom';
     if (this.context && this.filters[index]) {
-      this.filters[index].gain.setTargetAtTime(
-        this._enabled ? clamped : 0,
-        this.context.currentTime,
-        0.02,
-      );
+      const t = this.context.currentTime;
+      if (this._enabled) {
+        this.filters[index].gain.setTargetAtTime(clamped, t, 0.02);
+      } else {
+        this.filters[index].gain.setValueAtTime(0, t);
+      }
     }
+    this.applyAllForce();
     this.notify();
   }
 
   setBassBoost(value: number): void {
     this._bassBoost = Math.max(-12, Math.min(12, value));
     if (this.context && this.chain) {
-      this.chain.bassFilter.gain.setTargetAtTime(
-        this._enabled ? this._bassBoost : 0,
-        this.context.currentTime,
-        0.02,
-      );
+      const t = this.context.currentTime;
+      if (this._enabled) {
+        this.chain.bassFilter.gain.setTargetAtTime(this._bassBoost, t, 0.02);
+      } else {
+        this.chain.bassFilter.gain.setValueAtTime(0, t);
+      }
     }
+    this.applyAllForce();
     this.notify();
   }
 
   setTreble(value: number): void {
     this._treble = Math.max(-12, Math.min(12, value));
     if (this.context && this.chain) {
-      this.chain.trebleFilter.gain.setTargetAtTime(
-        this._enabled ? this._treble : 0,
-        this.context.currentTime,
-        0.02,
-      );
+      const t = this.context.currentTime;
+      if (this._enabled) {
+        this.chain.trebleFilter.gain.setTargetAtTime(this._treble, t, 0.02);
+      } else {
+        this.chain.trebleFilter.gain.setValueAtTime(0, t);
+      }
     }
+    this.applyAllForce();
     this.notify();
   }
 
@@ -326,8 +350,9 @@ export class AudioEffectsService {
     if (this.context && this.chain) {
       const width = this._enabled ? this._stereoWidth + (this._virtualizer ? 0.25 : 0) : 0;
       const side = 0.5 * Math.max(0, Math.min(1, width));
-      this.chain.sideGain.gain.setTargetAtTime(side, this.context.currentTime, 0.02);
-      this.chain.midGain.gain.setTargetAtTime(1 - side, this.context.currentTime, 0.02);
+      const t = this.context.currentTime;
+      this.chain.sideGain.gain.setTargetAtTime(side, t, 0.02);
+      this.chain.midGain.gain.setTargetAtTime(1 - side, t, 0.02);
     }
     this.notify();
   }
@@ -335,9 +360,10 @@ export class AudioEffectsService {
   setLoudnessMode(enabled: boolean): void {
     this._loudnessMode = enabled;
     if (this.context && this.chain) {
+      const t = this.context.currentTime;
       this.chain.loudnessGain.gain.setTargetAtTime(
         this._enabled && enabled ? 1.12 : 1,
-        this.context.currentTime,
+        t,
         0.02,
       );
     }
@@ -347,14 +373,15 @@ export class AudioEffectsService {
   setLimiter(enabled: boolean): void {
     this._limiter = enabled;
     if (this.context && this.chain) {
+      const t = this.context.currentTime;
       this.chain.compressor.ratio.setTargetAtTime(
         this._enabled && enabled ? 20 : 1,
-        this.context.currentTime,
+        t,
         0.02,
       );
       this.chain.compressor.threshold.setTargetAtTime(
         this._enabled && enabled ? -6 : 0,
-        this.context.currentTime,
+        t,
         0.02,
       );
     }
@@ -366,8 +393,9 @@ export class AudioEffectsService {
     if (this.context && this.chain) {
       const width = this._enabled ? this._stereoWidth + (enabled ? 0.25 : 0) : 0;
       const side = 0.5 * Math.max(0, Math.min(1, width));
-      this.chain.sideGain.gain.setTargetAtTime(side, this.context.currentTime, 0.02);
-      this.chain.midGain.gain.setTargetAtTime(1 - side, this.context.currentTime, 0.02);
+      const t = this.context.currentTime;
+      this.chain.sideGain.gain.setTargetAtTime(side, t, 0.02);
+      this.chain.midGain.gain.setTargetAtTime(1 - side, t, 0.02);
     }
     this.notify();
   }
@@ -377,7 +405,9 @@ export class AudioEffectsService {
     if (!this._enabled) {
       this._preset = 'Flat';
     }
-    this.applyAll();
+    if (this.context && this.connected) {
+      this.applyAllForce();
+    }
     this.notify();
   }
 
@@ -390,8 +420,8 @@ export class AudioEffectsService {
     this._stereoWidth = preset.stereoWidth;
     this._loudnessMode = preset.loudnessMode;
     this._preset = name;
-    if (this._enabled) {
-      this.applyAll();
+    if (this._enabled && this.context && this.connected) {
+      this.applyAllForce();
     }
     this.notify();
   }
@@ -410,8 +440,9 @@ export class AudioEffectsService {
   }
 
   destroy(): void {
-    this.disconnectChain();
+    this.fullDisconnect();
     this.chain = null;
+    this.connected = false;
     if (this.context) {
       try { this.context.close(); } catch {}
       this.context = null;
@@ -423,21 +454,41 @@ export class AudioEffectsService {
     this._preset = 'Flat';
   }
 
-  private disconnectChain(): void {
+  /**
+   * Disconnect ALL nodes in the chain — filters, intermediate chain nodes,
+   * and the final connection to destination. Without this, old chain nodes
+   * stay connected to destination when buildChain() is called again,
+   * creating duplicate signal paths that bypass the EQ.
+   */
+  private fullDisconnect(): void {
     for (const filter of this.filters) {
       try { filter.disconnect(); } catch {}
     }
+    this.filters = [];
     if (this.chain) {
+      try { this.chain.bassFilter.disconnect(); } catch {}
+      try { this.chain.trebleFilter.disconnect(); } catch {}
+      try { this.chain.midGain.disconnect(); } catch {}
+      try { this.chain.sideGain.disconnect(); } catch {}
+      try { this.chain.sideInvert.disconnect(); } catch {}
+      try { this.chain.outL.disconnect(); } catch {}
+      try { this.chain.outR.disconnect(); } catch {}
+      try { this.chain.merger.disconnect(); } catch {}
+      try { this.chain.compressor.disconnect(); } catch {}
+      try { this.chain.loudnessGain.disconnect(); } catch {}
       try { this.chain.masterGain.disconnect(); } catch {}
     }
-    this.filters = [];
+    this.connected = false;
   }
 
   private setupAutoResume(): void {
     if (this.autoResumeHandler) return;
     this.autoResumeHandler = () => {
       if (this.context && this.context.state === 'suspended') {
-        this.context.resume().catch(() => {});
+        this.context.resume().then(() => {
+          // Re-apply all gains immediately after context resumes
+          this.applyAllForce();
+        }).catch(() => {});
       }
       if (this.context && this.context.state === 'running') {
         this.removeAutoResume();
@@ -460,8 +511,8 @@ export class AudioEffectsService {
 
   static readonly PRESETS: AudioEffectPreset[] = [
     { name: 'Flat', bands: [0,0,0,0,0,0,0,0,0,0], bassBoost: 0, treble: 0, stereoWidth: 0.5, loudnessMode: false },
-    { name: 'Bass Boost', bands: [0,0,0,0,0,0,0,0,0,0], bassBoost: 6, treble: 0, stereoWidth: 0.5, loudnessMode: false },
-    { name: 'Treble Boost', bands: [0,0,0,0,0,0,0,0,0,0], bassBoost: 0, treble: 6, stereoWidth: 0.5, loudnessMode: false },
+    { name: 'Bass Boost', bands: [0,0,0,0,0,0,0,0,0,0], bassBoost: 8, treble: 0, stereoWidth: 0.5, loudnessMode: false },
+    { name: 'Treble Boost', bands: [0,0,0,0,0,0,0,0,0,0], bassBoost: 0, treble: 8, stereoWidth: 0.5, loudnessMode: false },
     { name: 'Rock', bands: [5,4,3,2,0,-1,0,2,4,5], bassBoost: 3, treble: 2, stereoWidth: 0.6, loudnessMode: true },
     { name: 'Classical', bands: [3,2,2,1,0,0,1,2,3,4], bassBoost: 2, treble: 2, stereoWidth: 0.4, loudnessMode: false },
     { name: 'Jazz', bands: [3,2,1,0,-1,-2,0,2,3,4], bassBoost: 1, treble: 1, stereoWidth: 0.5, loudnessMode: true },
