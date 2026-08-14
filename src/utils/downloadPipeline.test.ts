@@ -186,6 +186,22 @@ describe('downloadSongWithProgress — full pipeline', () => {
     ).rejects.toThrow('Download failed: 404');
   });
 
+  it('throws on 403 response', async () => {
+    fetchSpy.mockResolvedValue(new Response(null, { status: 403, statusText: 'Forbidden' }));
+
+    await expect(
+      downloadSongWithProgress(MOCK_SONG),
+    ).rejects.toThrow('Download failed: 403');
+  });
+
+  it('throws on 429 response', async () => {
+    fetchSpy.mockResolvedValue(new Response(null, { status: 429, statusText: 'Too Many Requests' }));
+
+    await expect(
+      downloadSongWithProgress(MOCK_SONG),
+    ).rejects.toThrow('Download failed: 429');
+  });
+
   it('throws on server JSON error (500 with application/json body)', async () => {
     fetchSpy.mockResolvedValue(makeJsonErrorResponse());
 
@@ -202,12 +218,75 @@ describe('downloadSongWithProgress — full pipeline', () => {
     ).rejects.toThrow(/too small|empty|invalid/i);
   });
 
+  it('throws on a zero-byte body served with audio/mpeg content type', async () => {
+    fetchSpy.mockResolvedValue(new Response(new Uint8Array(0), {
+      status: 200,
+      headers: { 'Content-Type': 'audio/mpeg', 'Content-Length': '0' },
+    }));
+
+    await expect(
+      downloadSongWithProgress(MOCK_SONG),
+    ).rejects.toThrow(/too small|empty|invalid/i);
+  });
+
   it('throws when downloaded blob is too small (< 10KB)', async () => {
     fetchSpy.mockResolvedValue(makeTooSmallResponse());
 
     await expect(
       downloadSongWithProgress(MOCK_SONG),
     ).rejects.toThrow(/too small|invalid/i);
+  });
+
+  it('rejects HTML bytes mislabeled with an audio/mpeg content type', async () => {
+    const html = new TextEncoder().encode(('<html><body>Stream expired</body></html>'.padEnd(50_000, ' ')));
+    fetchSpy.mockResolvedValue(makeAudioResponse(html, 'audio/mpeg'));
+
+    await expect(
+      downloadSongWithProgress(MOCK_SONG),
+    ).rejects.toThrow(/invalid|audio data/i);
+  });
+
+  it('rejects JSON bytes mislabeled with an audio/mpeg content type', async () => {
+    const json = new TextEncoder().encode(JSON.stringify({ error: 'expired', videoId: 'dQw4w9WgXcQ' }).padEnd(50_000, ' '));
+    fetchSpy.mockResolvedValue(makeAudioResponse(json, 'audio/mpeg'));
+
+    await expect(
+      downloadSongWithProgress(MOCK_SONG),
+    ).rejects.toThrow(/invalid|audio data/i);
+  });
+
+  it('rejects a partial download (declared longer than delivered)', async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(makeAudioBytes(30_000));
+        controller.close();
+      },
+    });
+    fetchSpy.mockResolvedValue(new Response(stream, {
+      status: 200,
+      headers: { 'Content-Type': 'audio/mpeg', 'Content-Length': '50000' },
+    }));
+
+    await expect(
+      downloadSongWithProgress(MOCK_SONG),
+    ).rejects.toThrow(/incomplete|received/i);
+  });
+
+  it('rejects when the connection drops mid-stream', async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(makeAudioBytes(20_000));
+        controller.error(new Error('socket hang up'));
+      },
+    });
+    fetchSpy.mockResolvedValue(new Response(stream, {
+      status: 200,
+      headers: { 'Content-Type': 'audio/mpeg' },
+    }));
+
+    await expect(
+      downloadSongWithProgress(MOCK_SONG),
+    ).rejects.toThrow(/connection lost|network|interrupted/i);
   });
 
   it('successfully downloads a valid audio response (> 10KB)', async () => {

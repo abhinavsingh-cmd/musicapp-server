@@ -215,12 +215,48 @@ export function isDownloadPaused(youtubeId: string): boolean {
 // File verification
 // ---------------------------------------------------------------------------
 
-function verifyAudioBlob(blob: Blob): boolean {
+/**
+ * Sniff the leading bytes of a downloaded payload to confirm it actually
+ * contains audio data, not an error page, JSON body, or other mislabeled
+ * content served with an audio/* content-type.
+ */
+export function sniffAudioBytes(head: Uint8Array): boolean {
+  if (!head || head.length === 0) return false;
+  // ID3v2 tag ('ID3')
+  if (head.length >= 3 && head[0] === 0x49 && head[1] === 0x44 && head[2] === 0x33) return true;
+  // MPEG audio frame sync (MP3) or ADTS (AAC)
+  if (head.length >= 2 && head[0] === 0xff && (head[1] & 0xe0) === 0xe0) return true;
+  // MP4 / M4A / MOV container ('....ftyp')
+  if (head.length >= 12 && head[4] === 0x66 && head[5] === 0x74 && head[6] === 0x79 && head[7] === 0x70) return true;
+  // WebM / Matroska (EBML)
+  if (head.length >= 4 && head[0] === 0x1a && head[1] === 0x45 && head[2] === 0xdf && head[3] === 0xa3) return true;
+  // Ogg ('OggS')
+  if (head.length >= 4 && head[0] === 0x4f && head[1] === 0x67 && head[2] === 0x67 && head[3] === 0x53) return true;
+  // FLAC ('fLaC')
+  if (head.length >= 4 && head[0] === 0x66 && head[1] === 0x4c && head[2] === 0x61 && head[3] === 0x43) return true;
+  // RIFF / WAVE ('RIFF....WAVE')
+  if (head.length >= 12 && head[0] === 0x52 && head[1] === 0x49 && head[2] === 0x46 && head[3] === 0x46 &&
+      head[8] === 0x57 && head[9] === 0x41 && head[10] === 0x56 && head[11] === 0x45) return true;
+  // AIFF ('FORM....AIFF')
+  if (head.length >= 12 && head[0] === 0x46 && head[1] === 0x4f && head[2] === 0x52 && head[3] === 0x4d &&
+      head[8] === 0x41 && head[9] === 0x49 && head[10] === 0x46 && head[11] === 0x46) return true;
+  return false;
+}
+
+async function verifyAudioBlob(blob: Blob): Promise<boolean> {
   if (blob.size < MIN_AUDIO_SIZE) return false;
   const type = blob.type.toLowerCase();
   // Accept common audio types or octet-stream (some servers don't set content-type)
-  if (type.startsWith('audio/') || type === 'application/octet-stream' || type === '') return true;
-  return false;
+  if (!type.startsWith('audio/') && type !== 'application/octet-stream' && type !== '') return false;
+  try {
+    // Require the payload to actually look like audio, regardless of what the
+    // server claimed — expired stream URLs often return HTML/JSON error pages
+    // with a stale audio/* content-type.
+    const head = new Uint8Array(await blob.slice(0, 32).arrayBuffer());
+    return sniffAudioBytes(head);
+  } catch {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -296,7 +332,7 @@ export async function downloadSongWithProgress(
 
   const contentLength = Number(res.headers.get('content-length')) || 0;
   if (contentLength === 0 && !res.body) {
-    throw new Error('Server returned an empty response');
+    throw new Error('Server returned an empty response — the stream link may have expired, try again');
   }
 
   const reader = res.body?.getReader();
@@ -305,26 +341,38 @@ export async function downloadSongWithProgress(
   const chunks: Uint8Array[] = [];
   let received = 0;
 
-  while (true) {
-    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+  try {
+    while (true) {
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 
-    // Check pause state
-    const ctrl = activeControllers.get(track.externalId || track.id);
-    if (ctrl?.paused && ctrl.pausePromise) {
-      await new Promise<void>((resolve) => {
-        ctrl.pausePromise = { resolve };
-      });
+      // Check pause state
+      const ctrl = activeControllers.get(track.externalId || track.id);
+      if (ctrl?.paused && ctrl.pausePromise) {
+        await new Promise<void>((resolve) => {
+          ctrl.pausePromise = { resolve };
+        });
+      }
+
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.length;
+      onProgress?.({ loaded: received, total: contentLength || received, percent: contentLength ? Math.round((received / contentLength) * 100) : 0 });
     }
+  } catch (err: any) {
+    if (err?.name === 'AbortError' || signal?.aborted) throw err;
+    console.error('[Download] Stream interrupted:', err?.message || err);
+    throw new Error(`Connection lost during download${err?.message ? ': ' + err.message : ''}`, { cause: err });
+  }
 
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    received += value.length;
-    onProgress?.({ loaded: received, total: contentLength || received, percent: contentLength ? Math.round((received / contentLength) * 100) : 0 });
+  // Partial transfer: the server declared more bytes than the connection
+  // actually delivered. Never persist a truncated file as a valid download.
+  if (contentLength > 0 && received < contentLength) {
+    throw new Error(`Incomplete download: received ${received} of ${contentLength} bytes`);
   }
 
   if (received < MIN_AUDIO_SIZE) {
-    throw new Error(`Downloaded file is too small: ${received} bytes (minimum ${MIN_AUDIO_SIZE})`);
+    throw new Error(`Downloaded file is too small: ${received} bytes (minimum ${MIN_AUDIO_SIZE}) — the stream link may have expired, try again`);
   }
 
   const blobType = contentType || 'audio/mpeg';
@@ -332,8 +380,8 @@ export async function downloadSongWithProgress(
 
   console.log('[Download] Complete:', { received, blobSize: blob.size, type: blobType });
 
-  if (!verifyAudioBlob(blob)) {
-    throw new Error(`Downloaded file is invalid: ${blob.size} bytes, type: ${blob.type || 'unknown'}`);
+  if (!(await verifyAudioBlob(blob))) {
+    throw new Error(`Downloaded file is invalid: ${blob.size} bytes, type: ${blob.type || 'unknown'} — the response did not contain valid audio data`);
   }
 
   // Persist to IndexedDB

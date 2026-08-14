@@ -68,6 +68,10 @@ export interface DownloadsState {
 // Active abort controllers keyed by youtubeId
 const activeControllers = new Map<string, AbortController>();
 
+// Cancel requests that arrived before the download's controller was
+// registered (the download is still resolving its stream URL).
+const cancelledKeys = new Set<string>();
+
 // Track active download count
 let activeDownloadCount = 0;
 
@@ -106,9 +110,14 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
 
   downloadSong: async (song) => {
     if (!song.youtubeId && !song.audioUrl) return;
-    const state = get();
     const key = song.youtubeId || song.id;
-    if (state.downloadingIds.has(key)) return;
+
+    // Claim the key synchronously so two taps in the same tick cannot start
+    // two downloads for the same song.
+    if (get().downloadingIds.has(key)) return;
+    set((s) => ({
+      downloadingIds: new Set([...s.downloadingIds, key]),
+    }));
 
     let already = false;
     try {
@@ -116,11 +125,19 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
     } catch {
       console.error('[DownloadsStore] isDownloaded check failed, proceeding anyway');
     }
-    if (already) return;
+    if (already) {
+      set((s) => {
+        const newIds = new Set(s.downloadingIds);
+        newIds.delete(key);
+        return { downloadingIds: newIds };
+      });
+      return;
+    }
 
     // If at max parallel downloads, add to queue
-    if (activeDownloadCount >= state.maxParallel) {
-      const inQueue = state.downloadQueue.some(q => (q.song.youtubeId || q.song.id) === key);
+    const current = get();
+    if (activeDownloadCount >= current.maxParallel) {
+      const inQueue = current.downloadQueue.some(q => (q.song.youtubeId || q.song.id) === key);
       if (!inQueue) {
         set((s) => ({
           downloadQueue: [...s.downloadQueue, { song, addedAt: Date.now() }],
@@ -128,12 +145,33 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
         // Show notification
         sendDownloadNotification(`"${song.title}" added to download queue`);
       }
+      // Release the in-flight claim — the queued item will re-claim when the
+      // queue is processed.
+      set((s) => {
+        const newIds = new Set(s.downloadingIds);
+        newIds.delete(key);
+        return { downloadingIds: newIds };
+      });
       return;
     }
 
     activeDownloadCount++;
     const controller = new AbortController();
     activeControllers.set(key, controller);
+
+    // A cancel arrived while the stream URL was being resolved — abort now.
+    if (cancelledKeys.has(key)) {
+      cancelledKeys.delete(key);
+      controller.abort();
+      activeControllers.delete(key);
+      if (activeDownloadCount > 0) activeDownloadCount--;
+      set((s) => {
+        const newIds = new Set(s.downloadingIds);
+        newIds.delete(key);
+        return { downloadingIds: newIds };
+      });
+      return;
+    }
 
     set((s) => ({
       downloadingIds: new Set([...s.downloadingIds, key]),
@@ -177,7 +215,7 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
       );
 
       activeControllers.delete(key);
-      activeDownloadCount--;
+      if (activeDownloadCount > 0) activeDownloadCount--;
 
       if (controller.signal.aborted) return;
 
@@ -202,7 +240,7 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
       processQueue();
     } catch (e) {
       activeControllers.delete(key);
-      activeDownloadCount--;
+      if (activeDownloadCount > 0) activeDownloadCount--;
 
       if (controller.signal.aborted) return;
 
@@ -233,7 +271,14 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
     if (controller) {
       controller.abort();
       activeControllers.delete(youtubeId);
-      activeDownloadCount--;
+      // Note: activeDownloadCount is NOT decremented here — the settling
+      // downloadSong promise always decrements exactly once (success or
+      // catch path). Decrementing here too would double-decrement and
+      // eventually allow more parallel downloads than maxParallel.
+    } else {
+      // The download is still being set up — flag it so downloadSong aborts
+      // as soon as its controller is registered.
+      cancelledKeys.add(youtubeId);
     }
     set((s) => {
       const newIds = new Set(s.downloadingIds);
@@ -345,6 +390,7 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
         ctrl.abort();
       }
       activeControllers.clear();
+      cancelledKeys.clear();
       activeDownloadCount = 0;
 
       await clearAllDownloads();
