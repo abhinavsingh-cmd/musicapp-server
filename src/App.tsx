@@ -8,6 +8,7 @@ import { useAudioStore } from './stores/audioStore';
 import { useDownloadsStore } from './stores/downloadsStore';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { backgroundAudio } from './services/backgroundAudio';
+import { logger } from './utils/logger';
 
 const LoginPage = lazy(() => import('./pages/LoginPage'));
 const NotFoundPage = lazy(() => import('./pages/NotFoundPage'));
@@ -67,12 +68,12 @@ const App: React.FC = () => {
       try {
         useAudioStore.getState().restoreFromPersistence();
       } catch (e) {
-        console.error('Failed to restore playback state:', e);
+        logger.error('Failed to restore playback state:', e);
       }
       try {
         useDownloadsStore.getState().loadDownloads();
       } catch (e) {
-        console.error('Failed to load downloads:', e);
+        logger.error('Failed to load downloads:', e);
       }
     });
   }, []);

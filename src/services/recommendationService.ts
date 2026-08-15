@@ -226,6 +226,9 @@ export async function getRecommendations(options: RecommendationOptions = {}): P
 }
 
 export async function preloadSongs(songs: Song[], count: number = PRELOAD_COUNT): Promise<void> {
+  // On Android the native MediaPlayer owns streaming — metadata-only HTML
+  // audio elements would only compete for bandwidth and never be played.
+  if ((window as any).Capacitor) return;
   const toPreload = songs.slice(0, count);
   await Promise.all(
     toPreload.map(async (song) => {

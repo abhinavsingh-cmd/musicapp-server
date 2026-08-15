@@ -1,5 +1,11 @@
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { downloadSongWithProgress, isValidBlob } from './downloadManager';
+import {
+  downloadSongWithProgress,
+  isValidBlob,
+  isTransientDownloadError,
+  pauseDownload,
+  resumeDownload,
+} from './downloadManager';
 
 // ---------------------------------------------------------------------------
 // Mock audio data (fake MP3: ID3v2 header + frame sync)
@@ -183,23 +189,31 @@ describe('downloadSongWithProgress — full pipeline', () => {
 
     await expect(
       downloadSongWithProgress(MOCK_SONG),
-    ).rejects.toThrow('Download failed: 404');
+    ).rejects.toThrow(/not found.*404|404.*not found/i);
   });
 
-  it('throws on 403 response', async () => {
+  it('throws on 403 response with an expired-link explanation', async () => {
     fetchSpy.mockResolvedValue(new Response(null, { status: 403, statusText: 'Forbidden' }));
 
     await expect(
       downloadSongWithProgress(MOCK_SONG),
-    ).rejects.toThrow('Download failed: 403');
+    ).rejects.toThrow(/access denied.*403|expired/i);
   });
 
-  it('throws on 429 response', async () => {
+  it('throws on 429 response with a rate-limit explanation', async () => {
     fetchSpy.mockResolvedValue(new Response(null, { status: 429, statusText: 'Too Many Requests' }));
 
     await expect(
       downloadSongWithProgress(MOCK_SONG),
-    ).rejects.toThrow('Download failed: 429');
+    ).rejects.toThrow(/rate-limit.*429|429/i);
+  });
+
+  it('throws on HTTP 500 with a server-error explanation', async () => {
+    fetchSpy.mockResolvedValue(new Response(null, { status: 500, statusText: 'Internal Server Error' }));
+
+    await expect(
+      downloadSongWithProgress(MOCK_SONG),
+    ).rejects.toThrow(/server.*error.*500|500/i);
   });
 
   it('throws on server JSON error (500 with application/json body)', async () => {
@@ -207,7 +221,7 @@ describe('downloadSongWithProgress — full pipeline', () => {
 
     await expect(
       downloadSongWithProgress(MOCK_SONG),
-    ).rejects.toThrow('Download failed: 500');
+    ).rejects.toThrow(/500.*Download failed|Download failed.*500/s);
   });
 
   it('throws when response body is null (empty response)', async () => {
@@ -246,6 +260,27 @@ describe('downloadSongWithProgress — full pipeline', () => {
     ).rejects.toThrow(/invalid|audio data/i);
   });
 
+  it('rejects an HTML error page served with text/html content type', async () => {
+    const html = new TextEncoder().encode('<html><body>403 Forbidden — link expired</body></html>');
+    fetchSpy.mockResolvedValue(new Response(html, {
+      status: 200,
+      headers: { 'Content-Type': 'text/html; charset=utf-8' },
+    }));
+
+    await expect(
+      downloadSongWithProgress(MOCK_SONG),
+    ).rejects.toThrow(/HTML error page|expired/i);
+  });
+
+  it('never persists anything when the download fails', async () => {
+    fetchSpy.mockResolvedValue(new Response(null, { status: 500 }));
+
+    await expect(downloadSongWithProgress(MOCK_SONG)).rejects.toThrow();
+
+    const songsStore = stores.get('songs')!;
+    expect(songsStore._data.size).toBe(0);
+  });
+
   it('rejects JSON bytes mislabeled with an audio/mpeg content type', async () => {
     const json = new TextEncoder().encode(JSON.stringify({ error: 'expired', videoId: 'dQw4w9WgXcQ' }).padEnd(50_000, ' '));
     fetchSpy.mockResolvedValue(makeAudioResponse(json, 'audio/mpeg'));
@@ -270,6 +305,27 @@ describe('downloadSongWithProgress — full pipeline', () => {
     await expect(
       downloadSongWithProgress(MOCK_SONG),
     ).rejects.toThrow(/incomplete|received/i);
+  });
+
+  it('rejects an over-delivered stream (more bytes than declared)', async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(makeAudioBytes(30_000));
+        controller.enqueue(makeAudioBytes(30_000));
+        controller.close();
+      },
+    });
+    fetchSpy.mockResolvedValue(new Response(stream, {
+      status: 200,
+      headers: { 'Content-Type': 'audio/mpeg', 'Content-Length': '40000' },
+    }));
+
+    await expect(
+      downloadSongWithProgress(MOCK_SONG),
+    ).rejects.toThrow(/corrupted|declared/i);
+
+    // Nothing may be persisted
+    expect(stores.get('songs')!._data.size).toBe(0);
   });
 
   it('rejects when the connection drops mid-stream', async () => {
@@ -329,7 +385,7 @@ describe('downloadSongWithProgress — full pipeline', () => {
 
     await expect(
       downloadSongWithProgress(MOCK_SONG),
-    ).rejects.toThrow(/Unexpected response type|invalid/i);
+    ).rejects.toThrow(/HTML error page|Unexpected response type|invalid/i);
   });
 
   it('rejects application/json response body as error', async () => {
@@ -400,6 +456,80 @@ describe('downloadSongWithProgress — full pipeline', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Transient vs deterministic failure classification (drives auto-retry)
+// ---------------------------------------------------------------------------
+describe('download failure classification', () => {
+  let fetchSpy: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+  });
+
+  it('marks fetch network failures as transient', async () => {
+    fetchSpy.mockRejectedValue(new TypeError('Failed to fetch'));
+    const err = await downloadSongWithProgress(MOCK_SONG).catch((e) => e);
+    expect(isTransientDownloadError(err)).toBe(true);
+    expect(err.message).toMatch(/network error/i);
+  });
+
+  it('marks truncated transfers as transient', async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(makeAudioBytes(20_000));
+        controller.close();
+      },
+    });
+    fetchSpy.mockResolvedValue(new Response(stream, {
+      status: 200,
+      headers: { 'Content-Type': 'audio/mpeg', 'Content-Length': '50000' },
+    }));
+    const err = await downloadSongWithProgress(MOCK_SONG).catch((e) => e);
+    expect(isTransientDownloadError(err)).toBe(true);
+    expect(err.message).toMatch(/incomplete/i);
+  });
+
+  it('marks mid-stream connection loss as transient', async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(makeAudioBytes(20_000));
+        controller.error(new Error('socket hang up'));
+      },
+    });
+    fetchSpy.mockResolvedValue(new Response(stream, {
+      status: 200,
+      headers: { 'Content-Type': 'audio/mpeg' },
+    }));
+    const err = await downloadSongWithProgress(MOCK_SONG).catch((e) => e);
+    expect(isTransientDownloadError(err)).toBe(true);
+  });
+
+  it('marks 5xx and 429 as transient but not 4xx', async () => {
+    fetchSpy.mockResolvedValue(new Response(null, { status: 502 }));
+    expect(isTransientDownloadError(await downloadSongWithProgress(MOCK_SONG).catch((e) => e))).toBe(true);
+
+    fetchSpy.mockResolvedValue(new Response(null, { status: 429 }));
+    expect(isTransientDownloadError(await downloadSongWithProgress(MOCK_SONG).catch((e) => e))).toBe(true);
+
+    fetchSpy.mockResolvedValue(new Response(null, { status: 404 }));
+    expect(isTransientDownloadError(await downloadSongWithProgress(MOCK_SONG).catch((e) => e))).toBe(false);
+
+    fetchSpy.mockResolvedValue(new Response(null, { status: 403 }));
+    expect(isTransientDownloadError(await downloadSongWithProgress(MOCK_SONG).catch((e) => e))).toBe(false);
+  });
+
+  it('marks completed-but-invalid payloads as NOT transient', async () => {
+    // Transfer completes fully, but the bytes are an HTML error page —
+    // retrying the same URL would return the same garbage.
+    const html = new TextEncoder().encode(('<html>expired</html>'.padEnd(50_000, ' ')));
+    fetchSpy.mockResolvedValue(makeAudioResponse(html, 'audio/mpeg'));
+    const err = await downloadSongWithProgress(MOCK_SONG).catch((e) => e);
+    expect(isTransientDownloadError(err)).toBe(false);
+    expect(err.message).toMatch(/invalid/i);
+  });
+});
+
 describe('download edge cases', () => {
   let fetchSpy: ReturnType<typeof vi.fn>;
 
@@ -437,5 +567,94 @@ describe('download edge cases', () => {
     const result = await downloadSongWithProgress(MOCK_SONG);
     expect(result.size).toBe(1_500_000);
     expect(isValidBlob(result.audioBlob)).toBe(true);
+  });
+
+  it('follows redirects and validates the final response', async () => {
+    const audioBytes = makeAudioBytes(40_000);
+    const finalResponse = makeAudioResponse(audioBytes);
+    // Response.redirected is read-only — simulate a redirected fetch result.
+    Object.defineProperty(finalResponse, 'redirected', { value: true });
+    Object.defineProperty(finalResponse, 'url', { value: 'https://cdn.example.com/final.mp3' });
+    fetchSpy.mockResolvedValue(finalResponse);
+
+    const result = await downloadSongWithProgress(MOCK_SONG);
+    expect(result.size).toBe(40_000);
+    // fetch must have been asked to follow redirects
+    expect(fetchSpy.mock.calls[0][1]?.redirect).toBe('follow');
+  });
+
+  it('rejects an expired redirect target that serves an error page', async () => {
+    const html = new TextEncoder().encode('<html>expired</html>');
+    const finalResponse = new Response(html, {
+      status: 200,
+      headers: { 'Content-Type': 'text/html' },
+    });
+    Object.defineProperty(finalResponse, 'redirected', { value: true });
+    fetchSpy.mockResolvedValue(finalResponse);
+
+    await expect(downloadSongWithProgress(MOCK_SONG)).rejects.toThrow(/HTML error page|expired|Unexpected/i);
+  });
+
+  it('cancels mid-stream without persisting a partial file', async () => {
+    const ctrl = new AbortController();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(makeAudioBytes(10_000));
+        // Deliver the next chunk slowly so the abort lands mid-download.
+        setTimeout(() => {
+          controller.enqueue(makeAudioBytes(10_000));
+          controller.close();
+        }, 50);
+      },
+    });
+    fetchSpy.mockImplementation(() => new Promise<Response>((resolve, reject) => {
+      ctrl.signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+      resolve(new Response(stream, {
+        status: 200,
+        headers: { 'Content-Type': 'audio/mpeg' },
+      }));
+    }));
+
+    const promise = downloadSongWithProgress(MOCK_SONG, undefined, ctrl.signal);
+    setTimeout(() => ctrl.abort(), 10);
+
+    await expect(promise).rejects.toThrow(/abort/i);
+    const songsStore = stores.get('songs')!;
+    expect(songsStore._data.size).toBe(0);
+  });
+
+  it('pause blocks the download until resume completes it', async () => {
+    const audioBytes = makeAudioBytes(30_000);
+    fetchSpy.mockResolvedValue(makeAudioResponse(audioBytes));
+
+    const key = MOCK_SONG.youtubeId;
+    const promise = downloadSongWithProgress(MOCK_SONG);
+
+    // Pause immediately — the read loop must block on the gate.
+    pauseDownload(key);
+    let settled = false;
+    void promise.then(() => { settled = true; });
+
+    await new Promise((r) => setTimeout(r, 30));
+    expect(settled).toBe(false);
+
+    resumeDownload(key);
+    const result = await promise;
+    expect(settled).toBe(true);
+    expect(result.size).toBe(30_000);
+  });
+
+  it('resume called before the loop reaches the pause gate still completes', async () => {
+    const audioBytes = makeAudioBytes(30_000);
+    fetchSpy.mockResolvedValue(makeAudioResponse(audioBytes));
+
+    const key = MOCK_SONG.youtubeId;
+    // Pause + resume before the download loop reads any chunk — this is the
+    // race that used to hang forever when resume resolved a throwaway promise.
+    pauseDownload(key);
+    resumeDownload(key);
+
+    const result = await downloadSongWithProgress(MOCK_SONG);
+    expect(result.size).toBe(30_000);
   });
 });

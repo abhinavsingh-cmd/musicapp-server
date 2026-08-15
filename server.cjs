@@ -1103,7 +1103,7 @@ async function doFetchTrending() {
     if (liveResults.length >= 5) {
       const elapsed = Date.now() - startMs;
       console.log("[Trending] LIVE SUCCESS: Got", liveResults.length, "results in", elapsed, "ms");
-      return { results: liveResults, source: 'youtube_music' };
+      return { results: liveResults, source: 'youtube_music', fromCache: false };
     }
 
     console.log("[Trending] Step 2: Fetching official charts...");
@@ -1123,61 +1123,78 @@ async function doFetchTrending() {
     if (deduped.length >= 5) {
       const elapsed = Date.now() - startMs;
       console.log("[Trending] CHARTS SUCCESS: Got", deduped.length, "results in", elapsed, "ms");
-      return { results: deduped, source: 'charts' };
+      return { results: deduped, source: 'charts', fromCache: false };
     }
 
     console.log("[Trending] Step 3: Checking cache...");
     if (trendingCache && trendingCache.length > 0) {
       console.log("[Trending] CACHE HIT:", trendingCache.length, "songs from", trendingSource);
-      return { results: trendingCache, source: 'cache' };
+      // Preserve the TRUE origin — a cache echo must never be relabeled 'cache'
+      return { results: trendingCache, source: trendingSource, fromCache: true };
     }
 
     console.log("[Trending] Step 4: Using built-in fallback");
-    return { results: getBuiltInFallback(), source: 'builtin' };
+    return { results: getBuiltInFallback(), source: 'builtin', fromCache: true };
   } catch (err) {
     console.error("[Trending] Error:", err.message);
     if (trendingCache && trendingCache.length > 0) {
       console.log("[Trending] ERROR FALLBACK: Using cache:", trendingCache.length, "songs");
-      return { results: trendingCache, source: 'cache' };
+      return { results: trendingCache, source: trendingSource, fromCache: true };
     }
-    return { results: getBuiltInFallback(), source: 'builtin' };
+    return { results: getBuiltInFallback(), source: 'builtin', fromCache: true };
   }
 }
 
 /**
- * Ensure trending cache is populated. If stale/missing, kicks off a background
- * fetch and returns the best available data immediately.
+ * Kick off a single in-flight live fetch. Only GENUINE live results
+ * (youtube_music/charts, non-empty, not echoed from our own cache) are
+ * written into the server cache — fallbacks and cache echoes must never
+ * overwrite valid live data or masquerade as fresh later.
  */
-async function ensureTrending(res) {
+function startPendingFetch() {
+  if (pendingTrendingFetch) return pendingTrendingFetch;
+  lastTrendingAttempt = Date.now();
+  pendingTrendingFetch = doFetchTrending()
+    .then(result => {
+      const isLive = result.source === 'youtube_music' || result.source === 'charts';
+      if (isLive && !result.fromCache && result.results.length > 0) {
+        trendingCache = result.results.slice(0, 40);
+        trendingCacheTime = Date.now();
+        trendingSource = result.source;
+      }
+      return result;
+    })
+    .finally(() => { pendingTrendingFetch = null; });
+  return pendingTrendingFetch;
+}
+
+/**
+ * Stale-while-revalidate:
+ *  - fresh cache  → serve immediately (fresh:true)
+ *  - stale cache  → serve it immediately, honestly flagged fresh:false,
+ *                   while a background refresh runs
+ *  - no cache     → the ONLY case where the request blocks on a live fetch
+ */
+async function ensureTrending() {
   const now = Date.now();
-  const cacheFresh = trendingCache && trendingCache.length > 0 && (now - trendingCacheTime) < CHARTS_CACHE_TTL;
+  const hasCache = trendingCache && trendingCache.length > 0;
+  const cacheFresh = hasCache && (now - trendingCacheTime) < CHARTS_CACHE_TTL;
 
   if (cacheFresh) {
     return { results: trendingCache, source: trendingSource, lastUpdated: trendingCacheTime, fresh: true };
   }
 
-  if (!pendingTrendingFetch) {
-    lastTrendingAttempt = now;
-    pendingTrendingFetch = doFetchTrending()
-      .then(result => {
-        // Only cache live/chart results — NEVER cache builtin fallback
-        if (result.source !== 'builtin') {
-          trendingCache = result.results.slice(0, 40);
-          trendingCacheTime = Date.now();
-          trendingSource = result.source;
-        }
-        return result;
-      })
-      .finally(() => { pendingTrendingFetch = null; });
+  if (hasCache) {
+    startPendingFetch(); // background refresh lands in cache for the next request
+    return { results: trendingCache, source: trendingSource, lastUpdated: trendingCacheTime, fresh: false };
   }
 
   try {
-    const result = await pendingTrendingFetch;
-    return { results: result.results, source: result.source, lastUpdated: trendingCacheTime, fresh: true };
+    const result = await startPendingFetch();
+    const isLive = result.source === 'youtube_music' || result.source === 'charts';
+    const fresh = isLive && !result.fromCache && result.results.length > 0;
+    return { results: result.results, source: result.source, lastUpdated: fresh ? trendingCacheTime : Date.now(), fresh };
   } catch {
-    if (trendingCache && trendingCache.length > 0) {
-      return { results: trendingCache, source: trendingSource, lastUpdated: trendingCacheTime, fresh: false };
-    }
     return { results: getBuiltInFallback(), source: 'builtin', lastUpdated: Date.now(), fresh: false };
   }
 }
@@ -1186,12 +1203,12 @@ async function ensureTrending(res) {
 app.get("/api/youtube/trending", async (req, res) => {
   res.setHeader("Cache-Control", "public, max-age=300, stale-while-revalidate=600");
   try {
-    const data = await ensureTrending(res);
-    return ok(res, { results: data.results, source: data.source, lastUpdated: data.lastUpdated }, `Trending from ${data.source}`);
+    const data = await ensureTrending();
+    return ok(res, { results: data.results, source: data.source, lastUpdated: data.lastUpdated, fresh: data.fresh }, `Trending from ${data.source}${data.fresh ? '' : ' (stale)'}`);
   } catch (err) {
     console.error("[Trending] Endpoint error:", err.message);
     const fallback = getBuiltInFallback();
-    return ok(res, { results: fallback, source: 'builtin', lastUpdated: Date.now() }, "Trending fallback (error)");
+    return ok(res, { results: fallback, source: 'builtin', lastUpdated: Date.now(), fresh: false }, "Trending fallback (error)");
   }
 });
 
@@ -1201,8 +1218,8 @@ app.get("/api/charts/trending.json", async (req, res) => {
   res.setHeader("Cache-Control", "public, max-age=300, stale-while-revalidate=600");
 
   try {
-    const data = await ensureTrending(res);
-    return ok(res, { results: data.results, source: data.source, lastUpdated: data.lastUpdated }, `Trending from ${data.source}`);
+    const data = await ensureTrending();
+    return ok(res, { results: data.results, source: data.source, lastUpdated: data.lastUpdated, fresh: data.fresh }, `Trending from ${data.source}${data.fresh ? '' : ' (stale)'}`);
   } catch (err) {
     console.error("[Charts] Endpoint error:", err.message);
     // Do NOT write fallback to trendingCache — that poisons it for 30 minutes.
@@ -1211,7 +1228,7 @@ app.get("/api/charts/trending.json", async (req, res) => {
       ? trendingCache
       : getBuiltInFallback();
     const src = trendingCache && trendingCache.length > 0 ? trendingSource : 'builtin';
-    return ok(res, { results: fallback, source: src, lastUpdated: trendingCacheTime || Date.now() }, `Trending fallback (${src})`);
+    return ok(res, { results: fallback, source: src, lastUpdated: trendingCacheTime || Date.now(), fresh: false }, `Trending fallback (${src})`);
   }
 });
 
@@ -1388,7 +1405,10 @@ app.get("/api/download/:videoId", (req, res) => {
 
   console.log("[Download] Starting download for:", videoId, "title:", title);
 
-  const safeName = title.replace(/[^a-zA-Z0-9 ]/g, "").replace(/\s+/g, "_").substring(0, 80);
+  // Non-ASCII titles (e.g. Hindi) would otherwise sanitize to an empty
+  // string and produce a bogus ".mp3" attachment name — fall back to the
+  // video id so the filename is always meaningful.
+  const safeName = title.replace(/[^a-zA-Z0-9 ]/g, "").replace(/\s+/g, "_").substring(0, 80) || videoId;
   const audioUrl = "https://www.youtube.com/watch?v=" + videoId;
 
   let attempt = 1;
@@ -1396,11 +1416,9 @@ app.get("/api/download/:videoId", (req, res) => {
   const MIN_BYTES = 10240;
 
   const attemptDownload = () => {
-    let streamStarted = false;
     let totalBytes = 0;
     let stderrOutput = "";
-    let detectedExt = "mp3";
-    let detectedMime = "audio/mpeg";
+    let finished = false;
     const buffer = [];
 
     const ytArgs = [
@@ -1415,8 +1433,12 @@ app.get("/api/download/:videoId", (req, res) => {
     console.log("[Download] Attempt", attempt + "/" + maxAttempts, "for:", videoId);
     const yt = spawn("yt-dlp", ytArgs, { stdio: ["ignore", "pipe", "pipe"] });
 
+    // No byte may be sent to the client until the entire payload has been
+    // produced and verified. Streaming partial output was the source of the
+    // 0-byte/truncated "audio/mpeg" responses: once headers were committed,
+    // a mid-stream yt-dlp failure could no longer be reported as an error.
     const startupTimeout = setTimeout(() => {
-      if (!streamStarted) {
+      if (!finished) {
         yt.kill("SIGTERM");
         if (!res.headersSent) {
           console.error("[Download] Timed out for:", videoId, "attempt", attempt);
@@ -1430,41 +1452,21 @@ app.get("/api/download/:videoId", (req, res) => {
       }
     }, 60000);
 
-    function startStream() {
-      if (streamStarted) return;
-      streamStarted = true;
-      clearTimeout(startupTimeout);
-
-      if (totalBytes >= 4) {
-        const first = buffer[0];
-        if (first[0] === 0x49 && first[1] === 0x44 && first[2] === 0x33) { detectedMime = "audio/mpeg"; detectedExt = "mp3"; }
-        else if (first[0] === 0xFF && (first[1] === 0xFB || first[1] === 0xF3 || first[1] === 0xF2)) { detectedMime = "audio/mpeg"; detectedExt = "mp3"; }
-        else if (first.length >= 8 && first[4] === 0x66 && first[5] === 0x74 && first[6] === 0x79 && first[7] === 0x70) { detectedMime = "audio/mp4"; detectedExt = "m4a"; }
-        else { detectedMime = "audio/webm"; detectedExt = "webm"; }
-      }
-
-      res.setHeader("Content-Disposition", 'attachment; filename="' + safeName + '.' + detectedExt + '"');
-      res.setHeader("Content-Type", detectedMime);
-      res.setHeader("Accept-Ranges", "bytes");
-      res.setHeader("Cache-Control", "no-cache");
-      console.log("[Download] Streaming for:", videoId, "MIME:", detectedMime, "buffered:", totalBytes, "bytes");
-
-      for (const chunk of buffer) {
-        res.write(chunk);
-      }
-      buffer.length = 0;
-    }
+    // Hard cap so a runaway producer can never exhaust server memory.
+    const MAX_BUFFER_BYTES = 128 * 1024 * 1024;
 
     yt.stdout.on("data", (chunk) => {
       totalBytes += chunk.length;
-      if (!streamStarted) {
-        buffer.push(chunk);
-        if (totalBytes >= MIN_BYTES) {
-          startStream();
+      if (totalBytes > MAX_BUFFER_BYTES) {
+        console.error("[Download] Buffer limit exceeded for:", videoId);
+        finished = true;
+        yt.kill("SIGTERM");
+        if (!res.headersSent) {
+          fail(res, 500, "DOWNLOAD_TOO_LARGE", "Download exceeded the size limit", { videoId, bytes: totalBytes });
         }
-      } else {
-        res.write(chunk);
+        return;
       }
+      buffer.push(chunk);
     });
 
     let killed = false;
@@ -1489,41 +1491,59 @@ app.get("/api/download/:videoId", (req, res) => {
 
     yt.on("close", (code) => {
       clearTimeout(startupTimeout);
-      if (killed) return;
+      if (killed || finished) return;
+      finished = true;
 
-      if (!streamStarted && totalBytes > 0) {
-        startStream();
+      // Anything but a clean exit means the payload is incomplete — never
+      // serve it, even when some bytes were produced.
+      if (code !== 0) {
+        console.error("[Download] yt-dlp exited with code:", code, "for:", videoId, "attempt", attempt, "bytes:", totalBytes);
+        if (attempt < maxAttempts) {
+          attempt++;
+          setTimeout(attemptDownload, 1000);
+        } else {
+          fail(res, 500, "DOWNLOAD_FAILED", "Download failed after retries", { videoId, code, detail: stderrOutput.slice(0, 500), attempts: maxAttempts });
+        }
+        return;
       }
 
-      if (streamStarted) {
-        if (totalBytes < MIN_BYTES) {
-          console.error("[Download] Too few bytes:", totalBytes, "for:", videoId, "code:", code);
-          if (!res.headersSent) {
-            fail(res, 500, "DOWNLOAD_EMPTY", "Download produced no audio data", { videoId, bytes: totalBytes, code, detail: stderrOutput.slice(0, 500), attempts: maxAttempts });
-          } else {
-            res.end();
-          }
-        } else {
-          console.log("[Download] Completed for:", videoId, "bytes:", totalBytes, "MIME:", detectedMime);
-          res.end();
-        }
-      } else {
-        if (code !== 0 && code !== null) {
-          console.error("[Download] yt-dlp exited with code:", code, "for:", videoId, "attempt", attempt);
-        } else if (code === null) {
-          console.error("[Download] yt-dlp killed (signal) for:", videoId, "attempt", attempt);
-        } else {
-          console.error("[Download] No audio data received for:", videoId, "attempt", attempt);
-        }
-        if (!res.headersSent) {
-          if (attempt < maxAttempts) {
-            attempt++;
-            setTimeout(attemptDownload, 1000);
-          } else {
-            fail(res, 500, "DOWNLOAD_FAILED", "Download failed after retries", { videoId, code, detail: stderrOutput.slice(0, 500), attempts: maxAttempts });
-          }
-        }
+      // Empty / too-small payloads are never valid audio.
+      if (totalBytes < MIN_BYTES) {
+        console.error("[Download] Too few bytes:", totalBytes, "for:", videoId);
+        fail(res, 500, "DOWNLOAD_EMPTY", "Download produced no audio data", { videoId, bytes: totalBytes, code, detail: stderrOutput.slice(0, 500), attempts: maxAttempts });
+        return;
       }
+
+      // Detect the real container from magic bytes — never trust a default.
+      const first = buffer[0];
+      let detectedMime = null;
+      let detectedExt = null;
+      if (first.length >= 3 && first[0] === 0x49 && first[1] === 0x44 && first[2] === 0x33) { detectedMime = "audio/mpeg"; detectedExt = "mp3"; }
+      else if (first.length >= 2 && first[0] === 0xFF && (first[1] & 0xE0) === 0xE0) { detectedMime = "audio/mpeg"; detectedExt = "mp3"; }
+      else if (first.length >= 8 && first[4] === 0x66 && first[5] === 0x74 && first[6] === 0x79 && first[7] === 0x70) { detectedMime = "audio/mp4"; detectedExt = "m4a"; }
+      else if (first.length >= 4 && first[0] === 0x1A && first[1] === 0x45 && first[2] === 0xDF && first[3] === 0xA3) { detectedMime = "audio/webm"; detectedExt = "webm"; }
+      else if (first.length >= 4 && first[0] === 0x4F && first[1] === 0x67 && first[2] === 0x67 && first[3] === 0x53) { detectedMime = "audio/ogg"; detectedExt = "ogg"; }
+
+      if (!detectedMime) {
+        // Not audio — likely an error page or unsupported output. Never serve
+        // this as audio/mpeg.
+        console.error("[Download] Payload is not audio (bad magic bytes) for:", videoId);
+        fail(res, 500, "DOWNLOAD_NOT_AUDIO", "Download did not produce a supported audio file", { videoId, bytes: totalBytes, attempts: maxAttempts });
+        return;
+      }
+
+      // Fully buffered + verified: commit the response with an exact
+      // Content-Length so clients can detect any truncation on their side.
+      res.setHeader("Content-Disposition", 'attachment; filename="' + safeName + '.' + detectedExt + '"');
+      res.setHeader("Content-Type", detectedMime);
+      res.setHeader("Content-Length", String(totalBytes));
+      res.setHeader("Cache-Control", "no-cache, no-store");
+      console.log("[Download] Completed for:", videoId, "bytes:", totalBytes, "MIME:", detectedMime);
+      for (const chunk of buffer) {
+        res.write(chunk);
+      }
+      buffer.length = 0;
+      res.end();
     });
 
     req.on("close", () => {
@@ -1647,10 +1667,20 @@ app.get("/api/proxy-audio", (req, res) => {
   const pipeToClient = async (url, options = {}) => {
     const { refreshed = false, includeRange = true } = options;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30000);
+
+    // IDLE timeout, not total-time: a download legitimately takes minutes on
+    // slow connections. A hard 30s cap used to abort the upstream fetch
+    // mid-transfer and res.end() made the client see a clean-but-truncated
+    // stream — the root cause of partial/0-byte downloads over the proxy.
+    const IDLE_TIMEOUT_MS = 30000;
+    let idleTimer = setTimeout(() => controller.abort(), IDLE_TIMEOUT_MS);
+    const resetIdle = () => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => controller.abort(), IDLE_TIMEOUT_MS);
+    };
 
     const cleanup = () => {
-      clearTimeout(timeout);
+      clearTimeout(idleTimer);
       controller.abort();
     };
     req.once("close", cleanup);
@@ -1705,23 +1735,35 @@ app.get("/api/proxy-audio", (req, res) => {
       if (upstream.status === 206) res.status(206);
 
       const reader = upstream.body.getReader();
+      let bytesWritten = 0;
       try {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
           if (res.destroyed) break;
+          bytesWritten += value.length;
+          resetIdle();
           if (!res.write(value)) {
             await new Promise(resolve => res.once("drain", resolve));
           }
         }
       } catch (e) {
-        // Client disconnected mid-stream
+        // Upstream died or idle-timed-out mid-stream
+        console.error("[ProxyAudio] Stream interrupted:", e.message);
       } finally {
-        clearTimeout(timeout);
-        res.end();
+        clearTimeout(idleTimer);
+        // Never end cleanly on a truncated transfer: when Content-Length was
+        // declared but fewer bytes arrived, destroy the socket so the client
+        // sees a network error instead of saving a partial file as complete.
+        if (contentLength && bytesWritten !== Number(contentLength)) {
+          console.error(`[ProxyAudio] Truncated stream (${bytesWritten}/${contentLength} bytes) — destroying response`);
+          res.destroy();
+        } else {
+          res.end();
+        }
       }
     } catch (err) {
-      clearTimeout(timeout);
+      clearTimeout(idleTimer);
       console.error("[ProxyAudio] Fetch failed:", err.message);
       if (!res.headersSent) {
         fail(res, 502, "PROXY_FAILED", "Failed to fetch audio from upstream");

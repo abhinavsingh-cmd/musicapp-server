@@ -2,6 +2,23 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { isValidBlob, repairDownloads } from './downloadManager';
 
 // ---------------------------------------------------------------------------
+// Fixtures — repairDownloads now does full verification (size + mime + magic
+// bytes), so "valid" blobs must start with real audio magic bytes (ID3v2).
+// ---------------------------------------------------------------------------
+function validAudioBlob(size = 50_000): Blob {
+  const bytes = new Uint8Array(size);
+  bytes[0] = 0x49; // 'I'
+  bytes[1] = 0x44; // 'D'
+  bytes[2] = 0x33; // '3'
+  return new Blob([bytes], { type: 'audio/mpeg' });
+}
+
+// Zero-filled blob: right size, right mime, but no audio magic bytes.
+function garbageBlob(size = 50_000): Blob {
+  return new Blob([new ArrayBuffer(size)], { type: 'audio/mpeg' });
+}
+
+// ---------------------------------------------------------------------------
 // Mock IndexedDB
 // ---------------------------------------------------------------------------
 
@@ -187,7 +204,7 @@ describe('repairDownloads', () => {
       genre: 'Pop',
       duration: 200,
       coverArt: '',
-      audioBlob: new Blob([new ArrayBuffer(50_000)], { type: 'audio/mpeg' }),
+      audioBlob: validAudioBlob(),
       audioUrl: '',
       downloadedAt: Date.now(),
       size: 50_000,
@@ -246,7 +263,7 @@ describe('repairDownloads', () => {
       genre: 'Pop',
       duration: 200,
       coverArt: '',
-      audioBlob: new Blob([new ArrayBuffer(50_000)], { type: 'audio/mpeg' }),
+      audioBlob: validAudioBlob(),
       audioUrl: '',
       downloadedAt: Date.now(),
       size: 50_000,
@@ -264,11 +281,10 @@ describe('repairDownloads', () => {
 
   it('handles mixed valid and invalid entries', async () => {
     const songsStore = stores.get('songs')!;
-    const validBlob = new Blob([new ArrayBuffer(50_000)], { type: 'audio/mpeg' });
 
     songsStore._data.set('good-1', {
       id: 'good-1', youtubeId: 'a1', title: 'G1', artist: 'A', genre: '',
-      duration: 100, coverArt: '', audioBlob: validBlob, audioUrl: '',
+      duration: 100, coverArt: '', audioBlob: validAudioBlob(), audioUrl: '',
       downloadedAt: 1, size: 50_000,
     });
     songsStore._data.set('bad-1', {
@@ -278,7 +294,7 @@ describe('repairDownloads', () => {
     });
     songsStore._data.set('good-2', {
       id: 'good-2', youtubeId: 'a2', title: 'G2', artist: 'A', genre: '',
-      duration: 100, coverArt: '', audioBlob: validBlob, audioUrl: '',
+      duration: 100, coverArt: '', audioBlob: validAudioBlob(), audioUrl: '',
       downloadedAt: 3, size: 50_000,
     });
     songsStore._data.set('bad-2', {
@@ -293,5 +309,31 @@ describe('repairDownloads', () => {
     const remaining = Array.from(songsStore._data.values());
     expect(remaining).toHaveLength(2);
     expect(remaining.map((r: any) => r.id).sort()).toEqual(['good-1', 'good-2']);
+  });
+
+  it('removes a 0-byte "audio/mpeg" phantom entry (legacy bug regression)', async () => {
+    const songsStore = stores.get('songs')!;
+    songsStore._data.set('phantom', {
+      id: 'phantom', youtubeId: 'ph1', title: 'Phantom', artist: 'A', genre: '',
+      duration: 100, coverArt: '', audioBlob: new Blob([], { type: 'audio/mpeg' }),
+      audioUrl: '', downloadedAt: 1, size: 0,
+    });
+
+    const removed = await repairDownloads();
+    expect(removed).toBe(1);
+    expect(songsStore._data.size).toBe(0);
+  });
+
+  it('removes large garbage blobs that lack audio magic bytes', async () => {
+    const songsStore = stores.get('songs')!;
+    songsStore._data.set('garbage', {
+      id: 'garbage', youtubeId: 'g1', title: 'Garbage', artist: 'A', genre: '',
+      duration: 100, coverArt: '', audioBlob: garbageBlob(), audioUrl: '',
+      downloadedAt: 1, size: 50_000,
+    });
+
+    const removed = await repairDownloads();
+    expect(removed).toBe(1);
+    expect(songsStore._data.size).toBe(0);
   });
 });

@@ -46,6 +46,10 @@ class YouTubePlayerService {
   // Retry config (audioService handles outer retries, these are internal)
   private retryCount = 0;
   private maxRetries = 3;
+  // Pending internal-retry timer. Tracked so stop()/load()/destroy() can
+  // cancel it — a stale retry must never restart a video for a session that
+  // has already moved on.
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Stream cache — tracks confirmed working youtubeIds for fast replay
   private streamCache = new Set<string>();
@@ -130,15 +134,6 @@ class YouTubePlayerService {
         this.readyResolver?.(true);
       }
     }, 100);
-
-    setTimeout(() => {
-      clearInterval(check);
-      if (!this.isReady) {
-        logWarn('YouTube IFrame API initialization timed out');
-        this.loadTimedOut = true;
-        this.readyResolver?.(false);
-      }
-    }, 10000);
   }
 
   // ── Container ────────────────────────────────────────────
@@ -302,10 +297,18 @@ class YouTubePlayerService {
     if ((errorCode === 2 || errorCode === 5) && this.retryCount < this.maxRetries && this.currentLoadSong) {
       this.retryCount++;
       log(`Retryable error ${errorCode}, retrying... attempt ${this.retryCount}/${this.maxRetries}`);
-      setTimeout(() => {
-        if (this.currentLoadSong && this.player && this.player.loadVideoById) {
+      // Capture the identity of the session that FAILED — the timer must only
+      // ever retry THIS video. Reading currentLoadSong at fire time could
+      // restart a NEWER track from 0 (stale promise/timer race).
+      const retrySongId = this.currentSongId;
+      const retryYtId = this.currentLoadSong.youtubeId;
+      this.cancelRetryTimer();
+      this.retryTimer = setTimeout(() => {
+        this.retryTimer = null;
+        if (this.currentSongId !== retrySongId || retrySongId === null) return; // superseded
+        if (this.player && this.player.loadVideoById) {
           try {
-            this.player.loadVideoById(this.currentLoadSong.youtubeId);
+            this.player.loadVideoById(retryYtId);
           } catch (err) {
             logError('Retry loadVideoById failed:', err);
             this.emit('error', message);
@@ -318,6 +321,13 @@ class YouTubePlayerService {
     this.emit('error', message);
   }
 
+  private cancelRetryTimer(): void {
+    if (this.retryTimer !== null) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
+  }
+
   // ── Load / Play / Pause ──────────────────────────────────
 
   async load(song: Song): Promise<void> {
@@ -326,6 +336,8 @@ class YouTubePlayerService {
 
     if (!song.youtubeId) throw new Error('No YouTube ID');
 
+    // A new load supersedes any pending internal retry of the previous video.
+    this.cancelRetryTimer();
     this.currentSongId = song.id;
     this.currentLoadSong = song;
     this.retryCount = 0;
@@ -401,6 +413,7 @@ class YouTubePlayerService {
   }
 
   stop(): void {
+    this.cancelRetryTimer();
     if (this.player && this.player.stopVideo) {
       try { this.player.stopVideo(); } catch (e) { logError('stopVideo() FAILED:', e); }
     }

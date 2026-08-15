@@ -30,6 +30,7 @@
  */
 
 import { api, apiFetch } from '../config/api';
+import { logger } from '../utils/logger';
 import {
   PlayableSource,
   ProviderCapabilities,
@@ -97,6 +98,40 @@ function upgradeArtwork(value: unknown): string {
   return value.replace(/-\d{2,4}x\d{2,4}\./, '-500x500.');
 }
 
+// ---------------------------------------------------------------------------
+// HTML-entity decoding. JioSaavn's api.php returns titles/album names
+// HTML-escaped (e.g. `Main &quot;Title&quot; Song`, `Rockstar &#039;20&#039;`).
+// The normalized Track must carry display-ready text, never raw entities.
+// ---------------------------------------------------------------------------
+
+const NAMED_ENTITIES: Record<string, string> = {
+  amp: '&',
+  quot: '"',
+  apos: "'",
+  lt: '<',
+  gt: '>',
+  nbsp: ' ',
+};
+
+function decodeEntities(value: string): string {
+  return value.replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z]+);/g, (match, body: string) => {
+    if (body.startsWith('#x') || body.startsWith('#X')) {
+      const code = parseInt(body.slice(2), 16);
+      return Number.isFinite(code) && code > 0 ? String.fromCodePoint(code) : match;
+    }
+    if (body.startsWith('#')) {
+      const code = parseInt(body.slice(1), 10);
+      return Number.isFinite(code) && code > 0 ? String.fromCodePoint(code) : match;
+    }
+    return NAMED_ENTITIES[body.toLowerCase()] ?? match;
+  });
+}
+
+/** Decode a text field; missing/non-string values degrade to ''. */
+function toText(value: unknown): string {
+  return typeof value === 'string' ? decodeEntities(value) : '';
+}
+
 /**
  * Search subtitles look like "Pritam, Arijit Singh, Amitabh Bhattacharya -
  * Brahmastra". The first segment is the artists; afterwards an album may
@@ -162,6 +197,9 @@ function trackFromSearchResult(r: RawSearchResult | undefined | null): Track | n
     ? (r.more_info as Record<string, unknown>)
     : {};
 
+  const title = toText(r.title);
+  if (!title.trim()) return null;
+
   const metadata: Record<string, unknown> = {};
   if (typeof r.language === 'string' && r.language) metadata.language = r.language;
   if (typeof more.music === 'string' && more.music) metadata.music = more.music;
@@ -172,9 +210,9 @@ function trackFromSearchResult(r: RawSearchResult | undefined | null): Track | n
   return {
     id: 'jsn-' + r.id,
     provider: 'jiosaavn',
-    title: r.title,
-    artist: sub.artist || 'Unknown',
-    album: typeof more.album === 'string' && more.album ? more.album : sub.album,
+    title,
+    artist: decodeEntities(sub.artist) || 'Unknown',
+    album: toText(more.album) || decodeEntities(sub.album),
     genre: 'Unknown',
     duration: toSeconds(r.duration),
     artwork: upgradeArtwork(r.image),
@@ -211,10 +249,12 @@ function enrichFromDetails(track: Track, d: RawSongDetails | null | undefined): 
   }
 
   const seconds = toSeconds(d.duration);
+  const detailTitle = toText(d.song);
+  const detailAlbum = toText(d.album);
   return {
     ...track,
-    title: (typeof d.song === 'string' && d.song) ? d.song : track.title,
-    album: (typeof d.album === 'string' && d.album) ? d.album : track.album,
+    title: detailTitle || track.title,
+    album: detailAlbum || track.album,
     duration: seconds > 0 ? seconds : track.duration,
     artwork: upgradeArtwork(d.image) || track.artwork,
     releaseYear: toYear(d.year) ?? track.releaseYear,
@@ -278,7 +318,7 @@ class JioSaavnProvider implements TrackProvider {
       return options?.limit ? tracks.slice(0, options.limit) : tracks;
     } catch (err) {
       if (options?.signal?.aborted) return [];
-      console.warn('[JioSaavn] search failed:', err instanceof Error ? err.message : String(err));
+      logger.warn('[JioSaavn] search failed:', err instanceof Error ? err.message : String(err));
       return [];
     }
   }
@@ -297,7 +337,7 @@ class JioSaavnProvider implements TrackProvider {
       const entry = (body as Record<string, unknown>)[track.externalId];
       return enrichFromDetails(track, entry as RawSongDetails | undefined);
     } catch (err) {
-      console.warn('[JioSaavn] getTrack failed for', track.id, err instanceof Error ? err.message : String(err));
+      logger.warn('[JioSaavn] getTrack failed for', track.id, err instanceof Error ? err.message : String(err));
       return track;
     }
   }
@@ -336,7 +376,7 @@ class JioSaavnProvider implements TrackProvider {
       }
       return null;
     } catch (err) {
-      console.warn('[JioSaavn] resolveStream failed for', track.id, err instanceof Error ? err.message : String(err));
+      logger.warn('[JioSaavn] resolveStream failed for', track.id, err instanceof Error ? err.message : String(err));
       return null;
     }
   }

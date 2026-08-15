@@ -1,4 +1,5 @@
 // Render monitoring utility for tracking component performance
+import { logger } from './logger';
 const RENDER_THRESHOLDS = {
   WARNING: 10,   // >10 renders per second
   ERROR: 20,    // >20 renders per second
@@ -38,17 +39,17 @@ class RenderMonitor {
     // Check for performance issues
     const rendersPerSecond = info.timestamps.length;
     if (rendersPerSecond > RENDER_THRESHOLDS.ERROR) {
-      console.error(
+      logger.error(
         `[RenderMonitor] ${componentName}: High render rate detected! ${rendersPerSecond} renders/second (threshold: ${RENDER_THRESHOLDS.ERROR})`
       );
     } else if (rendersPerSecond > RENDER_THRESHOLDS.WARNING) {
-      console.warn(
+      logger.warn(
         `[RenderMonitor] ${componentName}: Elevated render rate: ${rendersPerSecond} renders/second (threshold: ${RENDER_THRESHOLDS.WARNING})`
       );
     }
     
     if (renderTime > 33) { // >33ms per render
-      console.warn(
+      logger.warn(
         `[RenderMonitor] ${componentName}: Slow render detected: ${renderTime.toFixed(0)}ms`
       );
     }

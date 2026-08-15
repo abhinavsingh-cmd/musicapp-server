@@ -4,9 +4,12 @@ import { useAudioStore } from '../../stores/audioStore';
 import { useDownloadsStore } from '../../stores/downloadsStore';
 import { Song } from '../../types/music';
 import { cn } from '../../utils/cn';
-import { Heart, Play, Pause, Clock, Download, Check, X, AlertTriangle } from 'lucide-react';
+import { Heart, Play, Pause, Clock, Download, AlertTriangle } from 'lucide-react';
 import CachedImage from '../../components/CachedImage';
+import { DownloadButton } from '../../components/DownloadButton';
 import { useSongContextMenu } from '../../components/SongContextMenu';
+import { downloadKey, sourceKey } from '../../services/musicSource';
+import { favoriteKey } from '../../utils/songIds';
 import { useShallow } from 'zustand/react/shallow';
 
 interface SongTableProps {
@@ -27,10 +30,9 @@ Equalizer.displayName = 'Equalizer';
 
 const fmt = (s: number) => Math.floor(s / 60) + ':' + Math.floor(s % 60).toString().padStart(2, '0');
 
-const SongRow = memo(({ song, index, isActive, isCurrentlyPlaying, isLoading, onClick, onFavToggle, isFav, isDownloaded, isDownloading, onDownload, onCancelDownload, onContextMenu, onTouchStart }: {
+const SongRow = memo(({ song, index, isActive, isCurrentlyPlaying, isLoading, onClick, onFavToggle, isFav, onContextMenu, onTouchStart }: {
   song: Song; index: number; isActive: boolean; isCurrentlyPlaying: boolean; isLoading: boolean;
   onClick: () => void; onFavToggle: () => void; isFav: boolean;
-  isDownloaded: boolean; isDownloading: boolean; onDownload: () => void; onCancelDownload: () => void;
   onContextMenu: (e: React.MouseEvent) => void; onTouchStart: (e: React.TouchEvent) => void;
 }) => {
   return (
@@ -61,14 +63,7 @@ const SongRow = memo(({ song, index, isActive, isCurrentlyPlaying, isLoading, on
       <div className="hidden md:block w-40 flex items-center text-sm text-gray-500 truncate flex-shrink-0">{song.album}</div>
       <div className="hidden sm:flex items-center w-20 text-sm text-gray-500 flex-shrink-0"><Clock size={12} className="mr-1" />{fmt(song.duration)}</div>
       <div className="flex items-center justify-end gap-1 flex-shrink-0">
-        <button
-          onClick={(e) => { e.stopPropagation(); if (isDownloading) onCancelDownload(); else if (!isDownloaded) onDownload(); }}
-          disabled={isDownloaded && !isDownloading}
-          className={cn("p-1.5 rounded-lg transition-all", isDownloaded ? "text-emerald-400" : isDownloading ? "text-violet-400" : "text-gray-500 hover:text-violet-400 hover:bg-white/5")}
-          title={isDownloaded ? "Downloaded" : isDownloading ? "Cancel download" : "Download"}
-        >
-          {isDownloaded ? <Check size={14} /> : isDownloading ? <X size={14} /> : <Download size={14} />}
-        </button>
+        <DownloadButton song={song} />
         <button className={cn("transition-all duration-200 p-1.5 rounded-lg", isFav ? "text-red-500" : "text-gray-500 opacity-0 group-hover:opacity-100 hover:text-red-400 hover:bg-white/5")} onClick={(e) => { e.stopPropagation(); onFavToggle(); }}>
           <Heart size={14} fill={isFav ? "currentColor" : "none"} />
         </button>
@@ -81,9 +76,7 @@ const SongRow = memo(({ song, index, isActive, isCurrentlyPlaying, isLoading, on
     && prev.isActive === next.isActive
     && prev.isCurrentlyPlaying === next.isCurrentlyPlaying
     && prev.isLoading === next.isLoading
-    && prev.isFav === next.isFav
-    && prev.isDownloaded === next.isDownloaded
-    && prev.isDownloading === next.isDownloading;
+    && prev.isFav === next.isFav;
 });
 SongRow.displayName = 'SongRow';
 
@@ -109,12 +102,7 @@ export const SongTable: React.FC<SongTableProps> = memo(({ songs, className }) =
     toggleFavorite: s.toggleFavorite,
     favorites: s.favorites,
   })));
-  const { downloads, downloadingIds, downloadSong, cancelDownload } = useDownloadsStore(useShallow((s) => ({
-    downloads: s.downloads,
-    downloadingIds: s.downloadingIds,
-    downloadSong: s.downloadSong,
-    cancelDownload: s.cancelDownload,
-  })));
+  const downloads = useDownloadsStore((s) => s.downloads);
   const containerRef = useRef<HTMLDivElement>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [retryState, setRetryState] = useState<RetryState>({
@@ -135,21 +123,11 @@ export const SongTable: React.FC<SongTableProps> = memo(({ songs, className }) =
   const downloadsMap = useMemo(() => {
     const m = new Map<string, string>();
     for (const d of downloads) {
-      if (d.youtubeId) m.set(d.youtubeId, d.audioUrl);
+      // Canonical key derivation — downloaded LIBRARY songs (no youtubeId)
+      // are indexed exactly like YouTube songs, so both play locally.
+      m.set(downloadKey(d), d.audioUrl);
     }
     return m;
-  }, [downloads]);
-
-  const downloadingSet = useMemo(() => {
-    const ids = new Set<string>();
-    for (const id of downloadingIds) ids.add(id);
-    return ids;
-  }, [downloadingIds]);
-
-  const downloadedSet = useMemo(() => {
-    const ids = new Set<string>();
-    for (const d of downloads) ids.add(d.youtubeId);
-    return ids;
   }, [downloads]);
 
   useEffect(() => {
@@ -215,7 +193,7 @@ const shouldShowRetry = useMemo(() => {
     if (isLoadingRef.current) return;
     if (currentSongId === song.id) { togglePlayPause(); }
     else {
-      const dl = downloadsMap.get(song.youtubeId ?? '');
+      const dl = downloadsMap.get(sourceKey(song));
       const songToPlay = dl ? { ...song, audioUrl: dl } : song;
       isLoadingRef.current = true;
       loadSong(songToPlay, songs, index);
@@ -286,9 +264,7 @@ const shouldShowRetry = useMemo(() => {
           const isActive = currentSongId === song.id;
           return (
             <SongRow key={song.id} song={song} index={i} isActive={isActive} isCurrentlyPlaying={isActive && isPlaying} isLoading={isActive && isLoading}
-              onClick={() => handleRowClick(song, i)} onFavToggle={() => toggleFavorite(song.youtubeId || song.id)} isFav={favSet.has(song.youtubeId || song.id)}
-              isDownloaded={song.youtubeId ? downloadedSet.has(song.youtubeId) : false} isDownloading={song.youtubeId ? downloadingSet.has(song.youtubeId) : false}
-              onDownload={() => downloadSong(song)} onCancelDownload={() => song.youtubeId && cancelDownload(song.youtubeId)}
+              onClick={() => handleRowClick(song, i)} onFavToggle={() => toggleFavorite(favoriteKey(song))} isFav={favSet.has(favoriteKey(song))}
               onContextMenu={(e) => handleContextMenu(e, song)} onTouchStart={(e) => handleLongPress(e, song)} />
           );
         })}

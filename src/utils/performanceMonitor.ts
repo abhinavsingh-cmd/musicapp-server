@@ -1,4 +1,5 @@
 // Performance monitoring and profiling utilities
+import { logger } from './logger';
 interface PerformanceMeasure {
   name: string;
   duration: number;
@@ -21,7 +22,7 @@ class PerformanceMonitor {
     
     const duration = end - start;
     if (duration > 16.67) { // > 16.67ms = < 60 FPS
-      console.warn(`[Performance] Slow operation: ${name} took ${duration.toFixed(0)}ms`);
+      logger.warn(`[Performance] Slow operation: ${name} took ${duration.toFixed(0)}ms`);
     }
     
     this.addMeasure({ name, duration, timestamp: start, fps: this.fps });
@@ -31,7 +32,7 @@ class PerformanceMonitor {
   // Track component renders
   trackRender(componentName: string, renderTime: number): void {
     if (renderTime > 10) { // > 10ms
-      console.warn(`[Performance] Slow render: ${componentName} took ${renderTime.toFixed(0)}ms`);
+      logger.warn(`[Performance] Slow render: ${componentName} took ${renderTime.toFixed(0)}ms`);
     }
     this.addMeasure({ name: `${componentName}_render`, duration: renderTime, timestamp: performance.now(), fps: this.fps });
   }
@@ -48,7 +49,7 @@ class PerformanceMonitor {
       this.lastFrameTime = now;
 
       if (this.fps < 50) {
-        console.warn(`[Performance] Low FPS detected: ${this.fps}`);
+        logger.warn(`[Performance] Low FPS detected: ${this.fps}`);
       }
     }
   }
@@ -60,7 +61,7 @@ class PerformanceMonitor {
       const mb = Math.round(memory.usedJSHeapSize / (1024 * 1024));
       
       if (mb > 200) {
-        console.warn(`[Performance] High memory usage: ${mb}MB`);
+        logger.warn(`[Performance] High memory usage: ${mb}MB`);
       }
     }
   }
@@ -106,7 +107,7 @@ export async function measureAsync<T>(name: string, fn: () => Promise<T>): Promi
     performanceMonitor.trackRender(name, end - start);
     return result;
   } catch (error) {
-    console.error(`[Performance] Error in ${name}:`, error);
+    logger.error(`[Performance] Error in ${name}:`, error);
     throw error;
   }
 }

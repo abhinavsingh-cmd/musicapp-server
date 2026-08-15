@@ -2,12 +2,13 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Song } from '../types/music';
 import { useAudioStore } from '../stores/audioStore';
 import { useQueueStore } from '../stores/queueStore';
-import { useDownloadsStore } from '../stores/downloadsStore';
+import { useSongDownloadState } from './DownloadButton';
 import { usePlaylistStore } from '../stores/playlistStore';
 import { favoriteKey } from '../utils/songIds';
+import { buildShareUrl } from '../services/musicSource';
 import {
   X, Heart, Download, Share2, ListPlus, SkipForward,
-  Clock, User, Disc3, Check
+  Clock, User, Disc3, Check, RotateCw
 } from 'lucide-react';
 
 interface SongContextMenuProps {
@@ -26,10 +27,8 @@ export default function SongContextMenu({ song, position, onClose, onArtistClick
   const favorites = useAudioStore((s) => s.favorites);
   const addNext = useQueueStore((s) => s.addNext);
   const addToQueue = useQueueStore((s) => s.addToQueue);
-  const downloadSong = useDownloadsStore((s) => s.downloadSong);
-  const cancelDownload = useDownloadsStore((s) => s.cancelDownload);
-  const isDownloaded = useDownloadsStore((s) => s.isDownloaded);
-  const isDownloading = useDownloadsStore((s) => s.isDownloading);
+  // Shared download state machine — same system the row buttons use.
+  const download = useSongDownloadState(song);
   const playlists = usePlaylistStore((s) => s.playlists);
   const addSongToPlaylist = usePlaylistStore((s) => s.addSong);
 
@@ -59,8 +58,9 @@ export default function SongContextMenu({ song, position, onClose, onArtistClick
   if (!song || !position) return null;
 
   const isFav = favorites.includes(favoriteKey(song));
-  const downloaded = isDownloaded(song.youtubeId || song.id);
-  const downloading = isDownloading(song.youtubeId || song.id);
+  const downloaded = download.state === 'downloaded';
+  const downloading = download.state === 'downloading';
+  const failed = download.state === 'failed';
 
   const menuItems = [
     {
@@ -70,14 +70,11 @@ export default function SongContextMenu({ song, position, onClose, onArtistClick
       className: isFav ? 'text-red-400' : '',
     },
     {
-      icon: downloading ? <X size={16} /> : downloaded ? <Check size={16} className="text-emerald-400" /> : <Download size={16} />,
-      label: downloaded ? 'Downloaded' : downloading ? 'Cancel Download' : 'Download',
-      onClick: () => handleAction(() => {
-        if (downloading) cancelDownload(song.youtubeId || song.id);
-        else if (!downloaded) downloadSong(song);
-      }),
-      className: downloaded ? 'text-emerald-400' : downloading ? 'text-violet-400' : '',
-      disabled: downloaded && !downloading,
+      icon: downloading ? <X size={16} /> : downloaded ? <Check size={16} className="text-emerald-400" /> : failed ? <RotateCw size={16} className="text-red-400" /> : <Download size={16} />,
+      label: downloaded ? 'Downloaded' : downloading ? 'Cancel Download' : failed ? 'Retry Download' : 'Download',
+      onClick: () => handleAction(() => download.toggle()),
+      className: downloaded ? 'text-emerald-400' : downloading ? 'text-violet-400' : failed ? 'text-red-400' : '',
+      disabled: downloaded,
     },
     {
       icon: <SkipForward size={16} />,
@@ -101,7 +98,7 @@ export default function SongContextMenu({ song, position, onClose, onArtistClick
         const shareData = {
           title: song.title,
           text: `${song.title} by ${song.artist}`,
-          url: song.youtubeId ? `https://youtube.com/watch?v=${song.youtubeId}` : window.location.href,
+          url: buildShareUrl(song),
         };
         if (navigator.share) {
           navigator.share(shareData).catch(() => {});

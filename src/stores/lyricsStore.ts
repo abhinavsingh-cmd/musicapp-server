@@ -2,9 +2,17 @@ import { create } from 'zustand';
 import { lyricsService, LyricLine } from '../services/lyricsService';
 import { findActiveLine } from '../utils/lrcParser';
 
-const LYRICS_TIMEOUT_MS = 10_000;
+// Outer safety net only — the service bounds its own source chain well
+// inside this budget, so a healthy fetch never reaches this limit.
+const LYRICS_TIMEOUT_MS = 12_000;
 
 export type { LyricLine } from '../utils/lrcParser';
+
+// Monotonic request sequence. Every fetchLyrics/clearLyrics bumps it, and an
+// in-flight result may only touch state while it still owns the latest seq —
+// this is what makes rapid song switching (including A→B→A) incapable of
+// landing stale lyrics or a stale error on the wrong song.
+let requestSeq = 0;
 
 export interface LyricsStore {
   lyrics: LyricLine[];
@@ -26,8 +34,9 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
 
   fetchLyrics: async (songId: string, title: string, artist: string) => {
     const { songId: current } = get();
-    if (current === songId && get().lyrics.length > 0) return; // already loaded
+    if (current === songId && get().lyrics.length > 0 && !get().loading) return; // already loaded
 
+    const seq = ++requestSeq; // invalidates every in-flight fetch
     set({ loading: true, error: null, lyrics: [], currentLine: -1, songId });
     try {
       const lyrics = await Promise.race([
@@ -36,22 +45,31 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
           setTimeout(() => reject(new Error('Lyrics timeout')), LYRICS_TIMEOUT_MS)
         ),
       ]);
-      if (get().songId !== songId) return set({ loading: false });
-      set({ lyrics, loading: false });
-    } catch {
-      if (get().songId !== songId) return set({ loading: false });
-      set({ error: 'Failed to fetch lyrics', loading: false });
+      // Superseded by a newer fetch/clear — the result is stale and must
+      // never replace the state owned by the newer request.
+      if (seq !== requestSeq) return;
+      set({ lyrics, loading: false, currentLine: -1 });
+    } catch (err) {
+      if (seq !== requestSeq) return; // a stale error must not poison the new song
+      const message = err instanceof Error && err.message === 'Lyrics timeout'
+        ? 'Lyrics request timed out'
+        : 'Failed to fetch lyrics';
+      set({ error: message, loading: false });
     }
   },
 
   updateCurrentLine: (currentTime: number) => {
     const { lyrics } = get();
     if (lyrics.length === 0) return;
+    if (!Number.isFinite(currentTime) || currentTime < 0) return;
     const line = findActiveLine(lyrics, currentTime);
     if (line !== get().currentLine) {
       set({ currentLine: line });
     }
   },
 
-  clearLyrics: () => set({ lyrics: [], currentLine: -1, error: null, songId: null, loading: false }),
+  clearLyrics: () => {
+    requestSeq++; // kill any in-flight fetch too
+    set({ lyrics: [], currentLine: -1, error: null, songId: null, loading: false });
+  },
 }));

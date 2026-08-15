@@ -15,8 +15,12 @@ export {
   resolveDownloadDescriptor,
   resolvePlayableFor,
   playableToEngineParams,
+  registerLocalCopyResolver,
+  resolveLocalCopy,
 } from './resolve';
-export type { EnginePlayParams } from './resolve';
+export type { EnginePlayParams, LocalCopyResolver } from './resolve';
+export { searchProviders } from './search';
+export type { ProviderSearchResult, ProviderSearchOptions } from './search';
 export { youtubeProvider } from './youtubeProvider';
 export { libraryProvider } from './libraryProvider';
 export { jiosaavnProvider } from './jiosaavnProvider';

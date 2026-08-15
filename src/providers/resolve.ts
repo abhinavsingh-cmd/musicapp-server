@@ -15,6 +15,7 @@
 
 import { toTrack } from './adapters';
 import { providerRegistry } from './registry';
+import { logger } from '../utils/logger';
 import {
   DownloadDescriptor,
   PlayableSource,
@@ -29,6 +30,42 @@ const PROXY_URL_TTL_MS = 25 * 60 * 1000; // matches youtubeAudioExtractor cache 
 
 function isLocalUrl(url: string): boolean {
   return url.startsWith('blob:') || url.startsWith('file:') || url.startsWith('data:');
+}
+
+function isOffline(): boolean {
+  try { return typeof navigator !== 'undefined' && navigator.onLine === false; } catch { return false; }
+}
+
+// ---------------------------------------------------------------------------
+// Local copy fallback (offline playback).
+//
+// The download system registers a resolver that maps a track to its stored
+// blob/file URL. Resolution consults it in exactly two situations so ONLINE
+// playback is never altered:
+//   1. The device is offline and the track only carries a remote URL.
+//   2. The provider produced nothing (e.g. stream extraction failed offline).
+// A corrupted/failed local copy is never handed back: recovery from a local
+// failure passes `localFallback: false`.
+// ---------------------------------------------------------------------------
+
+export type LocalCopyResolver = (track: Track) => string | null;
+
+let localCopyResolver: LocalCopyResolver | null = null;
+
+export function registerLocalCopyResolver(fn: LocalCopyResolver | null): void {
+  localCopyResolver = fn;
+}
+
+/** Resolve a playable source from the locally downloaded copy, if any. */
+export function resolveLocalCopy(track: Track): PlayableSource | null {
+  if (!localCopyResolver) return null;
+  try {
+    const url = localCopyResolver(track);
+    if (url && isLocalUrl(url)) return toStreamSource(track, url);
+  } catch (err) {
+    logger.error('[Providers] local copy resolver failed', err);
+  }
+  return null;
 }
 
 /** Heuristic expiry for known transient URL shapes. */
@@ -90,7 +127,7 @@ async function ensureProvider(id: ProviderId): Promise<TrackProvider | undefined
           return providerRegistry.get(id);
         })
         .catch(err => {
-          console.error('[Providers] Failed to load provider', id, err);
+          logger.error('[Providers] Failed to load provider', id, err);
           return undefined;
         })
         .finally(() => {
@@ -107,33 +144,50 @@ async function ensureProvider(id: ProviderId): Promise<TrackProvider | undefined
  *
  * 1. A track that already carries a direct `streamUrl` (library files,
  *    server-hosted songs, downloaded blob URLs) is returned immediately —
- *    the provider is not consulted.
+ *    the provider is not consulted. EXCEPTION: while OFFLINE a remote URL
+ *    cannot load, so a downloaded local copy wins without touching the
+ *    network at all.
  * 2. Otherwise the track's provider resolves the stream (e.g. YouTube
  *    audio extraction, possibly via an embedded-player fallback).
- * 3. Returns null when nothing playable exists.
+ * 3. If the provider has nothing, a locally downloaded copy can still play
+ *    (unless the caller disabled the local fallback).
+ * 4. Returns null when nothing playable exists.
  */
 export async function resolvePlayableSource(
   track: Track,
   options?: ResolveStreamOptions,
 ): Promise<PlayableSource | null> {
   if (track.streamUrl) {
+    if (!isLocalUrl(track.streamUrl) && isOffline()) {
+      const local = resolveLocalCopy(track);
+      if (local) return local;
+    }
     return toStreamSource(track, track.streamUrl);
   }
 
   const provider = await ensureProvider(track.provider);
-  if (!provider) return null;
-
-  try {
-    const resolved = await provider.resolveStream(track, options);
-    if (!resolved) return null;
-    if (resolved.kind === 'stream') {
-      return toStreamSource(resolved.track ?? track, resolved.streamUrl, resolved.expiresInMs, resolved.isPreview);
+  if (provider) {
+    try {
+      const resolved = await provider.resolveStream(track, options);
+      if (resolved) {
+        if (resolved.kind === 'stream') {
+          return toStreamSource(resolved.track ?? track, resolved.streamUrl, resolved.expiresInMs, resolved.isPreview);
+        }
+        return resolved;
+      }
+    } catch (err) {
+      logger.error('[Providers] resolveStream failed for', track.provider, track.id, err);
     }
-    return resolved;
-  } catch (err) {
-    console.error('[Providers] resolveStream failed for', track.provider, track.id, err);
-    return null;
   }
+
+  // The provider produced nothing (offline, expired, no extraction) — a
+  // downloaded copy can still play. Recovery from a corrupted local file
+  // opts out via localFallback:false.
+  if (options?.localFallback !== false) {
+    const local = resolveLocalCopy(track);
+    if (local) return local;
+  }
+  return null;
 }
 
 /**
@@ -150,7 +204,7 @@ export async function resolveDownloadDescriptor(
       const descriptor = await provider.resolveDownload(track);
       if (descriptor) return descriptor;
     } catch (err) {
-      console.error('[Providers] resolveDownload failed for', track.provider, track.id, err);
+      logger.error('[Providers] resolveDownload failed for', track.provider, track.id, err);
     }
   }
 

@@ -5,6 +5,7 @@ import { ToastProvider } from './contexts/ToastContext'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { metricsCollector } from './services/metricsCollector'
 import App from './App.tsx'
+import { logger } from './utils/logger'
 import './index.css'
 
 // --- Startup performance measurement ---
@@ -19,7 +20,7 @@ const perf = {
   },
   log(label: string, name: string, start: string, end: string) {
     const dur = this.measure(name, start, end);
-    if (dur !== undefined) console.log(`[Perf] ${label}: ${dur.toFixed(0)}ms`);
+    if (dur !== undefined) logger.debug(`[Perf] ${label}: ${dur.toFixed(0)}ms`);
     return dur;
   },
 };
@@ -79,10 +80,10 @@ if (import.meta.env.DEV) {
         const entries = performance.getEntriesByType('mark');
         const measures = performance.getEntriesByType('measure');
         console.group('[Perf] Startup Timeline');
-        entries.forEach(e => console.log(`  ${e.name}: ${e.startTime.toFixed(0)}ms`));
+        entries.forEach(e => logger.debug(`  ${e.name}: ${e.startTime.toFixed(0)}ms`));
         console.groupEnd();
         console.group('[Perf] Startup Measures');
-        measures.forEach(m => console.log(`  ${m.name}: ${m.duration.toFixed(0)}ms`));
+        measures.forEach(m => logger.debug(`  ${m.name}: ${m.duration.toFixed(0)}ms`));
         console.groupEnd();
       }, 1000);
     });
@@ -90,11 +91,11 @@ if (import.meta.env.DEV) {
 }
 
 window.addEventListener('unhandledrejection', (e) => {
-  console.error('[Global] Unhandled promise rejection:', e.reason);
+  logger.error('[Global] Unhandled promise rejection:', e.reason);
   e.preventDefault();
 });
 
 window.addEventListener('error', (e) => {
-  console.error('[Global] Uncaught error:', e.error?.message || e.message, e.error?.stack);
+  logger.error('[Global] Uncaught error:', e.error?.message || e.message, e.error?.stack);
   e.preventDefault();
 });

@@ -2,7 +2,7 @@ import React, { useState, useMemo, useCallback, memo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQueueStore } from '../../stores/queueStore';
 import { useAudioStore } from '../../stores/audioStore';
-import { useDownloadsStore } from '../../stores/downloadsStore';
+import { DownloadButton } from '../../components/DownloadButton';
 import { useShallow } from 'zustand/react/shallow';
 import { useSongContextMenu } from '../../components/SongContextMenu';
 import { cn } from '../../utils/cn';
@@ -34,9 +34,6 @@ import {
   Music,
   Play,
   Pause,
-  Download,
-  Check,
-  Loader2,
 } from 'lucide-react';
 
 const formatDuration = (sec: number) => {
@@ -58,12 +55,6 @@ interface SortableSongRowProps {
 const SortableSongRow = memo(({ song, index, isCurrent, isPlaying, section, onContextMenu, onTouchStart }: SortableSongRowProps) => {
   const playAtIndex = useQueueStore((s) => s.playAtIndex);
   const removeFromQueue = useQueueStore((s) => s.removeFromQueue);
-  const { isDownloaded, isDownloading, downloadSong, cancelDownload } = useDownloadsStore(useShallow((s) => ({
-    isDownloaded: s.isDownloaded(song.youtubeId || song.id),
-    isDownloading: s.isDownloading(song.youtubeId || song.id),
-    downloadSong: s.downloadSong,
-    cancelDownload: s.cancelDownload,
-  })));
 
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: song.id + '-' + index });
 
@@ -143,14 +134,7 @@ const SortableSongRow = memo(({ song, index, isCurrent, isPlaying, section, onCo
 
       <span className="text-xs text-gray-600 flex-shrink-0">{formatDuration(song.duration)}</span>
 
-      <button
-        onClick={(e) => { e.stopPropagation(); if (isDownloading) cancelDownload(song.youtubeId || song.id); else if (!isDownloaded) downloadSong(song); }}
-        disabled={isDownloaded && !isDownloading}
-        className={cn("p-2 rounded-lg transition-all", isDownloaded ? "text-emerald-400" : isDownloading ? "text-violet-400" : "text-gray-500 hover:text-violet-400 hover:bg-white/5")}
-        title={isDownloaded ? "Downloaded" : isDownloading ? "Cancel download" : "Download"}
-      >
-        {isDownloaded ? <Check size={14} /> : isDownloading ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
-      </button>
+      <DownloadButton song={song} className="p-2" />
 
       {section !== 'recent' && (
         <button
@@ -377,6 +361,7 @@ export const QueuePanel: React.FC = memo(() => {
                     </p>
                     <p className="text-xs text-gray-500 truncate">{song.artist}</p>
                   </div>
+                  <DownloadButton song={song} className="p-2" />
                 </div>
               ))}
             </div>

@@ -1,6 +1,8 @@
 // 10-band equalizer + audio effects chain, wired to a real AudioContext graph.
 // Effects: Bass boost, Treble, Stereo widening, Virtualizer, Loudness, Limiter.
 
+import { logger } from '../utils/logger';
+
 export interface EnhancedEQBand {
   frequency: number;
   gain: number;
@@ -24,6 +26,7 @@ interface ChainNodes {
   midGain: GainNode;
   sideGain: GainNode;
   sideInvert: GainNode;
+  sideNegate: GainNode;
   outL: GainNode;
   outR: GainNode;
   merger: ChannelMergerNode;
@@ -120,7 +123,7 @@ export class AudioEffectsService {
       try {
         this.sourceNode = this.context.createMediaElementSource(audioElement);
       } catch (err) {
-        console.warn('[AudioEffects] createMediaElementSource failed, resetting AudioContext:', err);
+        logger.warn('[AudioEffects] createMediaElementSource failed, resetting AudioContext:', err);
         try { this.context.close(); } catch {}
         this.context = null;
         this.sourceNode = null;
@@ -139,7 +142,7 @@ export class AudioEffectsService {
       try {
         this.sourceNode = this.context.createMediaElementSource(audioElement);
       } catch (err) {
-        console.warn('[AudioEffects] createMediaElementSource failed:', err);
+        logger.warn('[AudioEffects] createMediaElementSource failed:', err);
         try { this.context.close(); } catch {}
         this.context = null;
         return;
@@ -190,10 +193,11 @@ export class AudioEffectsService {
     this.chain.bassFilter.gain.setValueAtTime(this._enabled ? this._bassBoost : 0, t);
     this.chain.trebleFilter.gain.setValueAtTime(this._enabled ? this._treble : 0, t);
 
-    const width = this._enabled ? this._stereoWidth + (this._virtualizer ? 0.25 : 0) : 0;
-    const side = 0.5 * Math.max(0, Math.min(1, width));
-    this.chain.sideGain.gain.setValueAtTime(side, t);
-    this.chain.midGain.gain.setValueAtTime(1 - side, t);
+    const width = this._enabled
+      ? Math.max(0, Math.min(1, this._stereoWidth + (this._virtualizer ? 0.25 : 0)))
+      : 0.5; // identity — a disabled EQ must be a transparent passthrough
+    this.chain.sideGain.gain.setValueAtTime(width, t);
+    this.chain.midGain.gain.setValueAtTime(0.5, t);
 
     const limiterOn = this._enabled && this._limiter;
     this.chain.compressor.ratio.setValueAtTime(limiterOn ? 20 : 1, t);
@@ -237,16 +241,24 @@ export class AudioEffectsService {
     prev.connect(trebleFilter);
     prev = trebleFilter;
 
-    // Mid/side stereo widening: side = L - R, decoded with a width factor.
+    // Mid/side stereo width: M = (L+R)/2, side path carries (R−L). Decode:
+    //   outL = M − g·(R−L),  outR = M + g·(R−L)
+    // At g = 0.5 the identity L/R is reconstructed EXACTLY, so a disabled or
+    // flat EQ is a transparent passthrough — never a mono collapse. g = 0 is
+    // full mono, g = 1 is widened (side doubled). The side signal feeds outR
+    // directly and outL through a sign inverter; feeding both outputs with
+    // the same sign collapses the image to mono.
     const splitter = this.context.createChannelSplitter(2);
     prev.connect(splitter);
 
     const midGain = this.context.createGain();
     const sideGain = this.context.createGain();
     const sideInvert = this.context.createGain();
+    const sideNegate = this.context.createGain();
     sideInvert.gain.value = -1;
-    midGain.gain.value = 1;
-    sideGain.gain.value = 0;
+    sideNegate.gain.value = -1;
+    midGain.gain.value = 0.5;
+    sideGain.gain.value = 0.5; // identity width
     splitter.connect(midGain, 0);
     splitter.connect(midGain, 1);
     splitter.connect(sideInvert, 0);
@@ -257,7 +269,8 @@ export class AudioEffectsService {
     const outR = this.context.createGain();
     midGain.connect(outL);
     midGain.connect(outR);
-    sideGain.connect(outL);
+    sideGain.connect(sideNegate);
+    sideNegate.connect(outL);
     sideGain.connect(outR);
 
     const merger = this.context.createChannelMerger(2);
@@ -291,6 +304,7 @@ export class AudioEffectsService {
       midGain,
       sideGain,
       sideInvert,
+      sideNegate,
       outL,
       outR,
       merger,
@@ -302,7 +316,9 @@ export class AudioEffectsService {
 
   setBand(index: number, gainValue: number): void {
     if (index < 0 || index >= this._gains.length) return;
-    const clamped = Math.max(-30, Math.min(30, gainValue));
+    // ±12 dB matches the UI sliders and keeps boosts clearly audible without
+    // driving the chain into dangerous clipping territory.
+    const clamped = Math.max(-12, Math.min(12, gainValue));
     this._gains[index] = clamped;
     this._preset = 'Custom';
     if (this.context && this.filters[index]) {
@@ -348,11 +364,12 @@ export class AudioEffectsService {
   setStereoWidth(value: number): void {
     this._stereoWidth = Math.max(0, Math.min(1, value));
     if (this.context && this.chain) {
-      const width = this._enabled ? this._stereoWidth + (this._virtualizer ? 0.25 : 0) : 0;
-      const side = 0.5 * Math.max(0, Math.min(1, width));
+      const width = this._enabled
+        ? Math.max(0, Math.min(1, this._stereoWidth + (this._virtualizer ? 0.25 : 0)))
+        : 0.5; // identity — disabled EQ stays transparent
       const t = this.context.currentTime;
-      this.chain.sideGain.gain.setTargetAtTime(side, t, 0.02);
-      this.chain.midGain.gain.setTargetAtTime(1 - side, t, 0.02);
+      this.chain.sideGain.gain.setTargetAtTime(width, t, 0.02);
+      this.chain.midGain.gain.setValueAtTime(0.5, t);
     }
     this.notify();
   }
@@ -391,20 +408,21 @@ export class AudioEffectsService {
   setVirtualizer(enabled: boolean): void {
     this._virtualizer = enabled;
     if (this.context && this.chain) {
-      const width = this._enabled ? this._stereoWidth + (enabled ? 0.25 : 0) : 0;
-      const side = 0.5 * Math.max(0, Math.min(1, width));
+      const width = this._enabled
+        ? Math.max(0, Math.min(1, this._stereoWidth + (enabled ? 0.25 : 0)))
+        : 0.5;
       const t = this.context.currentTime;
-      this.chain.sideGain.gain.setTargetAtTime(side, t, 0.02);
-      this.chain.midGain.gain.setTargetAtTime(1 - side, t, 0.02);
+      this.chain.sideGain.gain.setTargetAtTime(width, t, 0.02);
+      this.chain.midGain.gain.setValueAtTime(0.5, t);
     }
     this.notify();
   }
 
   toggle(): void {
     this._enabled = !this._enabled;
-    if (!this._enabled) {
-      this._preset = 'Flat';
-    }
+    // Preset and gains SURVIVE a disable/enable round trip — disabling only
+    // forces the chain to unity/transparent values, it never destroys the
+    // user's settings (and the stored preset label must never lie).
     if (this.context && this.connected) {
       this.applyAllForce();
     }
@@ -440,6 +458,10 @@ export class AudioEffectsService {
   }
 
   destroy(): void {
+    // Graph teardown ONLY — the user's EQ settings (enabled, preset, gains,
+    // effects) survive so a later init() re-applies them. audioService calls
+    // this on teardown; wiping the settings here would desync the service
+    // from the persisted store and silently disable the EQ on next playback.
     this.fullDisconnect();
     this.chain = null;
     this.connected = false;
@@ -450,8 +472,6 @@ export class AudioEffectsService {
     this.sourceNode = null;
     this.audioElement = null;
     this.removeAutoResume();
-    this._enabled = false;
-    this._preset = 'Flat';
   }
 
   /**
@@ -471,6 +491,7 @@ export class AudioEffectsService {
       try { this.chain.midGain.disconnect(); } catch {}
       try { this.chain.sideGain.disconnect(); } catch {}
       try { this.chain.sideInvert.disconnect(); } catch {}
+      try { this.chain.sideNegate.disconnect(); } catch {}
       try { this.chain.outL.disconnect(); } catch {}
       try { this.chain.outR.disconnect(); } catch {}
       try { this.chain.merger.disconnect(); } catch {}

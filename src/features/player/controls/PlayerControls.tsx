@@ -1,10 +1,10 @@
 import React, { memo, useRef } from 'react';
 import { useAudioStore } from '../../../stores/audioStore';
 import { useQueueStore } from '../../../stores/queueStore';
-import { useDownloadsStore } from '../../../stores/downloadsStore';
+import { useSongDownloadState } from '../../../components/DownloadButton';
 import { useShallow } from 'zustand/react/shallow';
 import { cn } from '../../../utils/cn';
-import { Play, Pause, SkipBack, SkipForward, Volume2, VolumeX, Volume1, Shuffle, Repeat, Repeat1, Heart, Download, Check, X } from 'lucide-react';
+import { Play, Pause, SkipBack, SkipForward, Volume2, VolumeX, Volume1, Shuffle, Repeat, Repeat1, Heart, Download, Check, Loader2, RotateCw } from 'lucide-react';
 import { favoriteKey } from '../../../utils/songIds';
 
 interface PlayerControlsProps { className?: string; }
@@ -41,12 +41,9 @@ export const PlayerControls: React.FC<PlayerControlsProps> = React.memo(({ class
     toggleShuffle: s.toggleShuffle,
     cycleRepeat: s.cycleRepeat,
   })));
-  const { downloadSong, cancelDownload, isDownloaded, isDownloading } = useDownloadsStore(useShallow((s) => ({
-    downloadSong: s.downloadSong,
-    cancelDownload: s.cancelDownload,
-    isDownloaded: s.isDownloaded,
-    isDownloading: s.isDownloading,
-  })));
+  // Shared download state machine (idle/downloading/downloaded/failed) —
+  // same system every song row uses, styled here for the player bar.
+  const download = useSongDownloadState(currentSong);
   const lastSkipRef = useRef(0);
 
   const handleSkip = (fn: () => void) => {
@@ -58,8 +55,8 @@ export const PlayerControls: React.FC<PlayerControlsProps> = React.memo(({ class
 
   const isFav = currentSong ? favorites.includes(favoriteKey(currentSong)) : false;
   const RepeatIcon = repeatMode === 'one' ? Repeat1 : Repeat;
-  const downloaded = currentSong ? isDownloaded(currentSong.youtubeId || currentSong.id) : false;
-  const downloading = currentSong ? isDownloading(currentSong.youtubeId || currentSong.id) : false;
+  const downloaded = download.state === 'downloaded';
+  const downloading = download.state === 'downloading';
 
   return (
     <div className={cn("flex items-center justify-between px-2", className)}>
@@ -146,24 +143,28 @@ export const PlayerControls: React.FC<PlayerControlsProps> = React.memo(({ class
         </button>
 
         <button
-          onClick={() => {
-            if (!currentSong) return;
-            if (downloading) {
-              cancelDownload(currentSong.youtubeId || currentSong.id);
-            } else if (!downloaded) {
-              downloadSong(currentSong);
-            }
-          }}
+          onClick={download.toggle}
+          data-state={download.state === 'unavailable' ? 'idle' : download.state}
+          aria-label={
+            downloaded ? 'Downloaded'
+            : downloading ? 'Downloading — tap to cancel'
+            : download.state === 'failed' ? `Download failed${download.errorMessage ? `: ${download.errorMessage}` : ''} — tap to retry`
+            : 'Download'
+          }
           className={cn(
             "w-9 h-9 rounded-full flex items-center justify-center transition-all duration-200 active:scale-90",
             downloaded
               ? "bg-gradient-to-br from-emerald-500 to-teal-500 text-white shadow-[0_0_20px_rgba(16,185,129,0.4)]"
-              : "text-gray-500 hover:text-violet-400 hover:bg-white/10"
+              : downloading
+                ? "text-violet-400 bg-violet-500/15"
+                : download.state === 'failed'
+                  ? "text-red-400 bg-red-500/15"
+                  : "text-gray-500 hover:text-violet-400 hover:bg-white/10"
           )}
-          disabled={!currentSong}
-          title={downloaded ? "Downloaded" : downloading ? "Cancel download" : "Download"}
+          disabled={!currentSong || download.state === 'unavailable' || downloaded}
+          title={downloaded ? "Downloaded" : downloading ? "Cancel download" : download.state === 'failed' ? "Retry download" : "Download"}
         >
-          {downloaded ? <Check size={16} /> : downloading ? <X size={16} /> : <Download size={16} />}
+          {downloaded ? <Check size={16} /> : downloading ? <Loader2 size={16} className="animate-spin" /> : download.state === 'failed' ? <RotateCw size={16} /> : <Download size={16} />}
         </button>
 
         <VolumeIcon volume={volume} />

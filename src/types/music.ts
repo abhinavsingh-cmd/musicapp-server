@@ -1,3 +1,5 @@
+import type { ProviderId } from '../providers/types';
+
 export interface Song {
   id: string;
   title: string;
@@ -8,6 +10,13 @@ export interface Song {
   coverArt: string;
   audioUrl: string;
   youtubeId?: string;
+  /**
+   * Owning music-source provider. Optional for backward compatibility with
+   * persisted queues/favorites predating the provider architecture; when
+   * absent it is inferred (youtubeId → 'youtube', otherwise 'library').
+   * New tracks always carry it so provider identity survives persistence.
+   */
+  provider?: ProviderId;
   releaseYear: number;
   isFavorite?: boolean;
   playCount?: number;

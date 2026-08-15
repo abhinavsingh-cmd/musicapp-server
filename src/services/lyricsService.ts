@@ -4,6 +4,13 @@ export type { LyricLine } from '../utils/lrcParser';
 
 const CACHE_KEY = 'lyrics-cache';
 const CACHE_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days
+// "No lyrics found" results are cached too, but with a short TTL so a
+// song without lyrics never re-runs the whole slow source chain per play.
+const NEGATIVE_TTL = 6 * 60 * 60 * 1000; // 6 hours
+// Hard cap: every source chain must finish inside this budget so the store's
+// own timeout is never raced by an unbounded cascade of source timeouts.
+const TOTAL_BUDGET_MS = 9_000;
+const MAX_CACHE_ENTRIES = 150;
 
 interface CacheEntry {
   data: LyricLine[];
@@ -18,7 +25,9 @@ function loadCache(): Map<string, CacheEntry> {
     const now = Date.now();
     const map = new Map<string, CacheEntry>();
     for (const [k, v] of Object.entries(obj)) {
-      if (now - v.ts < CACHE_TTL) {
+      if (!v || !Array.isArray(v.data)) continue;
+      const ttl = v.data.length > 0 ? CACHE_TTL : NEGATIVE_TTL;
+      if (now - v.ts < ttl) {
         map.set(k, v);
       }
     }
@@ -42,28 +51,61 @@ function persistCache(map: Map<string, CacheEntry>): void {
 
 export class LyricsService {
   private memoryCache = loadCache();
+  // Deduplicates concurrent fetches for the same song — a slow API must
+  // never be hammered by rapid song switches or double mounts.
+  private inflight = new Map<string, Promise<LyricLine[]>>();
 
   async fetchLyrics(songTitle: string, artist: string): Promise<LyricLine[]> {
+    if (!songTitle || !artist) return [];
     const cacheKey = `${songTitle}::${artist}`.toLowerCase();
 
-    // Check cache first
+    // Check cache first (includes recent "no lyrics" results).
     const cached = this.memoryCache.get(cacheKey);
-    if (cached) return cached.data;
+    if (cached) {
+      const ttl = cached.data.length > 0 ? CACHE_TTL : NEGATIVE_TTL;
+      if (Date.now() - cached.ts < ttl) return cached.data;
+      this.memoryCache.delete(cacheKey);
+    }
 
-    try {
-      const lyrics =
-        (await this.tryLRCLib(songTitle, artist)) ??
-        (await this.tryLyricsOVH(songTitle, artist)) ??
-        (await this.tryLyricsFallback(songTitle, artist));
+    const pending = this.inflight.get(cacheKey);
+    if (pending) return pending;
 
-      const result = lyrics || [];
-      if (result.length > 0) {
+    const job = this.resolveLyrics(songTitle, artist)
+      .catch(() => [] as LyricLine[])
+      .then((result) => {
+        this.inflight.delete(cacheKey);
         this.memoryCache.set(cacheKey, { data: result, ts: Date.now() });
+        this.evictIfNeeded();
         persistCache(this.memoryCache);
-      }
-      return result;
-    } catch {
-      return [];
+        return result;
+      });
+    this.inflight.set(cacheKey, job);
+    return job;
+  }
+
+  /** Run every source inside ONE bounded total budget. */
+  private async resolveLyrics(songTitle: string, artist: string): Promise<LyricLine[]> {
+    const deadline = Date.now() + TOTAL_BUDGET_MS;
+    const sources = [
+      () => this.tryLRCLib(songTitle, artist),
+      () => this.tryLyricsOVH(songTitle, artist),
+      () => this.tryLyricsFallback(songTitle, artist),
+    ];
+    for (const source of sources) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break; // budget exhausted — give up cleanly
+      const lyrics = await source();
+      if (lyrics && lyrics.length > 0) return lyrics;
+    }
+    return [];
+  }
+
+  /** Keep the persisted cache bounded — evict oldest entries first. */
+  private evictIfNeeded(): void {
+    while (this.memoryCache.size > MAX_CACHE_ENTRIES) {
+      const oldestKey = this.memoryCache.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.memoryCache.delete(oldestKey);
     }
   }
 
@@ -71,7 +113,7 @@ export class LyricsService {
     return s.replace(/\s*\(.*?\)\s*/g, '').replace(/\s*\[.*?\]\s*/g, '').trim();
   }
 
-  private async fetchWithTimeout(url: string, timeoutMs = 8000): Promise<Response> {
+  private async fetchWithTimeout(url: string, timeoutMs = 6000): Promise<Response> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -91,7 +133,10 @@ export class LyricsService {
       );
       if (!res.ok) return null;
       const data = await res.json();
-      if (data.syncedLyrics) return parseLRC(data.syncedLyrics);
+      if (data.syncedLyrics) {
+        const synced = parseLRC(data.syncedLyrics);
+        if (synced.length > 0) return synced;
+      }
       if (data.plainLyrics) return plainToSynced(data.plainLyrics);
       return null;
     } catch {
@@ -106,8 +151,12 @@ export class LyricsService {
       );
       if (!res.ok) return null;
       const data = await res.json();
+      if (!Array.isArray(data)) return null;
       for (const item of data) {
-        if (item.syncedLyrics) return parseLRC(item.syncedLyrics);
+        if (item.syncedLyrics) {
+          const synced = parseLRC(item.syncedLyrics);
+          if (synced.length > 0) return synced;
+        }
       }
       if (data.length > 0 && data[0].plainLyrics) return plainToSynced(data[0].plainLyrics);
       return null;

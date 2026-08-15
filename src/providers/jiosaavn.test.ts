@@ -251,6 +251,48 @@ describe('jiosaavnProvider.search', () => {
     expect(tracks[0].artist).toBe('Arijit Singh');
     expect(tracks[0].album).toBe('Brahmastra');
   });
+
+  it('decodes HTML entities in title, artist, and album', async () => {
+    mockJson({
+      results: [{
+        ...JSN_SEARCH_RESULT,
+        id: 'abc123',
+        title: 'Main &quot;Title&quot; Song &amp; More',
+        subtitle: 'Singer A &amp; Singer B - Rockstar &#039;20&#039;',
+        more_info: { album: 'Album &lt;Deluxe&gt;' },
+      }],
+    });
+    const tracks = await jiosaavnProvider.search('kesariya');
+    expect(tracks[0].title).toBe('Main "Title" Song & More');
+    expect(tracks[0].artist).toBe('Singer A & Singer B');
+    expect(tracks[0].album).toBe("Album <Deluxe>");
+  });
+
+  it('decodes numeric and hex character references', async () => {
+    mockJson({
+      results: [{ ...JSN_SEARCH_RESULT, id: 'abc123', title: 'Song &#8211; Remix &#x26; Edit' }],
+    });
+    const tracks = await jiosaavnProvider.search('kesariya');
+    expect(tracks[0].title).toBe('Song \u2013 Remix & Edit');
+  });
+
+  it('leaves unknown entities untouched instead of corrupting them', async () => {
+    mockJson({
+      results: [{ ...JSN_SEARCH_RESULT, id: 'abc123', title: 'Song &unknownentity; Here' }],
+    });
+    const tracks = await jiosaavnProvider.search('kesariya');
+    expect(tracks[0].title).toBe('Song &unknownentity; Here');
+  });
+
+  it('skips results with an empty id or a whitespace-only title', async () => {
+    mockJson({
+      results: [
+        { ...JSN_SEARCH_RESULT, id: '' },
+        { ...JSN_SEARCH_RESULT, id: 'abc123', title: '   ' },
+      ],
+    });
+    expect(await jiosaavnProvider.search('kesariya')).toEqual([]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -331,6 +373,40 @@ describe('jiosaavnProvider.getTrack', () => {
     expect(await jiosaavnProvider.getTrack(noExternal)).toBe(noExternal);
     expect(mockedApiFetch).not.toHaveBeenCalled();
   });
+
+  it('decodes entities in detail titles and ignores malformed entries', async () => {
+    mockJson({
+      [JSN_ID]: { song: 'Kesariya &quot;Lofi&quot;', album: 'Brahmastra &#038; Beyond' },
+    });
+    const fresher = await jiosaavnProvider.getTrack(JSN_TRACK);
+    expect(fresher.title).toBe('Kesariya "Lofi"');
+    expect(fresher.album).toBe('Brahmastra & Beyond');
+
+    vi.clearAllMocks();
+    // Entry present but not an object — input comes back unchanged.
+    mockJson({ [JSN_ID]: 'corrupted-entry' });
+    expect(await jiosaavnProvider.getTrack(JSN_TRACK)).toBe(JSN_TRACK);
+  });
+
+  it('keeps existing fields when details carry junk values', async () => {
+    mockJson({
+      [JSN_ID]: {
+        song: '',
+        album: null,
+        year: 'unknown',
+        duration: 'NaN',
+        image: 42,
+        play_count: 'not-a-count',
+      },
+    });
+    const fresher = await jiosaavnProvider.getTrack(JSN_TRACK);
+    expect(fresher.title).toBe('Kesariya');
+    expect(fresher.album).toBe('Brahmastra');
+    expect(fresher.releaseYear).toBe(2022);
+    expect(fresher.duration).toBe(268);
+    expect(fresher.artwork).toBe('https://c.saavncdn.com/871/cover-500x500.jpg');
+    expect(fresher.playCount).toBe(0);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -352,7 +428,11 @@ describe('jiosaavnProvider.resolveStream', () => {
       streamUrl: 'https://aac.saavncdn.com/871/song.mp4',
       isLocalFile: false,
     });
-    expect(playable?.isPreview).toBeUndefined();
+    if (playable?.kind === 'stream') {
+      expect(playable.isPreview).toBeUndefined();
+    } else {
+      expect.unreachable('expected a stream source');
+    }
   });
 
   it('falls back to the official preview URL, flagged isPreview, when the full audio is encrypted', async () => {
@@ -378,6 +458,11 @@ describe('jiosaavnProvider.resolveStream', () => {
 
   it('returns null when media_url is present but not an http(s) URL', async () => {
     mockJson({ [JSN_ID]: { media_url: 'ID2ieOjCrwfgWvL5sXl4B1ImC5QfbsDy' } });
+    expect(await jiosaavnProvider.resolveStream(JSN_TRACK)).toBeNull();
+  });
+
+  it('returns null when only a non-http preview URL exists', async () => {
+    mockJson({ [JSN_ID]: { media_preview_url: 'ENCRYPTED-PREVIEW-BLOB' } });
     expect(await jiosaavnProvider.resolveStream(JSN_TRACK)).toBeNull();
   });
 

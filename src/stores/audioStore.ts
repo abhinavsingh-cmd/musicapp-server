@@ -9,6 +9,23 @@ import { backgroundPlaybackService } from '../services/backgroundPlaybackService
 import { backgroundAudio } from '../services/backgroundAudio';
 import { useHistoryStore } from './historyStore';
 import { preloadNextSongs, prewarmOnFirstInteraction } from '../services/preloadService';
+import { registerLocalCopyResolver } from '../providers/resolve';
+import { findVerifiedReplacement } from '../services/smartReplaceService';
+import { resolvePlayableSong, sourceKey, stripStaleBlobUrl } from '../services/musicSource';
+import { showToast } from '../utils/toast';
+import { logger } from '../utils/logger';
+
+// Offline playback bridge: resolution (and the engine's stream-failure
+// recovery) can ask the download system for a track's stored local copy.
+// Imported from providers/resolve directly — no barrel side effects.
+registerLocalCopyResolver((track) => {
+  try {
+    const key = track.externalId || track.id;
+    return key ? useDownloadsStore.getState().getBlobUrl(key) : null;
+  } catch {
+    return null;
+  }
+});
 
 const LOADING_TIMEOUT_MS = 30_000;
 let loadingTimeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -19,7 +36,7 @@ function startLoadingTimeout() {
   loadingTimeoutId = setTimeout(() => {
     const { isLoading } = useAudioStore.getState();
     if (isLoading) {
-      console.warn('[AudioStore] Loading timeout — forcing isLoading=false');
+      logger.warn('[AudioStore] Loading timeout — forcing isLoading=false');
       useAudioStore.setState({ isLoading: false, isPlaying: false, error: 'Loading timed out' });
     }
     loadingTimeoutId = null;
@@ -88,13 +105,11 @@ function saveVolume(vol: number) {
 
 /**
  * Resolve a song's audio URL from downloads if available.
- * If the song is downloaded, injects the blob URL so it plays offline.
- * Returns the song unchanged if no download exists.
+ * Delegates to the unified source abstraction — downloaded songs play from
+ * their local blob, stale blob: URLs are dropped, online songs pass through.
  */
 function resolveDownloadUrl(song: Song): Song {
-  const blobUrl = useDownloadsStore.getState().getBlobUrl(song.youtubeId || song.id);
-  if (blobUrl) return { ...song, audioUrl: blobUrl };
-  return song;
+  return resolvePlayableSong(song);
 }
 
 /**
@@ -108,7 +123,7 @@ function resolveQueueDownloads(queue: Song[]): Song[] {
   const resolvedMap = new Map<string, string>();
   let resolved = false;
   const result = queue.map(song => {
-    const key = song.youtubeId || song.id;
+    const key = sourceKey(song);
     // Check cache first (fast path)
     const cached = resolvedMap.get(key);
     if (cached) {
@@ -121,6 +136,12 @@ function resolveQueueDownloads(queue: Song[]): Song[] {
       resolvedMap.set(key, blobUrl);
       resolved = true;
       return { ...song, audioUrl: blobUrl };
+    }
+    // Stale blob: URL with no backing download — drop it (see resolvePlayableSong).
+    const stripped = stripStaleBlobUrl(song);
+    if (stripped !== song) {
+      resolved = true;
+      return stripped;
     }
     return song;
   });
@@ -143,7 +164,11 @@ function persistPlaybackState() {
   });
 }
 
-let audioServiceUnsub: (() => void) | null = null;
+// Single-registration guard for EVERY global listener (native media actions,
+// interruption/reconnect/background, persist interval, queue subscription).
+// Registration must happen exactly once — duplicate native media-action
+// listeners cause double play/pause and double next/previous transitions.
+let globalListenersRegistered = false;
 let lastMediaUpdate = 0;
 let lastProgressUpdate = 0;
 let lastProgressPersist = 0;
@@ -153,11 +178,34 @@ let consecutivePlayFailures = 0;
 let nextSongRetryTimeout: ReturnType<typeof setTimeout> | null = null;
 let isNextSongPending = false;
 let isPreviousSongPending = false;
+// ── Smart replacement state ──
+// Exactly ONE replacement attempt per failed playback command: the command
+// sequence of the failed play is consumed by the attempt, so a second
+// failure in the same command (e.g. the replacement itself fails) can never
+// retrigger replacement — it falls straight through to the bounded
+// auto-skip. Never retry forever.
+let smartReplaceBusy = false;
+let smartReplaceConsumedSeq = -1;
 let pendingResumePosition: number | null = null;
 let lastHistorySongId: string | null = null;
 let volumePersistTimer: ReturnType<typeof setTimeout> | null = null;
 let advanceChain: Promise<void> = Promise.resolve();
 let serviceRequestedPlay = false;
+// Monotonic command sequence — every authoritative transport transition
+// (song click, next, previous, retry, resume) claims a new number. Async
+// work that outlives its command re-checks the sequence before touching
+// state, so a stale operation can never overwrite a newer command. This is
+// the deterministic replacement for arbitrary setTimeout delays.
+let commandSeq = 0;
+// Playback sessions whose 'ended' event was already consumed — the same
+// ended track can never trigger two next-transitions.
+let lastHandledEndedSession = -1;
+// ── Crossfade trigger state ──
+// The automatic fade claims exactly ONE playback session. A manual next, a
+// failed prepare, or a completed fade all consume the claim — the same end
+// window can never trigger the crossfade twice.
+let crossfadeClaimedSession = -1;
+let isCrossfadePreparing = false;
 
 function scheduleVolumePersist(vol: number) {
   if (volumePersistTimer) clearTimeout(volumePersistTimer);
@@ -181,6 +229,62 @@ function syncMediaSessionEnded() {
   try { backgroundAudio.updatePlaybackState({ isPlaying: false, position: 0, duration: 0 }).catch(() => {}); } catch {}
 }
 
+/**
+ * Reconcile JS state with the native foreground engine after returning to
+ * the foreground (or after any temporary JS disconnect). Engine events that
+ * fired while JS was unreachable are lost on the bridge — this re-reads the
+ * authoritative native state deterministically:
+ *   - native still owns playback → re-sync / adopt (UI follows the engine)
+ *   - a track ENDED while disconnected → continue the queue exactly once
+ */
+async function reconcileNativeState(): Promise<void> {
+  if (typeof window === 'undefined' || !(window as any).Capacitor) return;
+  try {
+    const playbackIdBefore = audioService.getCurrentPlaybackId();
+    const st = await backgroundAudio.getPlaybackState();
+    // A user command COMPLETED while the state was being fetched — it owns
+    // playback now; a stale native snapshot must not overwrite it.
+    if (audioService.getCurrentPlaybackId() !== playbackIdBefore) return;
+    const store = useAudioStore.getState();
+    // A play resolution is in flight — it owns the transition; adopting or
+    // advancing underneath it would invalidate or double-skip it.
+    if (store.isLoading) return;
+    if (st.nativeActive) {
+      const positionSec = Math.max(0, (st.position || 0) / 1000);
+      if (audioService.isNativeEngineActive()) {
+        // Already mirroring — plain position/state sync.
+        audioService.syncExternalPosition(positionSec);
+        useAudioStore.setState({ isPlaying: st.isPlaying, progress: positionSec });
+        return;
+      }
+      // A non-native engine (or nothing) owns JS state while the native
+      // player is live. Only adopt if JS is idle — never stomp on an active
+      // HTML session.
+      if (store.isPlaying) return;
+      const current = store.currentSong;
+      if (!current) return;
+      const durationSec = st.duration > 0 ? st.duration / 1000 : (current.duration || 0);
+      audioService.adoptNativePlayback(current, { positionSec, durationSec, isPlaying: st.isPlaying, generation: st.generation });
+      useAudioStore.setState({ isPlaying: st.isPlaying, progress: positionSec, duration: durationSec });
+      return;
+    }
+    if (st.endedPending && store.currentSong) {
+      if (store.isPlaying) {
+        // Stale flag — something is actively playing; just clear it so it can
+        // never fire over a deliberate user action.
+        backgroundAudio.acknowledgeEnded().catch(() => {});
+        return;
+      }
+      // A track completed while JS was disconnected — take over queue duty
+      // exactly once. consumeNativeEnded() makes a late duplicate 'ended'
+      // notification for this completion a no-op in the engine listener.
+      audioService.consumeNativeEnded();
+      backgroundAudio.acknowledgeEnded().catch(() => {});
+      store.nextSong();
+    }
+  } catch {}
+}
+
 function clearNextSongRetry() {
   if (nextSongRetryTimeout) {
     clearTimeout(nextSongRetryTimeout);
@@ -193,13 +297,17 @@ function initAudioServiceHandler() {
   // from concurrent loadSong calls and across HMR reloads.
   if (initPromise) return initPromise;
   initPromise = (async () => {
-    if (audioServiceUnsub) return;
+    if (globalListenersRegistered) return;
+    globalListenersRegistered = true;
 
-    audioServiceUnsub = audioService.subscribe((event, data) => {
+    audioService.subscribe((event, data) => {
       const state = useAudioStore.getState();
 
       switch (event) {
         case 'play': {
+          // Stale-session guard: events from a superseded playback session
+          // (an old track) must never rewrite the current track's state.
+          if (data?.playbackId != null && data.playbackId !== audioService.getCurrentPlaybackId()) break;
           clearNextSongRetry();
           if (data?.song) {
             consecutivePlayFailures = 0;
@@ -246,10 +354,34 @@ function initAudioServiceHandler() {
           break;
         }
         case 'pause':
-          useAudioStore.setState({ isPlaying: false });
+          clearLoadingTimeout();
+          useAudioStore.setState({ isPlaying: false, isLoading: false });
           try { mediaSessionService.updatePlaybackState(false, audioService.getCurrentTime(), audioService.getDuration()); } catch {}
           break;
         case 'ended': {
+          // Each playback session's 'ended' is consumed EXACTLY once — an
+          // ended track can never trigger two next-transitions, and an old
+          // track ending after a newer one started is ignored entirely.
+          // Every event is bound to a session — tagged by the engine, or
+          // bound to the CURRENT session when a caller omitted the tag — so
+          // the dedupe applies uniformly and an untagged duplicate can never
+          // slip through.
+          const session = typeof data?.playbackId === 'number'
+            ? data.playbackId
+            : audioService.getCurrentPlaybackId();
+          if (session === lastHandledEndedSession) break;
+          if (session !== audioService.getCurrentPlaybackId()) break;
+          lastHandledEndedSession = session;
+          // A FAILURE also ends via this event (error set just before).
+          // First try the BOUNDED smart-replacement gate (one verified
+          // alternative source per failed command); everything it cannot
+          // handle routes to the bounded auto-skip — never replay a failed
+          // track on repeat-one and never loop an all-failing queue.
+          const failed = useAudioStore.getState().error != null;
+          if (failed) {
+            maybeSmartReplaceThenSkip();
+            break;
+          }
           const repeatMode = useQueueStore.getState().repeatMode;
           if (repeatMode === 'one') {
             const currentSong = useAudioStore.getState().currentSong;
@@ -257,7 +389,7 @@ function initAudioServiceHandler() {
               const queue = useQueueStore.getState().queue;
               const idx = useQueueStore.getState().currentIndex;
               audioService.play(currentSong, queue, idx).catch((err) => {
-                console.error('[AudioStore] repeat-one play() failed:', err);
+                logger.error('[AudioStore] repeat-one play() failed:', err);
                 clearLoadingTimeout();
                 useAudioStore.setState({ isLoading: false, isPlaying: false, error: 'Playback failed' });
                 autoSkipNextSong();
@@ -269,10 +401,15 @@ function initAudioServiceHandler() {
           break;
         }
         case 'progress': {
+          if (typeof data !== 'number') return;
+          // Crossfade trigger — evaluated on EVERY engine tick and must not
+          // be blocked by the UI progress throttle; it is internally gated
+          // to run once per playback session. The window can open at any
+          // moment, and a dropped tick would delay the fade preparation.
+          maybeTriggerCrossfade(data);
           const now = Date.now();
           if (now - lastProgressUpdate < PROGRESS_THROTTLE_MS) return;
           lastProgressUpdate = now;
-          if (typeof data !== 'number') return;
           useAudioStore.setState({ progress: data });
           if (now - lastMediaUpdate > 1000) {
             lastMediaUpdate = now;
@@ -294,6 +431,7 @@ function initAudioServiceHandler() {
           break;
         }
         case 'loaded': {
+          if (data?.playbackId != null && data.playbackId !== audioService.getCurrentPlaybackId()) break;
           const newSong = data?.song ?? state.currentSong;
           useAudioStore.setState({
             currentSong: newSong,
@@ -306,11 +444,14 @@ function initAudioServiceHandler() {
           break;
         }
         case 'error':
-          console.error('[AudioStore] Playback error:', data);
+          logger.error('[AudioStore] Playback error:', data);
           clearLoadingTimeout();
           useAudioStore.setState({
             error: typeof data === 'string' ? data : 'Playback error',
             isLoading: false,
+            // Playback has failed — never leave the UI showing a fake PLAYING
+            // state. The 'play'/'playing' events will restore it on recovery.
+            isPlaying: false,
           });
           break;
         case 'waiting':
@@ -324,7 +465,9 @@ function initAudioServiceHandler() {
       }
     });
 
-    // ── Background listeners — each calls useAudioStore.getState() inside
+    // ── Native media actions — THE single registration site. The native
+    // MediaSession (Bluetooth, lock screen, notification, system controls)
+    // funnels every transport command through this one listener.
     try { backgroundAudio.onMediaAction((event) => {
         const store = useAudioStore.getState();
         switch (event.action) {
@@ -347,11 +490,23 @@ function initAudioServiceHandler() {
           case 'previous':
             store.previousSong();
             break;
-          case 'seek':
-            if (typeof event.position === 'number' && Number.isFinite(event.position)) {
-              store.seek(event.position);
+          case 'seek': {
+            // Native MediaSession seek positions are MILLISECONDS and the
+            // native player has already applied the seek — when the native
+            // engine owns playback only mirror the position, never seek again.
+            if (typeof event.position !== 'number' || !Number.isFinite(event.position)) break;
+            const seconds = event.position / 1000;
+            if (audioService.isNativeEngineActive()) {
+              audioService.syncExternalPosition(seconds);
+              useAudioStore.setState({ progress: seconds });
+            } else {
+              store.seek(seconds);
             }
             break;
+          }
+          // 'ended' / 'error' are consumed by AudioService's native listener
+          // and re-emitted through the audioService event channel — handling
+          // them here too would process every completion twice.
         }
       }).catch(() => {}); } catch {}
 
@@ -375,9 +530,35 @@ function initAudioServiceHandler() {
     try {
       backgroundPlaybackService.onBackgroundChange((isBackground) => {
         if (isBackground) {
+          // WebView timers stop in the background — a half-finished ramp
+          // would freeze with both elements audible. Complete it instantly.
+          try { if (audioService.isCrossfading()) audioService.finishCrossfadeNow(); } catch {}
+          // Flush the debounced queue write synchronously — the WebView may
+          // be suspended before the 500ms timer fires, and a queue mutation
+          // from the last moment must not be lost across the transition.
+          try { useQueueStore.getState().flushPersist(); } catch {}
           persistPlaybackState();
+        } else {
+          // Foreground return — engine events may have been lost during the
+          // disconnect; re-read the authoritative native state.
+          void reconcileNativeState();
         }
       });
+    } catch {}
+
+    // ── Network recovery: if playback parked in an ERROR state (bounded
+    // retries exhausted while offline), retry the current track the moment
+    // connectivity returns. Never fires on intentional pause or while a
+    // transition is in flight.
+    try {
+      if (typeof window !== 'undefined') {
+        window.addEventListener('online', () => {
+          const s = useAudioStore.getState();
+          if (s.error && s.currentSong && !s.isPlaying && !s.isLoading) {
+            s.retry();
+          }
+        });
+      }
     } catch {}
 
     // ── Persist every 10s while playing
@@ -403,8 +584,6 @@ function initAudioServiceHandler() {
         );
       } catch {}
     });
-
-initPromise = null;
   })();
 }
 
@@ -442,90 +621,69 @@ if (!(globalThis as any).__audioStoreInitialized) {
 
     try { backgroundPlaybackService.init(); } catch {}
 
-    try {
-      backgroundAudio.onMediaAction((event) => {
-        const store = useAudioStore.getState();
-        switch (event.action) {
-          case 'play':
-            if (!store.currentSong) {
-              serviceRequestedPlay = true;
-              return;
-            }
-            if (store.isPlaying || store.isLoading) return;
-            store.play();
-            break;
-          case 'pause':
-          case 'stop':
-            serviceRequestedPlay = false;
-            store.pause();
-            break;
-          case 'next':
-            store.nextSong();
-            break;
-          case 'previous':
-            store.previousSong();
-            break;
-          case 'seek':
-            if (typeof event.position === 'number' && Number.isFinite(event.position)) {
-              store.seek(event.position);
-            }
-            break;
-        }
-      }).catch(() => {});
-    } catch {}
-
-    try {
-      backgroundPlaybackService.onInterruption((type) => {
-        if (type === 'headphone-unplug' || type === 'bluetooth-disconnect') {
-          useAudioStore.getState().pause();
-        }
-      });
-
-      backgroundPlaybackService.onReconnect(() => {
-        const state = useAudioStore.getState();
-        if (state.currentSong && !state.isPlaying) {
-          audioService.resume().catch(() => {});
-        }
-      });
-
-      backgroundPlaybackService.onBackgroundChange((isBackground) => {
-        if (isBackground) {
-          persistPlaybackState();
-        }
-      });
-    } catch {}
-
+    // All global listener registrations live in initAudioServiceHandler — it
+    // is the ONE registration site, guarded against double-init.
     try {
       initAudioServiceHandler();
     } catch {}
-
-    try {
-      const persistIntervalId = setInterval(() => {
-        try {
-          const state = useAudioStore.getState();
-          if (state.isPlaying && state.currentSong) {
-            persistPlaybackState();
-          }
-        } catch {}
-      }, 10_000); // Persist every 10s while playing (was 30s)
-      // Store for HMR cleanup
-      if ((globalThis as any).__audioPersistInterval) {
-        clearInterval((globalThis as any).__audioPersistInterval);
-      }
-      (globalThis as any).__audioPersistInterval = persistIntervalId;
-    } catch {}
-
-    try {
-      useQueueStore.subscribe((state) => {
-        try {
-          mediaSessionService.updateActions(
-            state.currentIndex < state.queue.length - 1,
-            state.currentIndex > 0,
-          );
-        } catch {}
-      });
-    } catch {}
   });
+}
+
+/**
+ * Smart-replacement gate for a failed track. Makes exactly ONE bounded
+ * attempt to swap in a verified alternative source (same song, different
+ * stream) while preserving the failed song's metadata. Every outcome that
+ * cannot replace the stream routes to the bounded auto-skip, so one failed
+ * track can never stall or loop the queue. A user command issued while the
+ * attempt is in flight owns the player — the attempt then aborts silently.
+ */
+function maybeSmartReplaceThenSkip(): void {
+  const failedSong = useAudioStore.getState().currentSong;
+  if (!failedSong) return;
+  // One attempt per failed command, never concurrent attempts.
+  if (smartReplaceBusy || commandSeq === smartReplaceConsumedSeq) {
+    autoSkipNextSong();
+    return;
+  }
+  smartReplaceBusy = true;
+  smartReplaceConsumedSeq = commandSeq;
+  const seq = commandSeq;
+  void (async () => {
+    try {
+      const result = await findVerifiedReplacement(failedSong);
+      if (seq !== commandSeq) return; // superseded by a user command
+      if (result.status === 'replaced' && result.replacement) {
+        const qs = useQueueStore.getState();
+        const resolvedQueue = resolveQueueDownloads(qs.queue);
+        clearLoadingTimeout();
+        // Same queue slot — only the stream source changed; title/artist/
+        // album are preserved by the replacement service.
+        useAudioStore.setState({
+          currentSong: result.replacement,
+          progress: 0,
+          isLoading: true,
+          error: null,
+        });
+        startLoadingTimeout();
+        showToast('Stream failed — switched to an alternate source', 'info');
+        audioService.play(result.replacement, resolvedQueue, qs.currentIndex).catch(err => {
+          if (seq !== commandSeq) return; // superseded by a newer command
+          const msg = err instanceof Error ? err.message : 'Playback failed';
+          logger.error('[AudioStore] smart-replace play() failed:', msg);
+          clearLoadingTimeout();
+          useAudioStore.setState({ error: msg, isLoading: false, isPlaying: false });
+          autoSkipNextSong();
+        });
+        return;
+      }
+      autoSkipNextSong();
+    } catch (err) {
+      logger.error('[AudioStore] smart replacement error:', err);
+      if (seq === commandSeq) autoSkipNextSong();
+    } finally {
+      smartReplaceBusy = false;
+    }
+  })();
 }
 
 function autoSkipNextSong() {
@@ -537,7 +695,7 @@ function autoSkipNextSong() {
   consecutivePlayFailures++;
   
   if (consecutivePlayFailures >= MAX_CONSECUTIVE_FAILURES) {
-    console.error('[AudioStore] Too many consecutive failures, stopping auto-skip');
+    logger.error('[AudioStore] Too many consecutive failures, stopping auto-skip');
     useAudioStore.setState({
       error: 'Multiple songs failed to play. Check your connection.',
       isLoading: false,
@@ -553,6 +711,113 @@ function autoSkipNextSong() {
   }, backoff);
 }
 
+/**
+ * Crossfade trigger — evaluated on every progress update. Claims the current
+ * playback session the moment the fade window opens, then prepares the next
+ * track's stream. EVERY gate failure is a silent return: crossfade is a
+ * pure enhancement and must never disturb the normal ended-path advance.
+ */
+function maybeTriggerCrossfade(progress: number): void {
+  const qs = useQueueStore.getState();
+  if (!qs.crossfadeEnabled) return;
+  // Repeat-one replays the current track on natural completion — no fade.
+  if (qs.repeatMode === 'one') return;
+  const session = audioService.getCurrentPlaybackId();
+  if (crossfadeClaimedSession === session) return; // one trigger per session
+  if (isCrossfadePreparing) return;
+  if (audioService.getCrossfadePhase() !== 'idle') return;
+
+  const st = useAudioStore.getState();
+  if (!st.isPlaying || st.isLoading || st.error) return;
+  // HTML engine only — native/iframe engines cannot participate.
+  if (!audioService.isHtmlEngineActive()) return;
+  // Background playback runs on the OS side; the WebView's timers and
+  // autoplay context cannot be trusted there.
+  try { if (backgroundPlaybackService.getIsBackground()) return; } catch {}
+
+  const duration = audioService.getDuration();
+  const fade = qs.crossfadeDurationSec;
+  if (!isFinite(duration) || duration <= 0) return;
+  if (duration <= fade * 2) return;        // track too short to fade safely
+  if (duration - progress > fade) return;  // not yet inside the fade window
+
+  // A manual next/previous is already in flight — it owns the transition.
+  if (isNextSongPending || isPreviousSongPending) return;
+
+  const target = qs.peekNextSong();
+  if (!target || target.id === st.currentSong?.id) return;
+
+  // CLAIM the session before any async work — from this point the window
+  // can never retrigger, no matter how many progress ticks arrive.
+  crossfadeClaimedSession = session;
+  isCrossfadePreparing = true;
+  void runCrossfade(target, session, fade);
+}
+
+/**
+ * Prepare the incoming stream, then commit the queue transition through the
+ * SAME authoritative chain as manual next. The queue is committed only AFTER
+ * the stream is ready — a failed prepare leaves the queue untouched and the
+ * track simply ends into the normal advance path.
+ */
+async function runCrossfade(target: Song, session: number, fade: number): Promise<void> {
+  try {
+    const ok = await audioService.prepareCrossfadeIn(resolveDownloadUrl(target));
+    // The session we prepared against must still be live and no user
+    // transition may have taken over while the stream was buffering.
+    if (!ok || audioService.getCurrentPlaybackId() !== session || isNextSongPending || isPreviousSongPending) {
+      audioService.cancelCrossfade();
+      return;
+    }
+    await chainAdvance(async () => {
+      // A queued manual next/previous outranks the automatic fade — yield
+      // the chain to it instead of advancing twice.
+      if (isNextSongPending || isPreviousSongPending || audioService.getCurrentPlaybackId() !== session) {
+        audioService.cancelCrossfade();
+        return;
+      }
+      const seq = ++commandSeq;
+      // Preselect `target`: under shuffle this locks the commit to the track
+      // already buffered in the incoming element.
+      const committed = await useQueueStore.getState().nextSong(target);
+      if (seq !== commandSeq || !committed || committed.id !== target.id) {
+        // A newer command owns the player, or the queue no longer agrees
+        // with the prepared stream — discard the fade silently.
+        audioService.cancelCrossfade();
+        return;
+      }
+      const started = audioService.startCrossfadeIn(fade);
+      if (!started) {
+        // Hand-off impossible (engine changed underneath) — fall back to a
+        // normal play of the committed track so the queue never stalls.
+        audioService.cancelCrossfade();
+        const queueState = useQueueStore.getState();
+        const resolved = resolveDownloadUrl(committed);
+        useAudioStore.setState({
+          currentSong: resolved,
+          progress: 0,
+          isLoading: true,
+          duration: resolved.duration,
+          error: null,
+        });
+        startLoadingTimeout();
+        audioService.play(resolved, resolveQueueDownloads(queueState.queue), queueState.currentIndex).catch(err => {
+          if (seq !== commandSeq) return;
+          const msg = err instanceof Error ? err.message : 'Playback failed';
+          logger.error('[AudioStore] crossfade fallback play() failed:', msg);
+          clearLoadingTimeout();
+          useAudioStore.setState({ error: msg, isLoading: false, isPlaying: false });
+          autoSkipNextSong();
+        });
+        return;
+      }
+      useAudioStore.setState({ progress: 0, isLoading: false, error: null });
+    });
+  } finally {
+    isCrossfadePreparing = false;
+  }
+}
+
 export const useAudioStore = create<AudioStore>((set, get) => ({
   currentSong: null,
   isPlaying: false,
@@ -565,7 +830,21 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
 
   loadSong: (song: Song, playlist: Song[], index: number) => {
     clearNextSongRetry();
-    const { currentSong, isPlaying } = get();
+
+    // Boundary validation: a malformed track must produce a controlled
+    // error — never a crash, a broken queue item, or a fake PLAYING state.
+    if (!song || typeof song.id !== 'string' || !song.id.trim()) {
+      logger.error('[AudioStore] loadSong rejected a track with no playable id:', song);
+      clearLoadingTimeout();
+      set({ error: 'This track cannot be played — it has no playable id', isLoading: false, isPlaying: false });
+      return;
+    }
+
+    const { currentSong, isPlaying, isLoading } = get();
+
+    // Rapid double-click guard: re-clicking the track that is already loading
+    // must not restart playback or rewrite the queue mid-resolution.
+    if (currentSong?.id === song.id && isLoading) return;
 
     // A different song was chosen — any restored resume position no longer applies.
     if (currentSong?.id !== song.id) pendingResumePosition = null;
@@ -577,15 +856,24 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
         return;
       }
       if (audioService.isLoaded()) {
-        audioService.resume();
+        // A rejected resume means the engine behind isLoaded() is gone (e.g.
+        // native service recreated) — fall back to a full queue rebuild.
+        audioService.resume().catch(() => useAudioStore.getState().play());
         return;
       }
       // Song was restored from persistence after a process restart but no audio
       // is actually loaded — fall through to a full play() below.
     }
 
-    // Ensure audio service handler is wired up (may not have run yet if deferred)
-    if (!audioServiceUnsub) {
+    // Song click is THE authoritative transition — it claims a new command
+    // sequence so any in-flight async work from a previous command becomes
+    // stale and is discarded instead of overwriting this click. The increment
+    // sits AFTER the dedup/toggle guards so a blocked re-click never
+    // invalidates the play that is legitimately in flight.
+    const seq = ++commandSeq;
+
+    // Ensure global listeners are wired up (may not have run yet if deferred)
+    if (!globalListenersRegistered) {
       try { initAudioServiceHandler(); } catch {}
     }
 
@@ -601,18 +889,20 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
       currentSong: resolvedSong,
       isLoading: true,
       error: null,
-      duration: resolvedSong.duration,
+      duration: Number.isFinite(resolvedSong.duration) ? resolvedSong.duration : 0,
       progress: 0,
     });
     startLoadingTimeout();
     
     audioService.play(resolvedSong, resolvedQueue, index, resumeAt ?? undefined).catch(err => {
+      if (seq !== commandSeq) return; // a newer command owns the player now
       const msg = err instanceof Error ? err.message : 'Playback failed';
-      console.error('[AudioStore] loadSong play() failed:', msg);
+      logger.error('[AudioStore] loadSong play() failed:', msg);
       clearLoadingTimeout();
       set({ error: msg, isLoading: false, isPlaying: false });
-      // autoSkipNextSong() is handled by the 'error' event handler below —
-      // do NOT call it here to avoid double-fire.
+      // A REJECTED play() never emits 'ended', so the bounded auto-skip must
+      // happen here — otherwise the queue stalls on the failed track.
+      autoSkipNextSong();
     });
   },
 
@@ -620,6 +910,7 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
     clearNextSongRetry();
     const { currentSong } = get();
     if (!currentSong) return;
+    const seq = ++commandSeq;
     pendingResumePosition = null;
     const qs = useQueueStore.getState();
     const queue = qs.queue.length > 0 ? qs.queue : [currentSong];
@@ -631,8 +922,9 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
     startLoadingTimeout();
     audioService.pause();
     audioService.play(song, resolvedQueue, index).catch(err => {
+      if (seq !== commandSeq) return; // superseded by a newer command
       const msg = err instanceof Error ? err.message : 'Playback failed';
-      console.error('[AudioStore] retry play() failed:', msg);
+      logger.error('[AudioStore] retry play() failed:', msg);
       clearLoadingTimeout();
       set({ error: msg, isLoading: false, isPlaying: false });
       autoSkipNextSong();
@@ -645,6 +937,7 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
     if (!audioService.isLoaded()) {
       // Restored session (e.g. after process recreation) — no audio loaded yet.
       // Rebuild playback from the persisted queue and resume the saved position.
+      const seq = ++commandSeq;
       const qs = useQueueStore.getState();
       const queue = qs.queue.length > 0 ? qs.queue : [currentSong];
       const resolvedQueue = resolveQueueDownloads(queue);
@@ -653,15 +946,18 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
       set({ isLoading: true, error: null });
       startLoadingTimeout();
       audioService.play(resolvedQueue[qs.currentIndex] || currentSong, resolvedQueue, qs.currentIndex, resumeAt ?? undefined).catch(err => {
+        if (seq !== commandSeq) return; // superseded by a newer command
         const msg = err instanceof Error ? err.message : 'Playback failed';
-        console.error('[AudioStore] play() restore failed:', msg);
+        logger.error('[AudioStore] play() restore failed:', msg);
         clearLoadingTimeout();
         set({ error: msg, isLoading: false, isPlaying: false });
         autoSkipNextSong();
       });
       return;
     }
-    audioService.resume();
+    // A rejected resume means the engine is gone (native service recreated
+    // while paused) — rebuild playback from the queue instead of dying.
+    audioService.resume().catch(() => useAudioStore.getState().play());
   },
 
   pause: () => {
@@ -674,20 +970,28 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
     if (isPlaying) {
       audioService.pause();
     } else if (audioService.isLoaded()) {
-      audioService.resume();
+      audioService.resume().catch(() => useAudioStore.getState().play());
     } else {
       get().play();
     }
   },
 
   nextSong: () => {
-    if (isNextSongPending) return;
+    if (isNextSongPending) return; // exactly one next-transition at a time
     isNextSongPending = true;
     clearNextSongRetry();
     pendingResumePosition = null;
     return chainAdvance(async () => {
+      // Claim the command sequence at EXECUTION time, not issue time: this
+      // invalidates any older in-flight command (stale next / clicked-then-
+      // superseded load) while keeping a queued next/previous pair both
+      // authoritative — each executes exactly once, in order.
+      const seq = ++commandSeq;
       try {
         const song = await useQueueStore.getState().nextSong();
+        // A newer command (song click / previous / another next) completed
+        // while the queue transition was in flight — it owns playback now.
+        if (seq !== commandSeq) return;
         if (song) {
           const resolved = resolveDownloadUrl(song);
           // Read queue + index synchronously right after nextSong() set them
@@ -702,8 +1006,9 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
           });
           startLoadingTimeout();
           audioService.play(resolved, resolvedQueue, qs.currentIndex).catch(err => {
+            if (seq !== commandSeq) return; // superseded by a newer command
             const msg = err instanceof Error ? err.message : 'Playback failed';
-            console.error('[AudioStore] nextSong play() failed:', msg);
+            logger.error('[AudioStore] nextSong play() failed:', msg);
             clearLoadingTimeout();
             set({ error: msg, isLoading: false, isPlaying: false });
             autoSkipNextSong();
@@ -721,13 +1026,16 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
   },
 
   previousSong: () => {
-    if (isPreviousSongPending) return;
+    if (isPreviousSongPending) return; // exactly one previous-transition at a time
     isPreviousSongPending = true;
     clearNextSongRetry();
     pendingResumePosition = null;
     return chainAdvance(async () => {
+      // Claim the command sequence at EXECUTION time — see nextSong.
+      const seq = ++commandSeq;
       try {
         const song = await useQueueStore.getState().previousSong();
+        if (seq !== commandSeq) return; // superseded by a newer command
         if (song) {
           const resolved = resolveDownloadUrl(song);
           const qs = useQueueStore.getState();
@@ -741,8 +1049,9 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
           });
           startLoadingTimeout();
           audioService.play(resolved, resolvedQueue, qs.currentIndex).catch(err => {
+            if (seq !== commandSeq) return; // superseded by a newer command
             const msg = err instanceof Error ? err.message : 'Playback failed';
-            console.error('[AudioStore] previousSong play() failed:', msg);
+            logger.error('[AudioStore] previousSong play() failed:', msg);
             clearLoadingTimeout();
             set({ error: msg, isLoading: false, isPlaying: false });
             autoSkipNextSong();
@@ -837,6 +1146,40 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
         store.play();
       }
     }
+
+    // If the native engine is still alive (WebView/Activity was recreated
+    // while the foreground service kept playing), adopt its state instead of
+    // resetting the UI to stopped. Playback itself is never interrupted.
+    void (async () => {
+      try {
+        const playbackIdBefore = audioService.getCurrentPlaybackId();
+        const nativeState = await backgroundAudio.getPlaybackState();
+        // The user started something while this async check was in flight —
+        // that command owns playback now; never stomp it with a stale
+        // snapshot (adoption would invalidate its stream resolution).
+        if (audioService.getCurrentPlaybackId() !== playbackIdBefore) return;
+        const st = useAudioStore.getState();
+        if (st.isPlaying || st.isLoading) return;
+        if (!nativeState.nativeActive) {
+          // A track may have ENDED while the WebView was destroyed — the
+          // 'ended' notification never arrived. Continue the queue exactly
+          // once so queue continuation survives JS disconnects.
+          if (nativeState.endedPending && st.currentSong) {
+            audioService.consumeNativeEnded();
+            backgroundAudio.acknowledgeEnded().catch(() => {});
+            useAudioStore.getState().nextSong();
+          }
+          return;
+        }
+        const current = st.currentSong;
+        if (!current) return;
+        const positionSec = Math.max(0, (nativeState.position || 0) / 1000);
+        const durationSec = nativeState.duration > 0 ? nativeState.duration / 1000 : (current.duration || 0);
+        pendingResumePosition = null;
+        audioService.adoptNativePlayback(current, { positionSec, durationSec, isPlaying: nativeState.isPlaying, generation: nativeState.generation });
+        useAudioStore.setState({ isPlaying: nativeState.isPlaying, progress: positionSec, duration: durationSec });
+      } catch {}
+    })();
   },
 }));
 
@@ -862,7 +1205,7 @@ if (typeof window !== 'undefined') {
       if (state.error !== prev.error) changes.push(`error: ${state.error || 'null'}`);
       if (state.currentSong?.id !== prev.currentSong?.id) changes.push(`song: ${prev.currentSong?.title || 'none'} → ${state.currentSong?.title || 'none'}`);
       if (changes.length > 0) {
-        console.log('[AudioStore] State:', changes.join(', '));
+        logger.debug('[AudioStore] State:', changes.join(', '));
       }
     });
   } catch {}

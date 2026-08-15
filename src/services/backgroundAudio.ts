@@ -1,11 +1,45 @@
 import { registerPlugin, type PluginListenerHandle } from '@capacitor/core';
 import type { Plugin } from '@capacitor/core';
 
-export type MediaAction = 'play' | 'pause' | 'next' | 'previous' | 'stop' | 'seek' | 'headset';
+export type MediaAction = 'play' | 'pause' | 'next' | 'previous' | 'stop' | 'seek' | 'headset' | 'ended' | 'error';
 
 export interface MediaActionEvent {
   action: MediaAction;
+  /** Seek positions are reported in MILLISECONDS by the native MediaSession. */
   position?: number;
+  /** Native playback-session generation that produced this event. Lets the JS
+   *  layer drop stale events (a late 'ended' for an old track). */
+  generation?: number;
+}
+
+export interface NativePlayOptions {
+  audioUrl: string;
+  title?: string;
+  artist?: string;
+  album?: string;
+  albumArt?: string;
+  /** Resume offset in MILLISECONDS applied by the native player once prepared. */
+  startPositionMs?: number;
+  volume?: number;
+}
+
+export interface NativePlaybackState {
+  isPlaying: boolean;
+  /** Position in MILLISECONDS. */
+  position: number;
+  /** Duration in MILLISECONDS. */
+  duration: number;
+  /** True while the native MediaPlayer owns playback (vs. a WebView engine). */
+  nativeActive?: boolean;
+  isBuffering?: boolean;
+  /** True when a track completed while JS was disconnected — the JS layer
+   *  must continue the queue and then acknowledge via acknowledgeEnded(). */
+  endedPending?: boolean;
+  /** Native playback-session generation of the current session. */
+  generation?: number;
+  url?: string;
+  title?: string;
+  artist?: string;
 }
 
 export interface BackgroundAudioPlugin extends Plugin {
@@ -15,9 +49,11 @@ export interface BackgroundAudioPlugin extends Plugin {
   updatePlaybackState(options: { isPlaying: boolean; position: number; duration?: number }): Promise<void>;
   setShuffle(): Promise<void>;
   setRepeat(): Promise<void>;
-  getPlaybackState(): Promise<{ isPlaying: boolean; position: number; duration: number }>;
+  getPlaybackState(): Promise<NativePlaybackState>;
+  /** Consume the pending-ended flag after the JS layer resumed queue duty. */
+  acknowledgeEnded(): Promise<void>;
   requestPermissions(): Promise<{ notifications: string }>;
-  playAudioUrl(options: { audioUrl: string }): Promise<{ started: boolean }>;
+  playAudioUrl(options: NativePlayOptions): Promise<{ started: boolean; generation?: number }>;
   pauseAudio(): Promise<void>;
   resumeAudio(): Promise<void>;
   stopAudio(): Promise<void>;
@@ -95,15 +131,23 @@ export const backgroundAudio = {
       // ignore
     }
   },
-  getPlaybackState: async (): Promise<{ isPlaying: boolean; position: number; duration: number }> => {
+  getPlaybackState: async (): Promise<NativePlaybackState> => {
     try {
-      if (!BackgroundAudio) return { isPlaying: false, position: 0, duration: 0 };
+      if (!BackgroundAudio) return { isPlaying: false, position: 0, duration: 0, nativeActive: false, endedPending: false };
       return await BackgroundAudio.getPlaybackState();
     } catch {
-      return { isPlaying: false, position: 0, duration: 0 };
+      return { isPlaying: false, position: 0, duration: 0, nativeActive: false, endedPending: false };
     }
   },
-  playAudioUrl: async (options: { audioUrl: string }): Promise<{ started: boolean }> => {
+  acknowledgeEnded: async (): Promise<void> => {
+    try {
+      if (!BackgroundAudio) return;
+      await BackgroundAudio.acknowledgeEnded();
+    } catch {
+      // ignore — flag simply stays set and is re-consumed on next check
+    }
+  },
+  playAudioUrl: async (options: NativePlayOptions): Promise<{ started: boolean; generation?: number }> => {
     try {
       if (!BackgroundAudio) return { started: false };
       return await BackgroundAudio.playAudioUrl(options);

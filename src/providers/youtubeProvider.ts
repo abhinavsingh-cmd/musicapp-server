@@ -36,6 +36,37 @@ import {
 const YT_ID_RE = /^[a-zA-Z0-9_-]{11}$/;
 const STREAM_TTL_MS = 25 * 60 * 1000;
 
+// --- YouTube-owned network warmup (idempotent, injected once) ---
+// Every warmup the app used to do for YouTube lives here: preconnecting the
+// video/thumbnail CDNs and prefetching the IFrame API script. The generic
+// engine and preload service call `provider.preconnect?.()` without knowing
+// which provider they are warming.
+let preconnectDone = false;
+
+function preconnectYouTubeDomains(): void {
+  if (preconnectDone || typeof document === 'undefined') return;
+  preconnectDone = true;
+  const domains = [
+    'https://www.youtube.com',
+    'https://i.ytimg.com',
+    'https://s.ytimg.com',
+    'https://www.google.com',
+  ];
+  for (const href of domains) {
+    const link = document.createElement('link');
+    link.rel = 'preconnect';
+    link.href = href;
+    link.crossOrigin = 'anonymous';
+    document.head.appendChild(link);
+  }
+  // Also prefetch the YouTube IFrame API script
+  const prefetch = document.createElement('link');
+  prefetch.rel = 'preload';
+  prefetch.as = 'script';
+  prefetch.href = 'https://www.youtube.com/iframe_api';
+  document.head.appendChild(prefetch);
+}
+
 const CAPABILITIES: ProviderCapabilities = {
   search: true,
   trackLookup: false,
@@ -139,6 +170,10 @@ class YouTubeProvider implements TrackProvider {
 
   invalidateStream(track: Track): void {
     if (track.externalId) invalidateAudioUrl(track.externalId);
+  }
+
+  preconnect(): void {
+    preconnectYouTubeDomains();
   }
 }
 

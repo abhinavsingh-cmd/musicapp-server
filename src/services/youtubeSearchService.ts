@@ -12,7 +12,7 @@
  */
 
 import { YTSong } from '../stores/searchStore';
-import { apiFetch } from '../config/api';
+import { api, apiFetch } from '../config/api';
 
 const INVIDIOUS_INSTANCES = [
   'https://yewtu.be',
@@ -206,16 +206,16 @@ function scoreMusicRelevance(title: string): number {
 function parseResults(data: unknown): YTSong[] {
   const items = Array.isArray(data) ? data : [];
   return items
-    .filter((r: any) => r && r.videoId && r.title && r.lengthSeconds > 0)
-    .filter((r: any) => r.lengthSeconds >= 60 && r.lengthSeconds <= 900)
+    .filter((r: any) => r && typeof r.videoId === 'string' && r.videoId.trim() && r.title && toSafeNumber(r.lengthSeconds) > 0)
+    .filter((r: any) => toSafeNumber(r.lengthSeconds) >= 60 && toSafeNumber(r.lengthSeconds) <= 900)
     .filter((r: any) => !isBlacklisted(r.title || ''))
     .map((r: any) => ({
-      id: r.videoId,
-      title: cleanTitle(r.title || 'Unknown'),
+      id: r.videoId.trim(),
+      title: cleanTitle(r.title || 'Unknown') || 'Unknown',
       artist: r.author || r.uploader || 'Unknown',
-      duration: r.lengthSeconds || 0,
-      thumbnail: getBestThumbnail(r.videoThumbnails, r.videoId),
-      viewCount: r.viewCount || 0,
+      duration: toSafeNumber(r.lengthSeconds),
+      thumbnail: getBestThumbnail(r.videoThumbnails, r.videoId.trim()),
+      viewCount: toSafeNumber(r.viewCount),
       album: '',
       _score: scoreMusicRelevance(r.title || ''),
     }))
@@ -267,25 +267,69 @@ export async function youtubeSearch(
   const hasMusicTerm = /\b(song|music|audio|video|singer|artist|album|playlist)\b/i.test(query);
   const musicQuery = hasMusicTerm ? `${query} official` : `${query} official audio song`;
 
-  // PRIMARY: Use server endpoint (yt-dlp YouTube search)
+  // PRIMARY: Use server endpoint (yt-dlp YouTube search).
+  // NOTE: must go through api() — a hardcoded relative URL silently 404s
+  // whenever the API is served from a different host (production), which
+  // made search look broken while reporting no error.
   try {
-    const url = `/api/youtube/search?q=${encodeURIComponent(musicQuery)}`;
+    const url = api(`/youtube/search?q=${encodeURIComponent(musicQuery)}`);
     const result = await apiFetch(url, { timeout: 12_000, retries: 1, signal });
-    const data = await result.json();
+
+    // Malformed-response protection: a body that isn't valid JSON, or isn't
+    // the expected shape, falls through to the Invidious fallback — it can
+    // never produce garbage rows or throw into the caller.
+    let data: any = null;
+    try {
+      data = await result.json();
+    } catch (parseErr) {
+      logError('Server search returned malformed JSON:', parseErr);
+    }
+
     const wrapped = data?.details?.results || data?.results || [];
-    if (Array.isArray(wrapped) && wrapped.length > 0) {
-      log(`Server search returned ${wrapped.length} results`);
-      return wrapped.map((r: any) => ({
-        id: r.id || r.youtubeId || '',
-        title: cleanTitle(r.title || 'Unknown'),
-        artist: r.artist || r.channel || 'Unknown',
-        duration: r.duration || 0,
-        thumbnail: r.thumbnail || `https://img.youtube.com/vi/${r.id || r.youtubeId || ''}/mqdefault.jpg`,
-        viewCount: r.viewCount || 0,
-        album: '',
-      }));
+    if (Array.isArray(wrapped)) {
+      // Normalize at the boundary: every emitted row MUST have a non-empty
+      // playable id, a finite duration, and a usable thumbnail. Rows that
+      // cannot satisfy this are dropped — a result with no id can never be
+      // played and would produce a broken queue item if clicked.
+      const seen = new Set<string>();
+      const normalized = wrapped
+        .map((r: any): YTSong | null => {
+          const id = typeof r?.id === 'string' && r.id.trim()
+            ? r.id.trim()
+            : typeof r?.youtubeId === 'string' && r.youtubeId.trim()
+              ? r.youtubeId.trim()
+              : '';
+          if (!id) return null;
+          // Duplicate-result protection: providers occasionally return the
+          // same video twice — duplicates break React keys and confuse users.
+          if (seen.has(id)) return null;
+          seen.add(id);
+          const artist = typeof r?.artist === 'string' && r.artist.trim()
+            ? r.artist.trim()
+            : typeof r?.channel === 'string' && r.channel.trim()
+              ? r.channel.trim()
+              : 'Unknown';
+          const thumbnail = typeof r?.thumbnail === 'string' && /^https?:\/\//.test(r.thumbnail)
+            ? r.thumbnail
+            : `https://img.youtube.com/vi/${id}/mqdefault.jpg`;
+          return {
+            id,
+            title: cleanTitle(typeof r.title === 'string' ? r.title : '') || 'Unknown',
+            artist,
+            duration: toSafeNumber(r.duration),
+            thumbnail,
+            viewCount: toSafeNumber(r.viewCount),
+            album: '',
+          };
+        })
+        .filter((r: YTSong | null): r is YTSong => r !== null);
+      if (normalized.length > 0) {
+        log(`Server search returned ${normalized.length} results`);
+        return normalized;
+      }
     }
   } catch (err) {
+    if (signal?.aborted) return [];
     logError('Server search failed, falling back to Invidious:', err);
   }
 
@@ -306,6 +350,16 @@ export async function youtubeSearch(
     logError('All Invidious instances failed:', err);
     return [];
   }
+}
+
+/**
+ * Coerce an arbitrary server value to a finite, non-negative number.
+ * Servers have returned durations/viewCounts as strings, null, and even
+ * missing entirely — downstream math and rendering require real numbers.
+ */
+function toSafeNumber(value: unknown): number {
+  const n = typeof value === 'string' ? Number(value) : value;
+  return typeof n === 'number' && Number.isFinite(n) && n >= 0 ? n : 0;
 }
 
 function cleanTitle(title: string): string {

@@ -27,22 +27,18 @@ class BackgroundPlaybackService {
 
   init(): void {
     this.visibilityHandler = () => {
-      const hidden = document.hidden;
-      if (hidden && !this.isBackground) {
-        this.isBackground = true;
-        this.backgroundCallbacks.forEach((cb) => cb(true));
-      } else if (!hidden && this.isBackground) {
-        this.isBackground = false;
-        this.backgroundCallbacks.forEach((cb) => cb(false));
-      }
+      this.setBackground(document.hidden);
     };
     try { document.addEventListener('visibilitychange', this.visibilityHandler); } catch {}
 
+    // All lifecycle sources funnel through the SAME deduped state machine —
+    // visibilitychange/freeze/resume firing together can never deliver a
+    // duplicate background transition to subscribers.
     this.freezeHandler = () => {
-      this.backgroundCallbacks.forEach((cb) => cb(true));
+      this.setBackground(true);
     };
     this.resumeHandler = () => {
-      this.backgroundCallbacks.forEach((cb) => cb(false));
+      this.setBackground(false);
     };
     try { document.addEventListener('freeze', this.freezeHandler); } catch {}
     try { document.addEventListener('resume', this.resumeHandler); } catch {}
@@ -137,8 +133,18 @@ class BackgroundPlaybackService {
     this.reconnectCallbacks = [];
   }
 
+  /**
+   * Single deduped transition point — subscribers are notified ONLY on an
+   * actual state change, no matter how many event sources report it.
+   */
+  private setBackground(bg: boolean): void {
+    if (this.isBackground === bg) return;
+    this.isBackground = bg;
+    this.backgroundCallbacks.forEach((cb) => cb(bg));
+  }
+
   private handleBeforeUnload = (): void => {
-    this.backgroundCallbacks.forEach((cb) => cb(true));
+    this.setBackground(true);
   };
 
   private notifyInterruption(type: InterruptionType): void {

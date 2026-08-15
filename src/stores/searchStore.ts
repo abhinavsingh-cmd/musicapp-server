@@ -1,7 +1,8 @@
 import { create } from 'zustand';
 import { Song } from '../types/music';
 import { OfflineError, NetworkError, TimeoutError } from '../config/api';
-import { youtubeSearch } from '../services/youtubeSearchService';
+import { searchProviders } from '../providers/search';
+import type { Track } from '../providers/types';
 import { metricsCollector } from '../services/metricsCollector';
 import { librarySearchIndex, initLibrarySearchIndex } from '../services/librarySearchIndex';
 
@@ -97,6 +98,11 @@ function getErrorMessage(err: unknown): string {
   return 'Search failed. Please try again.';
 }
 
+/** True when the error is a request cancellation, not a real failure. */
+function isAbortError(err: unknown): boolean {
+  return err instanceof DOMException && err.name === 'AbortError';
+}
+
 // ---- API ----
 
 let searchGeneration = 0;
@@ -104,9 +110,40 @@ let searchAbortController: AbortController | null = null;
 let ytGeneration = 0;
 let ytAbortController: AbortController | null = null;
 
+/** Map a normalized provider Track back to the UI's YouTube result row. */
+function trackToYTSong(track: Track): YTSong {
+  return {
+    id: track.externalId || track.id,
+    title: track.title,
+    artist: track.artist,
+    duration: track.duration,
+    thumbnail: track.artwork,
+    viewCount: track.playCount || 0,
+    album: track.album || '',
+  };
+}
+
 async function fetchYouTubeSearch(query: string, signal?: AbortSignal): Promise<YTSong[]> {
-  // Server endpoint first (yt-dlp), then Invidious fallback
-  return youtubeSearch(query, signal);
+  // Routed through the provider facade — the store consumes normalized
+  // tracks; the YouTube provider owns the actual search (server yt-dlp,
+  // then Invidious fallback). Provider errors are re-thrown so the store's
+  // offline/timeout handling keeps working unchanged.
+  const [result] = await searchProviders(query, { signal, providers: ['youtube'] });
+  if (!result) return [];
+  if (result.error) throw result.error;
+  // Defense in depth: a result without a playable id can never be clicked —
+  // drop it here instead of letting it reach the UI, the queue, or playback.
+  // Duplicate ids are dropped too: they break React keys and double-play.
+  const seen = new Set<string>();
+  return result.tracks
+    .map(trackToYTSong)
+    .filter((r) => {
+      const id = r.id && r.id.trim();
+      if (!id) return false;
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
 }
 
 // ---- In-memory YouTube result cache (repeat queries / paging are instant) ----
@@ -170,6 +207,10 @@ export const useSearchStore = create<SearchState>((set, get) => ({
   cancelSearch: () => {
     searchGeneration++;
     if (searchAbortController) searchAbortController.abort();
+    // A cancel without a follow-up search must end the loading state —
+    // otherwise the in-flight search's catch is generation-guarded and the
+    // spinner would spin forever.
+    set({ ytStatus: 'cancelled', isCancelled: true });
   },
 
   search: async (query: string) => {
@@ -257,14 +298,22 @@ export const useSearchStore = create<SearchState>((set, get) => ({
       });
     } catch (err) {
       if (gen !== searchGeneration) return;
+      // Aborted = superseded or user-cancelled — never report as an error.
+      if (isAbortError(err)) {
+        set({ ytStatus: 'cancelled', isCancelled: true });
+        return;
+      }
       const msg = getErrorMessage(err);
       const isOffline = err instanceof OfflineError;
       // CRITICAL: Only clear ytResults, NOT libraryResults.
       // Library results were already successfully fetched and should be preserved.
+      // CRITICAL: surface the failure (ytStatus 'error' + message) instead of
+      // silently resetting to idle — swallowing it made a dead YouTube backend
+      // look identical to "no results found".
       set({
         status: libraryHits.length > 0 ? 'success' : (isOffline ? 'offline' : 'error'),
-        ytStatus: 'idle',
-        error: isOffline ? msg : null,
+        ytStatus: isOffline ? 'offline' : 'error',
+        error: msg,
         ytResults: [],
       });
     }
@@ -275,16 +324,21 @@ export const useSearchStore = create<SearchState>((set, get) => ({
     ytAbortController = new AbortController();
     const { signal } = ytAbortController;
     const gen = ++ytGeneration;
+    // Stale-response protection: if a NEW top-level search starts while this
+    // paging request is in flight, its response must never overwrite the new
+    // search's results.
+    const owningSearchGen = searchGeneration;
 
     set({ ytStatus: 'loading', error: null });
     try {
       let full = getYtCache(query);
       if (!full) {
         const results = await fetchYouTubeSearch(query, signal);
-        if (gen !== ytGeneration) return;
+        if (gen !== ytGeneration || owningSearchGen !== searchGeneration) return;
         full = results || [];
         setYtCache(query, full);
       }
+      if (gen !== ytGeneration || owningSearchGen !== searchGeneration) return;
       const sliced = full.slice(0, page * 15);
       set({
         ytResults: sliced,
@@ -293,7 +347,11 @@ export const useSearchStore = create<SearchState>((set, get) => ({
         hasMore: full.length > page * 15,
       });
     } catch (err) {
-      if (gen !== ytGeneration) return;
+      if (gen !== ytGeneration || owningSearchGen !== searchGeneration) return;
+      if (isAbortError(err)) {
+        set({ ytStatus: 'cancelled' });
+        return;
+      }
       set({ ytStatus: 'error', error: getErrorMessage(err) });
     }
   },
@@ -306,16 +364,20 @@ export const useSearchStore = create<SearchState>((set, get) => ({
     ytAbortController = new AbortController();
     const { signal } = ytAbortController;
     const gen = ++ytGeneration;
+    // Stale-response protection: same as searchYouTube — a paging response
+    // that arrives after the user started a new search is discarded.
+    const owningSearchGen = searchGeneration;
 
     set({ ytStatus: 'loading', error: null });
     try {
       let full = getYtCache(debouncedQuery);
       if (!full) {
         const results = await fetchYouTubeSearch(debouncedQuery, signal);
-        if (gen !== ytGeneration) return;
+        if (gen !== ytGeneration || owningSearchGen !== searchGeneration) return;
         full = results || [];
         setYtCache(debouncedQuery, full);
       }
+      if (gen !== ytGeneration || owningSearchGen !== searchGeneration) return;
       const nextPage = page + 1;
       const sliced = full.slice(0, nextPage * 15);
       set({
@@ -325,7 +387,11 @@ export const useSearchStore = create<SearchState>((set, get) => ({
         hasMore: full.length > nextPage * 15,
       });
     } catch (err) {
-      if (gen !== ytGeneration) return;
+      if (gen !== ytGeneration || owningSearchGen !== searchGeneration) return;
+      if (isAbortError(err)) {
+        set({ ytStatus: 'cancelled' });
+        return;
+      }
       set({ ytStatus: 'error', error: getErrorMessage(err) });
     }
   },

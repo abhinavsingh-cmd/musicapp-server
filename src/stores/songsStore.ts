@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { Song } from '../types/music';
 import { fetchSongs } from '../services/musicApi';
 import { getAllCachedMetadata } from '../utils/downloadManager';
+import { logger } from '../utils/logger';
 
 interface SongsState {
   songs: Song[];
@@ -25,7 +26,7 @@ function loadCachedSongs(): Song[] | null {
     const raw = localStorage.getItem(SONGS_CACHE_KEY);
     if (!raw) return null;
     if (raw.length > 100_000) {
-      console.log(`[songsStore] Large cache (${(raw.length / 1024).toFixed(0)}KB), deferring parse`);
+      logger.debug(`[songsStore] Large cache (${(raw.length / 1024).toFixed(0)}KB), deferring parse`);
     }
     const entry: SongsCacheEntry = JSON.parse(raw);
     if (!Array.isArray(entry.songs)) return null;
@@ -109,7 +110,7 @@ async function initSongsStore(): Promise<void> {
       fetched: true,
       error: false,
     });
-    console.log('[songsStore] Loaded', cached.length, 'songs from localStorage cache');
+    logger.debug('[songsStore] Loaded', cached.length, 'songs from localStorage cache');
   }
 
   try {
@@ -121,7 +122,7 @@ async function initSongsStore(): Promise<void> {
         if (songs.length > 0) {
           useSongsStore.setState({ songs, fetched: true, error: false });
           saveCachedSongs(songs);
-          console.log('[songsStore] Loaded', songs.length, 'songs from IndexedDB metadata');
+          logger.debug('[songsStore] Loaded', songs.length, 'songs from IndexedDB metadata');
         }
       }
     }
@@ -131,32 +132,32 @@ async function initSongsStore(): Promise<void> {
 }
 
 async function hydrateSongsStore(): Promise<void> {
-  console.log('[songsStore] hydrateSongsStore started');
+  logger.debug('[songsStore] hydrateSongsStore started');
 
   await initSongsStore();
 
   const state = useSongsStore.getState();
   if (state.fetched && state.songs.length > 0) {
-    console.log('[songsStore] Library already hydrated with', state.songs.length, 'songs, skipping fetch');
+    logger.debug('[songsStore] Library already hydrated with', state.songs.length, 'songs, skipping fetch');
     return;
   }
 
   // If we have songs but fetched is false (shouldn't happen now), don't overwrite
   if (state.songs.length > 0) {
-    console.log('[songsStore] Has', state.songs.length, 'songs but fetched=false, marking as fetched');
+    logger.debug('[songsStore] Has', state.songs.length, 'songs but fetched=false, marking as fetched');
     useSongsStore.setState({ fetched: true, error: false });
     return;
   }
 
-  console.log('[songsStore] Starting library fetch');
+  logger.debug('[songsStore] Starting library fetch');
   useSongsStore.setState({ loading: true, error: false });
 
   try {
-    console.log('[songsStore] Fetching songs from API');
+    logger.debug('[songsStore] Fetching songs from API');
     const songs = await fetchWithTimeout();
     
     if (songs.length > 0) {
-      console.log(`[songsStore] Fetched ${songs.length} songs successfully`);
+      logger.debug(`[songsStore] Fetched ${songs.length} songs successfully`);
       useSongsStore.setState({ 
         songs, 
         loading: false, 
@@ -168,21 +169,21 @@ async function hydrateSongsStore(): Promise<void> {
     } else {
       const current = useSongsStore.getState();
       if (current.songs.length > 0) {
-        console.log('[songsStore] API returned empty, keeping existing songs');
+        logger.debug('[songsStore] API returned empty, keeping existing songs');
         useSongsStore.setState({ loading: false, fetched: true, error: false });
       } else {
-        console.log('[songsStore] API returned empty and no existing songs, showing error state');
+        logger.debug('[songsStore] API returned empty and no existing songs, showing error state');
         useSongsStore.setState({ loading: false, fetched: true, error: true });
       }
     }
   } catch (error) {
-    console.error('[songsStore] Failed to fetch songs:', error);
+    logger.error('[songsStore] Failed to fetch songs:', error);
     const current = useSongsStore.getState();
     if (current.songs.length > 0) {
-      console.log('[songsStore] API failed but existing songs available, using them');
+      logger.debug('[songsStore] API failed but existing songs available, using them');
       useSongsStore.setState({ loading: false, fetched: true, error: false });
     } else {
-      console.log('[songsStore] API failed and no existing songs available, showing error state');
+      logger.debug('[songsStore] API failed and no existing songs available, showing error state');
       useSongsStore.setState({ loading: false, error: true, fetched: true });
     }
   }

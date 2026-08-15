@@ -2,11 +2,11 @@ import React, { useState, useRef, useMemo, useEffect } from 'react';
 import { usePlaylistStore } from '../../stores/playlistStore';
 import { useAudioStore } from '../../stores/audioStore';
 import { useQueueStore } from '../../stores/queueStore';
-import { useDownloadsStore } from '../../stores/downloadsStore';
 import { useSongsStore } from '../../stores/songsStore';
 import { Playlist, Song } from '../../types/music';
 import { cn } from '../../utils/cn';
 import { favoriteKey } from '../../utils/songIds';
+import { DownloadButton } from '../../components/DownloadButton';
 import {
   DndContext,
   closestCenter,
@@ -25,8 +25,8 @@ import {
 import { CSS } from '@dnd-kit/utilities';
 import {
   ArrowLeft, Play, Shuffle, Pause, Search, GripVertical, X, Trash2,
-  Heart, Globe, Users, Share2, Download, Check, MoreVertical,
-  Pencil, Copy, FileDown, FileUp, Music, Loader2,
+  Heart, Globe, Users, Share2, MoreVertical,
+  Pencil, Copy, FileDown, FileUp, Music,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -44,9 +44,6 @@ interface SortablePlaylistSongRowProps {
 const SortablePlaylistSongRow: React.FC<SortablePlaylistSongRowProps> = React.memo(({
   song, index, isCurrent, isPlaying, onPlay, onRemove,
 }) => {
-  const isDownloadedFn = useDownloadsStore((s) => s.isDownloaded);
-  const isDownloadingFn = useDownloadsStore((s) => s.isDownloading);
-  const downloadSong = useDownloadsStore((s) => s.downloadSong);
   const favorites = useAudioStore((s) => s.favorites);
   const toggleFavorite = useAudioStore((s) => s.toggleFavorite);
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: song.id + '-' + index });
@@ -133,16 +130,7 @@ const SortablePlaylistSongRow: React.FC<SortablePlaylistSongRowProps> = React.me
         >
           <Heart size={14} fill={favorites.includes(favoriteKey(song)) ? "currentColor" : "none"} />
         </button>
-        <button
-          onClick={(e) => { e.stopPropagation(); const key = song.youtubeId || song.id; if (isDownloadingFn(key)) return; if (!isDownloadedFn(key)) downloadSong(song); }}
-          disabled={isDownloadedFn(song.youtubeId || song.id) && !isDownloadingFn(song.youtubeId || song.id)}
-          className={cn(
-            "p-1.5 rounded-lg transition-all",
-            isDownloadedFn(song.youtubeId || song.id) ? "text-emerald-400" : isDownloadingFn(song.youtubeId || song.id) ? "text-violet-400" : "text-gray-500 hover:text-violet-400"
-          )}
-        >
-          {isDownloadedFn(song.youtubeId || song.id) ? <Check size={14} /> : isDownloadingFn(song.youtubeId || song.id) ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
-        </button>
+        <DownloadButton song={song} />
         <button
           onClick={(e) => { e.stopPropagation(); onRemove(); }}
           className="p-1.5 rounded-lg text-gray-500 opacity-0 group-hover:opacity-100 hover:text-red-400 transition-all"

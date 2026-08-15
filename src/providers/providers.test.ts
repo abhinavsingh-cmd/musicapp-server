@@ -510,7 +510,8 @@ describe('provider capabilities', () => {
   it('youtubeProvider.getCharts maps trending songs to Tracks', async () => {
     mockedTrending.mockResolvedValue({
       songs: [{ ...YOUTUBE_SONG } as any],
-      source: 'youtube_music',
+      source: 'LIVE',
+      origin: 'youtube_music',
       lastUpdated: Date.now(),
     });
     const { youtubeProvider } = await import('../providers/youtubeProvider');

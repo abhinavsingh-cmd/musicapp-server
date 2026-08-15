@@ -20,6 +20,9 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 import com.getcapacitor.annotation.ActivityCallback;
 
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
 
 /**
  * Capacitor plugin wrapping Android's native DownloadManager.
@@ -29,18 +32,51 @@ import java.io.File;
  *   - cancelDownload: cancel an active download by ID
  *   - queryDownload: check download status/progress
  *   - getDownloadedFile: get the local file path after download completes
+ *
+ * A download is only reported as completed after the resulting file has been
+ * validated on disk (exists, non-empty, starts with a known audio container
+ * header). The system DownloadManager writes to a temp file and renames it
+ * atomically on completion, so callers never observe partial files — but a
+ * 0-byte or error-body response still produces a "successful" download entry
+ * that must be rejected here.
  */
 @CapacitorPlugin(name = "AndroidDownloadManager")
 public class AndroidDownloadManager extends Plugin {
 
     private static final String CHANNEL_ID = "musicapp_downloads";
+    /** Anything below this cannot plausibly be an audio file. */
+    static final long MIN_AUDIO_FILE_BYTES = 10 * 1024;
     private DownloadManager downloadManager;
     private long currentDownloadId = -1;
+    private DownloadCompleteReceiver completionReceiver;
 
     @Override
     public void load() {
         downloadManager = (DownloadManager) getContext().getSystemService(Context.DOWNLOAD_SERVICE);
         createNotificationChannel();
+        // Register exactly once for the plugin's lifetime — registering per
+        // enqueue leaked a receiver on every download.
+        completionReceiver = new DownloadCompleteReceiver();
+        IntentFilter filter = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
+        ContextCompat.registerReceiver(
+            getContext(),
+            completionReceiver,
+            filter,
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        );
+    }
+
+    @Override
+    protected void handleOnDestroy() {
+        if (completionReceiver != null) {
+            try {
+                getContext().unregisterReceiver(completionReceiver);
+            } catch (IllegalArgumentException ignored) {
+                // Already unregistered
+            }
+            completionReceiver = null;
+        }
+        super.handleOnDestroy();
     }
 
     private void createNotificationChannel() {
@@ -61,7 +97,7 @@ public class AndroidDownloadManager extends Plugin {
     /**
      * Enqueue a download via Android DownloadManager.
      *
-     * @param call: { url: string, title: string, artist: string, youtubeId: string }
+     * @param call: { url: string, title: string, artist: string, youtubeId: string, fileName?: string }
      */
     @PluginMethod
     public void enqueueDownload(PluginCall call) {
@@ -75,7 +111,12 @@ public class AndroidDownloadManager extends Plugin {
             return;
         }
 
-        String fileName = sanitizeFileName(title) + "_" + sanitizeFileName(artist) + ".mp4";
+        // Caller may supply the exact file name (provider already knows the
+        // container); otherwise derive one from title/artist.
+        String requestedName = call.getString("fileName", "");
+        String fileName = requestedName.isEmpty()
+            ? sanitizeFileName(title) + "_" + sanitizeFileName(artist) + ".mp4"
+            : sanitizeFileNameWithExtension(requestedName);
 
         DownloadManager.Request request = new DownloadManager.Request(Uri.parse(url))
             .setTitle(title)
@@ -90,17 +131,16 @@ public class AndroidDownloadManager extends Plugin {
             request.setRequiresCharging(false);
         }
 
-        long downloadId = downloadManager.enqueue(request);
+        long downloadId;
+        try {
+            downloadId = downloadManager.enqueue(request);
+        } catch (Exception e) {
+            // SecurityException (missing notification permission on some OEM
+            // builds), IllegalArgumentException (bad destination), etc.
+            call.reject("Failed to enqueue download: " + e.getMessage());
+            return;
+        }
         currentDownloadId = downloadId;
-
-        // Register receiver for completion
-        IntentFilter filter = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
-        ContextCompat.registerReceiver(
-            getContext(),
-            new DownloadCompleteReceiver(),
-            filter,
-            ContextCompat.RECEIVER_NOT_EXPORTED
-        );
 
         JSObject result = new JSObject();
         result.put("downloadId", downloadId);
@@ -144,10 +184,15 @@ public class AndroidDownloadManager extends Plugin {
             int statusIndex = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS);
             int totalSizeIndex = cursor.getColumnIndex(DownloadManager.COLUMN_TOTAL_SIZE_BYTES);
             int downloadedIndex = cursor.getColumnIndex(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR);
+            if (statusIndex < 0) {
+                cursor.close();
+                call.reject("Download status unavailable");
+                return;
+            }
 
             int status = cursor.getInt(statusIndex);
-            long totalSize = cursor.getLong(totalSizeIndex);
-            long downloaded = cursor.getLong(downloadedIndex);
+            long totalSize = totalSizeIndex >= 0 ? cursor.getLong(totalSizeIndex) : -1;
+            long downloaded = downloadedIndex >= 0 ? cursor.getLong(downloadedIndex) : 0;
 
             int percent = totalSize > 0 ? (int) ((downloaded * 100) / totalSize) : 0;
 
@@ -184,6 +229,11 @@ public class AndroidDownloadManager extends Plugin {
 
     /**
      * Get the local file path for a completed download.
+     *
+     * A path is only returned when the DownloadManager reports
+     * STATUS_SUCCESSFUL AND the file on disk passes validation (exists,
+     * larger than MIN_AUDIO_FILE_BYTES, starts with a known audio header).
+     * Otherwise the call is rejected with the concrete reason.
      */
     @PluginMethod
     public void getDownloadedFile(PluginCall call) {
@@ -198,19 +248,40 @@ public class AndroidDownloadManager extends Plugin {
 
         Cursor cursor = downloadManager.query(query);
         if (cursor != null && cursor.moveToFirst()) {
+            int statusIndex = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS);
             int localUriIndex = cursor.getColumnIndex(DownloadManager.COLUMN_LOCAL_URI);
-            String localUri = cursor.getString(localUriIndex);
+            int reasonIndex = cursor.getColumnIndex(DownloadManager.COLUMN_REASON);
+            int status = statusIndex >= 0 ? cursor.getInt(statusIndex) : -1;
+            String localUri = localUriIndex >= 0 ? cursor.getString(localUriIndex) : null;
+            int reason = reasonIndex >= 0 ? cursor.getInt(reasonIndex) : -1;
             cursor.close();
 
-            if (localUri != null) {
-                JSObject result = new JSObject();
-                result.put("path", localUri);
-                result.put("status", "completed");
-                call.resolve(result);
-            } else {
-                call.reject("File not found");
+            if (status != DownloadManager.STATUS_SUCCESSFUL) {
+                call.reject("Download did not complete successfully (status=" + status
+                    + (reason >= 0 ? ", reason=" + reason : "") + ")");
+                return;
             }
+
+            if (localUri == null) {
+                call.reject("File not found — download reports no local URI");
+                return;
+            }
+
+            // Validate the actual bytes on disk before declaring success.
+            File file = uriToFile(localUri);
+            String invalidReason = validateDownloadedFile(file);
+            if (invalidReason != null) {
+                call.reject("Downloaded file is invalid: " + invalidReason);
+                return;
+            }
+
+            JSObject result = new JSObject();
+            result.put("path", localUri);
+            result.put("size", file.length());
+            result.put("status", "completed");
+            call.resolve(result);
         } else {
+            if (cursor != null) cursor.close();
             call.reject("Download not found");
         }
     }
@@ -229,7 +300,117 @@ public class AndroidDownloadManager extends Plugin {
     }
 
     private String sanitizeFileName(String name) {
-        return name.replaceAll("[^a-zA-Z0-9._-]", "_").substring(0, Math.min(name.length(), 50));
+        if (name == null) return "track";
+        String cleaned = name.replaceAll("[^a-zA-Z0-9._-]", "_");
+        cleaned = cleaned.substring(0, Math.min(cleaned.length(), 50));
+        return cleaned.isEmpty() ? "track" : cleaned;
+    }
+
+    /**
+     * Sanitize a full file name (base + extension). The extension is kept
+     * verbatim when it looks like a media extension, otherwise it is
+     * sanitized like the base name.
+     */
+    static String sanitizeFileNameWithExtension(String fileName) {
+        if (fileName == null || fileName.isEmpty()) return "track.mp4";
+        int dot = fileName.lastIndexOf('.');
+        if (dot <= 0 || dot == fileName.length() - 1) {
+            return sanitizeStatic(fileName) + ".mp4";
+        }
+        String base = fileName.substring(0, dot);
+        String ext = fileName.substring(dot + 1).toLowerCase();
+        if (!ext.matches("[a-z0-9]{1,5}")) ext = "mp4";
+        return sanitizeStatic(base) + "." + ext;
+    }
+
+    private static String sanitizeStatic(String name) {
+        if (name == null) return "track";
+        String cleaned = name.replaceAll("[^a-zA-Z0-9._-]", "_");
+        cleaned = cleaned.substring(0, Math.min(cleaned.length(), 50));
+        return cleaned.isEmpty() ? "track" : cleaned;
+    }
+
+    /**
+     * Convert a DownloadManager local URI (file:// or content://) to a File
+     * when possible. Returns null for URIs that cannot be inspected directly.
+     */
+    static File uriToFile(String localUri) {
+        if (localUri == null) return null;
+        try {
+            Uri uri = Uri.parse(localUri);
+            if ("file".equals(uri.getScheme())) {
+                return new File(uri.getPath() == null ? "" : uri.getPath());
+            }
+            // content:// URIs from MediaStore map to Files directory paths on
+            // most devices; fall back to path-based inspection.
+            if (uri.getPath() != null) {
+                File f = new File(uri.getPath());
+                if (f.exists()) return f;
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    /**
+     * Validate a completed download file on disk.
+     *
+     * @return null when the file is a plausible audio file, otherwise a
+     *         human-readable reason describing exactly what is wrong.
+     */
+    static String validateDownloadedFile(File file) {
+        if (file == null) {
+            return "file could not be located on disk";
+        }
+        if (!file.exists()) {
+            return "file does not exist at " + file.getName();
+        }
+        long size = file.length();
+        if (size == 0) {
+            return "0 bytes — the server sent an empty response";
+        }
+        if (size < MIN_AUDIO_FILE_BYTES) {
+            return size + " bytes — too small to be a valid audio file";
+        }
+        byte[] head = new byte[16];
+        int read;
+        try (InputStream in = new FileInputStream(file)) {
+            read = in.read(head);
+        } catch (IOException e) {
+            return "could not read file header: " + e.getMessage();
+        }
+        if (read < 2) {
+            return "could not read file header";
+        }
+        if (!looksLikeAudio(head, read)) {
+            return "header bytes are not a known audio container (possibly an HTML/JSON error page)";
+        }
+        return null;
+    }
+
+    /**
+     * Sniff the leading bytes of a payload for known audio container headers.
+     * Mirrors the client-side sniffAudioBytes() so both layers reject the
+     * same garbage.
+     */
+    static boolean looksLikeAudio(byte[] head, int length) {
+        if (head == null || length <= 0) return false;
+        // ID3v2 tag ('ID3')
+        if (length >= 3 && head[0] == 0x49 && head[1] == 0x44 && head[2] == 0x33) return true;
+        // MPEG frame sync / ADTS
+        if (length >= 2 && (head[0] & 0xFF) == 0xFF && ((head[1] & 0xFF) & 0xE0) == 0xE0) return true;
+        // MP4/M4A ('....ftyp')
+        if (length >= 8 && head[4] == 0x66 && head[5] == 0x74 && head[6] == 0x79 && head[7] == 0x70) return true;
+        // WebM/Matroska (EBML)
+        if (length >= 4 && (head[0] & 0xFF) == 0x1A && (head[1] & 0xFF) == 0x45 && (head[2] & 0xFF) == 0xDF && (head[3] & 0xFF) == 0xA3) return true;
+        // Ogg ('OggS')
+        if (length >= 4 && head[0] == 0x4F && head[1] == 0x67 && head[2] == 0x67 && head[3] == 0x53) return true;
+        // FLAC ('fLaC')
+        if (length >= 4 && head[0] == 0x66 && head[1] == 0x4C && head[2] == 0x61 && head[3] == 0x43) return true;
+        // RIFF/WAVE
+        if (length >= 12 && head[0] == 0x52 && head[1] == 0x49 && head[2] == 0x46 && head[3] == 0x46
+            && head[8] == 0x57 && head[9] == 0x41 && head[10] == 0x56 && head[11] == 0x45) return true;
+        return false;
     }
 
     /**

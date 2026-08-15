@@ -2,14 +2,15 @@ import React, { useState, useEffect, useRef, useCallback, useMemo, memo } from '
 import { useNavigate } from 'react-router-dom';
 import { useGoBack } from '../hooks/useGoBack';
 import {
-  Search, X, Play, Music, Globe, Loader2, Download, Check,
+  Search, X, Play, Music, Globe, Loader2,
   SlidersHorizontal, Clock, ArrowDownAZ, TrendingUp, Sparkles,
   AlertCircle, SearchX, ArrowLeft,
 } from 'lucide-react';
 import { SongTable } from '../features/library/SongTable';
+import { DownloadButton } from '../components/DownloadButton';
+import { ErrorBoundary } from '../components/ErrorBoundary';
 import { Song } from '../types/music';
 import { useAudioStore } from '../stores/audioStore';
-import { useDownloadsStore } from '../stores/downloadsStore';
 import { useDebounce } from '../hooks/useDebounce';
 import {
   useSearchStore,
@@ -81,7 +82,9 @@ export const SearchPage: React.FC = memo(() => {
   const [query, setQuery] = useState('');
   const [showFilters, setShowFilters] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(false);
-  const debouncedQuery = useDebounce(query, 100);
+  // 300ms debounce: fast enough to feel instant, slow enough that typing
+  // "arijit" doesn't fire a network search for every prefix (a/ar/ari/...).
+  const debouncedQuery = useDebounce(query, 300);
 
   // Delayed focus to let layout stabilize first (avoids Android keyboard shift)
   useEffect(() => {
@@ -126,9 +129,6 @@ export const SearchPage: React.FC = memo(() => {
   const uniqueGenres = useMemo(() => selectUniqueGenres({ libraryResults } as any), [libraryResults]);
 
   const loadSong = useAudioStore((s) => s.loadSong);
-  const downloadSong = useDownloadsStore((s) => s.downloadSong);
-  const isDownloadedFn = useDownloadsStore((s) => s.isDownloaded);
-  const isDownloadingFn = useDownloadsStore((s) => s.isDownloading);
 
   useEffect(() => {
     search(debouncedQuery);
@@ -171,22 +171,6 @@ export const SearchPage: React.FC = memo(() => {
     loadSong(songs[safeIdx], songs, safeIdx);
   }, [loadSong, ytResults]);
 
-  const handleDownloadYT = useCallback((r: YTSong) => {
-    if (!r || !r.id) return;
-    downloadSong({
-      id: 'yt-' + r.id,
-      youtubeId: r.id,
-      title: safeStr(r.title, 'Unknown'),
-      artist: safeStr(r.artist, 'Unknown'),
-      genre: 'YouTube',
-      duration: safeNum(r.duration),
-      coverArt: safeStr(r.thumbnail),
-      album: safeStr(r.album),
-      audioUrl: '',
-      releaseYear: 0,
-    });
-  }, [downloadSong]);
-
   const handleSuggestionClick = useCallback((song: Song) => {
     if (!song || !song.title) return;
     setQuery(song.title);
@@ -195,7 +179,13 @@ export const SearchPage: React.FC = memo(() => {
 
   const hasResults = filteredLibrary.length > 0 || ytResults.length > 0;
   const isIdle = !query && status === 'idle';
-  const isNoResults = query && status !== 'loading' && ytStatus !== 'loading' && !hasResults;
+  // Never show "no results" when a backend actually FAILED — that's a
+  // different state with its own banner/retry, not an empty result set.
+  const isNoResults =
+    query &&
+    status !== 'loading' && ytStatus !== 'loading' &&
+    status !== 'error' && ytStatus !== 'error' && status !== 'offline' &&
+    !hasResults;
 
   return (
     <div className="p-4 sm:p-6 space-y-5">
@@ -373,6 +363,18 @@ export const SearchPage: React.FC = memo(() => {
         </div>
       )}
 
+      {/* YouTube-only failure: library results stay visible; the dead YouTube
+          backend is surfaced explicitly instead of masquerading as "no results". */}
+      {query && ytStatus === 'error' && error && status !== 'error' && status !== 'offline' && (
+        <div className="flex items-center gap-3 text-red-400 py-3 px-4 rounded-xl bg-red-500/10 border border-red-500/20">
+          <AlertCircle size={18} />
+          <span className="text-sm">YouTube search failed — {error}</span>
+          <button onClick={() => search(query)} className="ml-auto text-xs text-red-300 hover:text-white underline">
+            Retry
+          </button>
+        </div>
+      )}
+
       {status === 'loading' && (
         <div className="flex items-center gap-3 text-gray-400 py-8">
           <Loader2 size={20} className="animate-spin text-violet-400" />
@@ -381,6 +383,7 @@ export const SearchPage: React.FC = memo(() => {
       )}
 
       {status !== 'loading' && filteredLibrary.length > 0 && (
+        <ErrorBoundary level="section" onReset={() => search(query)}>
         <div>
           <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3 flex items-center gap-2">
             <Music size={14} />Your Library ({filteredLibrary.length})
@@ -429,9 +432,11 @@ export const SearchPage: React.FC = memo(() => {
             </div>
           )}
         </div>
+        </ErrorBoundary>
       )}
 
       {(ytStatus === 'loading' || ytResults.length > 0) && query && (
+        <ErrorBoundary level="section" onReset={() => search(query)}>
         <div>
           <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3 flex items-center gap-2">
             <Globe size={14} className="text-red-400" />YouTube {ytResults.length > 0 ? `(${ytResults.length})` : ''}
@@ -473,21 +478,12 @@ export const SearchPage: React.FC = memo(() => {
                     {r.album && <div className="text-[10px] text-gray-500 truncate">{safeStr(r.album)}</div>}
                     {r.viewCount > 0 && <div className="text-[10px] text-gray-500">{fmtViews(r.viewCount)} views</div>}
                   </div>
-                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <div className="flex items-center gap-1">
                     <button onClick={(e) => { e.stopPropagation(); handlePlayYT(r); }} className="p-2 rounded-lg bg-violet-500/20 text-violet-400 hover:bg-violet-500/30 transition-colors">
                       <Play size={14} fill="currentColor" />
                     </button>
-                    <button
-                      onClick={(e) => { e.stopPropagation(); handleDownloadYT(r); }}
-                      className={cn(
-                        "p-2 rounded-lg transition-colors",
-                        isDownloadedFn(r.id) ? "bg-emerald-500/20 text-emerald-400"
-                          : isDownloadingFn(r.id) ? "bg-violet-500/20 text-violet-400"
-                          : "bg-white/5 text-gray-400 hover:bg-white/10 hover:text-white",
-                      )}
-                    >
-                      {isDownloadedFn(r.id) ? <Check size={14} /> : isDownloadingFn(r.id) ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
-                    </button>
+                    {/* Shared download action — always visible, never hover-gated */}
+                    <DownloadButton song={ytSong} className="p-2 rounded-lg bg-white/5" />
                   </div>
                 </div>
                 );
@@ -502,6 +498,7 @@ export const SearchPage: React.FC = memo(() => {
             </div>
           )}
         </div>
+        </ErrorBoundary>
       )}
 
       {isNoResults && (

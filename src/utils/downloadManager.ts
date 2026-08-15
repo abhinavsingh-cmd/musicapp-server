@@ -17,6 +17,7 @@
 import { toTrack } from '../providers/adapters';
 import { resolveDownloadDescriptor } from '../providers/resolve';
 import type { Track } from '../providers/types';
+import { logger } from './logger';
 
 const DB_NAME = 'music-app-offline';
 const DB_VERSION = 2;
@@ -166,6 +167,25 @@ export type DownloadProgress = {
 
 export type DownloadState = 'idle' | 'downloading' | 'paused' | 'completed' | 'failed' | 'cancelled';
 
+/**
+ * A download failure is *transient* when a retry has a realistic chance of
+ * succeeding (network blip, connection drop mid-stream, truncated transfer,
+ * rate limit, upstream 5xx). Deterministic failures (403 expired link, 404,
+ * non-audio payload) are NOT transient — retrying them just burns quota.
+ *
+ * `downloadSongWithProgress` tags thrown errors with this flag so the store
+ * can decide whether to auto-retry without re-parsing message strings.
+ */
+export function isTransientDownloadError(err: unknown): boolean {
+  return !!(err && typeof err === 'object' && (err as { transient?: boolean }).transient === true);
+}
+
+function downloadFailure(message: string, opts?: { transient?: boolean; cause?: unknown }): Error {
+  const err = new Error(message, opts?.cause !== undefined ? { cause: opts.cause } : undefined);
+  (err as { transient?: boolean }).transient = opts?.transient ?? false;
+  return err;
+}
+
 // ---------------------------------------------------------------------------
 // Pause / Resume controller
 // ---------------------------------------------------------------------------
@@ -173,36 +193,46 @@ export type DownloadState = 'idle' | 'downloading' | 'paused' | 'completed' | 'f
 interface DownloadController {
   abortController: AbortController;
   paused: boolean;
-  pausePromise: { resolve: () => void } | null;
+  pauseGate: { promise: Promise<void>; resolve: () => void } | null;
 }
 
 const activeControllers = new Map<string, DownloadController>();
 
-export function pauseDownload(youtubeId: string): void {
-  const ctrl = activeControllers.get(youtubeId);
-  if (ctrl && !ctrl.paused) {
-    ctrl.paused = true;
-    ctrl.pausePromise = { resolve: () => {} };
+function getOrCreateController(key: string): DownloadController {
+  let ctrl = activeControllers.get(key);
+  if (!ctrl) {
+    ctrl = { abortController: new AbortController(), paused: false, pauseGate: null };
+    activeControllers.set(key, ctrl);
   }
+  return ctrl;
+}
+
+export function pauseDownload(youtubeId: string): void {
+  const ctrl = getOrCreateController(youtubeId);
+  if (ctrl.paused) return;
+  ctrl.paused = true;
+  let resolveFn!: () => void;
+  const promise = new Promise<void>((resolve) => { resolveFn = resolve; });
+  ctrl.pauseGate = { promise, resolve: resolveFn };
 }
 
 export function resumeDownload(youtubeId: string): void {
   const ctrl = activeControllers.get(youtubeId);
-  if (ctrl?.paused && ctrl.pausePromise) {
-    ctrl.paused = false;
-    ctrl.pausePromise.resolve();
-    ctrl.pausePromise = null;
-  }
+  if (!ctrl || !ctrl.paused) return;
+  ctrl.paused = false;
+  // Release the gate if the read loop is already waiting on it. If the loop
+  // has not reached the pause check yet, the cleared `paused` flag alone is
+  // enough — it will never block.
+  ctrl.pauseGate?.resolve();
+  ctrl.pauseGate = null;
 }
 
 export function cancelDownloadById(youtubeId: string): void {
   const ctrl = activeControllers.get(youtubeId);
   if (ctrl) {
     ctrl.abortController.abort();
-    if (ctrl.pausePromise) {
-      ctrl.pausePromise.resolve();
-      ctrl.pausePromise = null;
-    }
+    ctrl.pauseGate?.resolve();
+    ctrl.pauseGate = null;
     activeControllers.delete(youtubeId);
   }
 }
@@ -243,7 +273,8 @@ export function sniffAudioBytes(head: Uint8Array): boolean {
   return false;
 }
 
-async function verifyAudioBlob(blob: Blob): Promise<boolean> {
+async function verifyAudioBlob(blob: unknown): Promise<boolean> {
+  if (!(blob instanceof Blob)) return false;
   if (blob.size < MIN_AUDIO_SIZE) return false;
   const type = blob.type.toLowerCase();
   // Accept common audio types or octet-stream (some servers don't set content-type)
@@ -292,51 +323,86 @@ export async function downloadSongWithProgress(
   const descriptor = await resolveDownloadDescriptor(track);
   const downloadUrl = descriptor?.url || '';
 
-  console.log('[Download] Starting:', { title: track.title, provider: track.provider, externalId: track.externalId || 'NONE', url: downloadUrl.substring(0, 120) });
+  logger.debug('[Download] Starting:', { title: track.title, provider: track.provider, externalId: track.externalId || 'NONE', url: downloadUrl.substring(0, 120) });
 
   if (!downloadUrl) {
-    throw new Error('No download URL available for this song');
+    throw downloadFailure('No download URL available for this song');
   }
 
   if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 
   let res: Response;
   try {
+    // fetch() follows redirects automatically; whatever the final hop serves
+    // still passes every validation below (status, content-type, magic bytes).
     res = await fetch(downloadUrl, {
       signal,
+      redirect: 'follow',
       headers: { 'Accept': 'audio/*' },
     });
   } catch (fetchErr: any) {
-    console.error('[Download] fetch() failed:', fetchErr?.message || fetchErr);
-    throw new Error(`Network error: ${fetchErr?.message || fetchErr}`, { cause: fetchErr });
+    if (fetchErr?.name === 'AbortError' || signal?.aborted) throw fetchErr;
+    logger.error('[Download] fetch() failed:', fetchErr?.message || fetchErr);
+    throw downloadFailure(`Network error: ${fetchErr?.message || fetchErr}`, { transient: true, cause: fetchErr });
   }
 
-  console.log('[Download] Response:', { status: res.status, type: res.headers.get('content-type'), len: res.headers.get('content-length'), body: !!res.body });
+  if (res.redirected) {
+    logger.debug('[Download] Followed redirect to:', res.url?.substring(0, 120));
+  }
+
+  logger.debug('[Download] Response:', { status: res.status, type: res.headers.get('content-type'), len: res.headers.get('content-length'), body: !!res.body });
 
   if (!res.ok) {
     let detail = '';
     try { detail = (await res.clone().json())?.message || ''; } catch {}
-    throw new Error(`Download failed: ${res.status}${detail ? ' — ' + detail : ''}`);
+    // Map common statuses to human-readable causes so the Downloads UI shows
+    // the real reason instead of a bare status code.
+    let reason: string;
+    switch (res.status) {
+      case 403:
+        reason = 'Access denied — the stream link is expired or blocked';
+        break;
+      case 404:
+        reason = 'The audio source was not found';
+        break;
+      case 429:
+        reason = 'Server is rate-limiting downloads — try again in a minute';
+        break;
+      default:
+        reason = res.status >= 500
+          ? 'The download server hit an error'
+          : 'Download failed';
+    }
+    throw downloadFailure(`${reason} (HTTP ${res.status})${detail ? ' — ' + detail : ''}`, {
+      // 429 (rate limit) and 5xx (server-side) are worth an automatic retry;
+      // 4xx client errors (expired link, not found) are deterministic.
+      transient: res.status === 429 || res.status >= 500,
+    });
   }
 
   const contentType = res.headers.get('content-type')?.split(';', 1)[0]?.toLowerCase() || '';
 
+  // Never save an error page as an audio file: HTML and JSON bodies are
+  // rejected up front, regardless of what the body bytes look like.
   if (contentType && !contentType.startsWith('audio/') && contentType !== 'application/octet-stream') {
     if (contentType.startsWith('application/json')) {
       let msg: string;
       try { msg = (await res.clone().json())?.message || 'Server returned an error'; } catch { msg = 'Server returned an error'; }
-      throw new Error(msg);
+      throw downloadFailure(msg);
+    }
+    if (contentType.startsWith('text/html')) {
+      throw new Error('Server returned an HTML error page instead of audio — the stream link may have expired, try again');
     }
     throw new Error(`Unexpected response type: ${contentType}`);
   }
 
   const contentLength = Number(res.headers.get('content-length')) || 0;
   if (contentLength === 0 && !res.body) {
-    throw new Error('Server returned an empty response — the stream link may have expired, try again');
+    throw downloadFailure('Server returned an empty response — the stream link may have expired, try again', { transient: true });
   }
 
   const reader = res.body?.getReader();
-  if (!reader) throw new Error('No response body');
+  if (!reader) throw downloadFailure('No response body', { transient: true });
 
   const chunks: Uint8Array[] = [];
   let received = 0;
@@ -345,43 +411,53 @@ export async function downloadSongWithProgress(
     while (true) {
       if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 
-      // Check pause state
+      // Check pause state — block until resumed (or cancelled, which aborts).
       const ctrl = activeControllers.get(track.externalId || track.id);
-      if (ctrl?.paused && ctrl.pausePromise) {
-        await new Promise<void>((resolve) => {
-          ctrl.pausePromise = { resolve };
-        });
+      if (ctrl?.paused && ctrl.pauseGate) {
+        await ctrl.pauseGate.promise;
+        if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
       }
 
       const { done, value } = await reader.read();
       if (done) break;
       chunks.push(value);
       received += value.length;
+      // Over-delivery: the connection produced more bytes than the declared
+      // Content-Length. That is just as corrupt as a truncated transfer —
+      // never assemble a blob whose true size contradicts the headers.
+      if (contentLength > 0 && received > contentLength) {
+        try { reader.cancel(); } catch {}
+        throw downloadFailure(`Corrupted download: received ${received} bytes but server declared ${contentLength}`, { transient: true });
+      }
       onProgress?.({ loaded: received, total: contentLength || received, percent: contentLength ? Math.round((received / contentLength) * 100) : 0 });
     }
   } catch (err: any) {
     if (err?.name === 'AbortError' || signal?.aborted) throw err;
-    console.error('[Download] Stream interrupted:', err?.message || err);
-    throw new Error(`Connection lost during download${err?.message ? ': ' + err.message : ''}`, { cause: err });
+    if (isTransientDownloadError(err)) throw err;
+    logger.error('[Download] Stream interrupted:', err?.message || err);
+    throw downloadFailure(`Connection lost during download${err?.message ? ': ' + err.message : ''}`, { transient: true, cause: err });
   }
 
   // Partial transfer: the server declared more bytes than the connection
   // actually delivered. Never persist a truncated file as a valid download.
   if (contentLength > 0 && received < contentLength) {
-    throw new Error(`Incomplete download: received ${received} of ${contentLength} bytes`);
+    throw downloadFailure(`Incomplete download: received ${received} of ${contentLength} bytes`, { transient: true });
   }
 
   if (received < MIN_AUDIO_SIZE) {
-    throw new Error(`Downloaded file is too small: ${received} bytes (minimum ${MIN_AUDIO_SIZE}) — the stream link may have expired, try again`);
+    throw downloadFailure(`Downloaded file is too small: ${received} bytes (minimum ${MIN_AUDIO_SIZE}) — the stream link may have expired, try again`, { transient: true });
   }
 
   const blobType = contentType || 'audio/mpeg';
   const blob = new Blob(chunks, { type: blobType });
 
-  console.log('[Download] Complete:', { received, blobSize: blob.size, type: blobType });
+  logger.debug('[Download] Complete:', { received, blobSize: blob.size, type: blobType });
 
   if (!(await verifyAudioBlob(blob))) {
-    throw new Error(`Downloaded file is invalid: ${blob.size} bytes, type: ${blob.type || 'unknown'} — the response did not contain valid audio data`);
+    // Not retryable: the server completed the transfer but the payload is
+    // not audio (error page, empty file, wrong content). Retrying the same
+    // URL would return the same bytes.
+    throw downloadFailure(`Downloaded file is invalid: ${blob.size} bytes, type: ${blob.type || 'unknown'} — the response did not contain valid audio data`);
   }
 
   // Persist to IndexedDB
@@ -406,9 +482,9 @@ export async function downloadSongWithProgress(
     // IndexedDB throws DOMException with name "QuotaExceededError" when storage
     // is full.  Surface a clear message instead of a generic failure.
     if (err?.name === 'QuotaExceededError' || err?.message?.includes('quota')) {
-      throw new Error('Storage full — free up space and try again', { cause: err });
+      throw downloadFailure('Storage full — free up space and try again', { cause: err });
     }
-    throw new Error(`Failed to save to local storage: ${err?.message || err}`, { cause: err });
+    throw downloadFailure(`Failed to save to local storage: ${err?.message || err}`, { transient: true, cause: err });
   }
   db.close();
 
@@ -537,14 +613,16 @@ export async function repairDownloads(): Promise<number> {
   const all = await txGetAll<DownloadedSong>(db, STORE_SONGS);
   let removed = 0;
   for (const entry of all) {
-    if (!isValidBlob(entry.audioBlob)) {
+    // Full verification (size + mime + magic bytes) removes phantom entries
+    // left behind by older builds that could persist 0-byte "audio/mpeg" blobs.
+    if (!(await verifyAudioBlob(entry.audioBlob))) {
       await txDelete(db, STORE_SONGS, entry.id);
       removed++;
     }
   }
   db.close();
   if (removed > 0) {
-    console.warn(`[Downloads] Repaired: removed ${removed} corrupted/empty download entries`);
+    logger.warn(`[Downloads] Repaired: removed ${removed} corrupted/empty download entries`);
   }
   return removed;
 }
@@ -554,6 +632,11 @@ export async function repairDownloads(): Promise<number> {
 // ---------------------------------------------------------------------------
 
 export async function saveDownload(song: Omit<DownloadedSong, 'audioUrl' | 'downloadedAt' | 'size'>): Promise<DownloadedSong> {
+  // Never persist an invalid blob — a download record is only meaningful when
+  // its audio data is actually playable.
+  if (!(await verifyAudioBlob(song.audioBlob))) {
+    throw new Error(`Cannot save invalid audio blob: ${song.audioBlob?.size ?? 0} bytes, type: ${song.audioBlob?.type || 'unknown'}`);
+  }
   const db = await openDB();
   const entry: DownloadedSong = {
     ...song,

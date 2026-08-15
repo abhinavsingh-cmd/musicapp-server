@@ -9,6 +9,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Disc3, TrendingUp, Play, Music, Sparkles, Radio, Zap, Globe, RefreshCw } from 'lucide-react';
 import { performanceMonitor } from '../utils/performanceMonitor';
 import { renderMonitor } from '../utils/renderMonitor';
+import { logger } from '../utils/logger';
 
 const INITIAL_DEFER_MS = 1500;
 
@@ -157,12 +158,12 @@ export const HomePage: React.FC = memo(() => {
       if (cancelled) return;
       timeoutId = setTimeout(() => {
         if (cancelled) return;
-        console.log('[HomePage] Fetching trending after deferred load...');
+        logger.debug('[HomePage] Fetching trending after deferred load...');
         setTrendingLoading(true);
         fetchYouTubeTrending()
           .then(result => {
             if (cancelled) return;
-            console.log(`[HomePage] Trending loaded: ${result.songs.length} songs, source=${result.source}`);
+            logger.debug(`[HomePage] Trending loaded: ${result.songs.length} songs, source=${result.source}`);
             setTrending(result.songs);
             setTrendingSource(result.source);
             setTrendingLastUpdated(result.lastUpdated);
@@ -170,7 +171,7 @@ export const HomePage: React.FC = memo(() => {
           })
           .catch(() => {
             // On failure, keep previous data visible — just stop loading
-            console.warn('[HomePage] Trending fetch failed, keeping previous data');
+            logger.warn('[HomePage] Trending fetch failed, keeping previous data');
             if (!cancelled) setTrendingLoading(false);
           });
       }, INITIAL_DEFER_MS);
@@ -284,11 +285,10 @@ export const HomePage: React.FC = memo(() => {
               {trendingLastUpdated && !trendingLoading && (
                 <span className="text-xs text-gray-500 flex items-center gap-1">
                   <Globe size={12} className="text-red-400" />
-                   {trendingSource === 'youtube_music' ? 'Live from YouTube' :
-                   trendingSource === 'charts' ? 'Charts + Live' :
-                   trendingSource === 'cache' ? 'Cached' :
-                   trendingSource === 'local_library' ? 'From Library' :
-                   trendingSource === 'builtin' ? 'Offline' : 'Loading'}
+                   {trendingSource === 'LIVE' ? 'Live from YouTube' :
+                   trendingSource === 'CACHED' ? 'Cached' :
+                   trendingSource === 'LIBRARY' ? 'From Library' :
+                   trendingSource === 'BUILT_IN' ? 'Offline' : 'Loading'}
                   {' · '}
                   {(() => {
                     const diff = Date.now() - trendingLastUpdated;

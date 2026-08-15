@@ -2,7 +2,6 @@ import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { AudioEffectsService } from './audioEffectsService';
 
 const mockGainFn = () => ({
-  value: 1,
   setValueAtTime: vi.fn(),
   setTargetAtTime: vi.fn(),
 });
@@ -216,15 +215,15 @@ describe('AudioEffectsService', () => {
 
   // ── Band controls ──
   describe('band controls', () => {
-    it('setBand clamps to [-30, 30] and sets Custom preset', async () => {
+    it('setBand clamps to [-12, 12] and sets Custom preset', async () => {
       const el = document.createElement('audio');
       await svc.init(el);
       svc.setBand(0, 50);
-      expect(svc.gains[0]).toBe(30);
+      expect(svc.gains[0]).toBe(12);
       expect(svc.preset).toBe('Custom');
 
       svc.setBand(0, -50);
-      expect(svc.gains[0]).toBe(-30);
+      expect(svc.gains[0]).toBe(-12);
     });
 
     it('setBand ignores out-of-range index', async () => {
@@ -245,15 +244,18 @@ describe('AudioEffectsService', () => {
 
   // ── toggle ──
   describe('toggle()', () => {
-    it('first toggle enables (false→true), second disables and resets to Flat', async () => {
+    it('disable/enable round trip preserves preset and gains', async () => {
       const el = document.createElement('audio');
       await svc.init(el);
       svc.setPreset('Rock');
-      svc.toggle();
+      svc.toggle(); // enable
       expect(svc.enabled).toBe(true);
-      svc.toggle();
+      svc.toggle(); // disable
       expect(svc.enabled).toBe(false);
-      expect(svc.preset).toBe('Flat');
+      // Settings SURVIVE — disabling only forces the chain to unity values,
+      // and the stored preset label must never lie about the stored gains.
+      expect(svc.preset).toBe('Rock');
+      expect(svc.gains).toEqual([5, 4, 3, 2, 0, -1, 0, 2, 4, 5]);
     });
 
     it('toggle without context does not throw', () => {
@@ -265,15 +267,18 @@ describe('AudioEffectsService', () => {
 
   // ── fullDisconnect / destroy ──
   describe('destroy()', () => {
-    it('resets all state after init', async () => {
+    it('tears down the graph but preserves the user settings', async () => {
       const el = document.createElement('audio');
       await svc.init(el);
       svc.setPreset('Rock');
       svc.toggle();
       svc.destroy();
       expect(svc.isReady).toBe(false);
-      expect(svc.enabled).toBe(false);
-      expect(svc.preset).toBe('Flat');
+      // Settings survive teardown so a later init() re-applies them —
+      // destroy must never silently disable the EQ.
+      expect(svc.enabled).toBe(true);
+      expect(svc.preset).toBe('Rock');
+      expect(svc.gains).toEqual([5, 4, 3, 2, 0, -1, 0, 2, 4, 5]);
     });
 
     it('is safe to call multiple times', async () => {
@@ -437,7 +442,8 @@ describe('AudioEffectsService', () => {
       const merger = latestCtx.createChannelMerger.mock.results[0].value;
       const source = latestCtx.createMediaElementSource.mock.results[0].value;
 
-      // 10 EQ filters + bassFilter + trebleFilter + midGain + sideGain + sideInvert + outL + outR + loudnessGain + masterGain = 20 biquad/gain nodes
+      // 10 EQ filters + bassFilter + trebleFilter + midGain + sideGain +
+      // sideInvert + sideNegate + outL + outR + loudnessGain + masterGain
       expect(filters.length).toBe(12); // 10 EQ + bass + treble
 
       // Verify source connects to first filter
@@ -458,9 +464,10 @@ describe('AudioEffectsService', () => {
       expect(filters[11].connect).toHaveBeenCalledWith(splitter);
 
       // Verify splitter → midGain, sideInvert, sideGain
-      const sideInvert = gains[2]; // third gain node is sideInvert
       const midGain = gains[0];
       const sideGain = gains[1];
+      const sideInvert = gains[2];
+      const sideNegate = gains[3];
       expect(splitter.connect).toHaveBeenCalledWith(midGain, 0);
       expect(splitter.connect).toHaveBeenCalledWith(midGain, 1);
       expect(splitter.connect).toHaveBeenCalledWith(sideInvert, 0);
@@ -469,12 +476,15 @@ describe('AudioEffectsService', () => {
       // Verify sideInvert → sideGain
       expect(sideInvert.connect).toHaveBeenCalledWith(sideGain);
 
-      // Verify midGain → outL, outR; sideGain → outL, outR
-      const outL = gains[3];
-      const outR = gains[4];
+      // M/S decode: outL = M − g·(R−L), outR = M + g·(R−L). The side path
+      // reaches outR directly and outL ONLY through the sign inverter —
+      // same-sign into both outputs would collapse the image to mono.
+      const outL = gains[4];
+      const outR = gains[5];
       expect(midGain.connect).toHaveBeenCalledWith(outL);
       expect(midGain.connect).toHaveBeenCalledWith(outR);
-      expect(sideGain.connect).toHaveBeenCalledWith(outL);
+      expect(sideGain.connect).toHaveBeenCalledWith(sideNegate);
+      expect(sideNegate.connect).toHaveBeenCalledWith(outL);
       expect(sideGain.connect).toHaveBeenCalledWith(outR);
 
       // Verify outL → merger (port 0), outR → merger (port 1)
@@ -485,8 +495,8 @@ describe('AudioEffectsService', () => {
       expect(merger.connect).toHaveBeenCalledWith(compressor);
 
       // Verify compressor → loudnessGain → masterGain → destination
-      const loudnessGain = gains[5];
-      const masterGain = gains[6];
+      const loudnessGain = gains[6];
+      const masterGain = gains[7];
       expect(compressor.connect).toHaveBeenCalledWith(loudnessGain);
       expect(loudnessGain.connect).toHaveBeenCalledWith(masterGain);
       expect(masterGain.connect).toHaveBeenCalledWith(latestCtx.destination);
@@ -561,7 +571,7 @@ describe('AudioEffectsService', () => {
       svc.setLoudnessMode(true);
 
       const gains = latestCtx.createGain.mock.results.map((r: any) => r.value);
-      const loudnessGain = gains[5];
+      const loudnessGain = gains[6];
       // setLoudnessMode uses setTargetAtTime
       expect(loudnessGain.gain.setTargetAtTime).toHaveBeenCalledWith(1.12, expect.any(Number), expect.any(Number));
     });
@@ -577,6 +587,198 @@ describe('AudioEffectsService', () => {
       // And source created twice
       expect(latestCtx.createMediaElementSource).toHaveBeenCalledTimes(2);
       expect(svc.isReady).toBe(true);
+    });
+  });
+
+  // ═════════════════════════════════════════════════════════════════════
+  // Single audio path — audio passes through the EQ chain EXACTLY once
+  // ═════════════════════════════════════════════════════════════════════
+
+  describe('single audio path', () => {
+    it('exactly one route to destination — master connects once, source feeds only the first filter', async () => {
+      const el = document.createElement('audio');
+      await svc.init(el);
+      const masterGain = latestCtx.createGain.mock.results[7].value;
+      expect(masterGain.connect).toHaveBeenCalledTimes(1);
+      expect(masterGain.connect).toHaveBeenCalledWith(latestCtx.destination);
+      const source = latestCtx.createMediaElementSource.mock.results[0].value;
+      expect(source.connect).toHaveBeenCalledTimes(1);
+      expect(latestCtx.createMediaElementSource).toHaveBeenCalledTimes(1);
+    });
+
+    it('repeated init with the SAME element never creates a second source or chain', async () => {
+      const el = document.createElement('audio');
+      await svc.init(el);
+      await svc.init(el);
+      await svc.init(el);
+      expect(latestCtx.createMediaElementSource).toHaveBeenCalledTimes(1);
+      expect(latestCtx.createBiquadFilter).toHaveBeenCalledTimes(12); // one chain only
+      const masterGain = latestCtx.createGain.mock.results[7].value;
+      expect(masterGain.connect).toHaveBeenCalledTimes(1); // one route to destination
+    });
+
+    it('rebuild for a NEW element fully disconnects the old path — no duplicate route', async () => {
+      const el1 = document.createElement('audio');
+      const el2 = document.createElement('audio');
+      await svc.init(el1);
+      const firstMaster = latestCtx.createGain.mock.results[7].value;
+      const firstFilters = latestCtx.createBiquadFilter.mock.results
+        .slice(0, 12).map((r: any) => r.value);
+
+      await svc.init(el2);
+
+      // Every node of the FIRST chain was disconnected...
+      expect(firstMaster.disconnect).toHaveBeenCalled();
+      for (const f of firstFilters) expect(f.disconnect).toHaveBeenCalled();
+      // ...and the NEW chain owns the single route to destination.
+      const secondMaster = latestCtx.createGain.mock.results[15].value;
+      expect(secondMaster.connect).toHaveBeenCalledTimes(1);
+      expect(secondMaster.connect).toHaveBeenCalledWith(latestCtx.destination);
+      expect(latestCtx.createMediaElementSource).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  // ═════════════════════════════════════════════════════════════════════
+  // Band definitions, per-band gain application, presets
+  // ═════════════════════════════════════════════════════════════════════
+
+  describe('band definitions and gain application', () => {
+    const lastSetValue = (param: any): unknown =>
+      param.setValueAtTime.mock.calls.at(-1)?.[0];
+
+    const EXPECTED: Array<[number, BiquadFilterType, number]> = [
+      [32, 'lowshelf', 1.0], [64, 'peaking', 1.4], [100, 'peaking', 1.4],
+      [200, 'peaking', 1.4], [400, 'peaking', 1.4], [800, 'peaking', 1.4],
+      [1600, 'peaking', 1.4], [3200, 'peaking', 1.4], [6400, 'peaking', 1.4],
+      [12800, 'highshelf', 1.0],
+    ];
+
+    it('every band filter is created with the correct frequency, type and Q', async () => {
+      const el = document.createElement('audio');
+      await svc.init(el);
+      const filters = latestCtx.createBiquadFilter.mock.results.map((r: any) => r.value);
+      EXPECTED.forEach(([freq, type, q], i) => {
+        expect(filters[i].frequency.value).toBe(freq);
+        expect(filters[i].type).toBe(type);
+        expect(filters[i].Q.value).toBe(q);
+      });
+      // Bass-boost lowshelf at 100 Hz, treble highshelf at 8 kHz.
+      expect(filters[10].type).toBe('lowshelf');
+      expect(filters[10].frequency.value).toBe(100);
+      expect(filters[11].type).toBe('highshelf');
+      expect(filters[11].frequency.value).toBe(8000);
+    });
+
+    it('each of the 10 bands receives its own gain when enabled', async () => {
+      const el = document.createElement('audio');
+      await svc.init(el);
+      svc.toggle(); // enable
+      const filters = latestCtx.createBiquadFilter.mock.results.map((r: any) => r.value);
+      for (let i = 0; i < 10; i++) {
+        svc.setBand(i, (i % 5) + 1);
+      }
+      for (let i = 0; i < 10; i++) {
+        expect(lastSetValue(filters[i].gain)).toBe((i % 5) + 1);
+      }
+    });
+
+    it('every preset applies its bands, bass and treble to the chain', async () => {
+      const el = document.createElement('audio');
+      await svc.init(el);
+      svc.toggle(); // enable
+      const filters = latestCtx.createBiquadFilter.mock.results.map((r: any) => r.value);
+      for (const preset of AudioEffectsService.PRESETS) {
+        svc.setPreset(preset.name);
+        for (let i = 0; i < 10; i++) {
+          expect(lastSetValue(filters[i].gain)).toBe(preset.bands[i]);
+        }
+        expect(lastSetValue(filters[10].gain)).toBe(preset.bassBoost);
+        expect(lastSetValue(filters[11].gain)).toBe(preset.treble);
+      }
+    });
+
+    it('preset bands stay within the audible-but-safe ±5 dB range', () => {
+      for (const preset of AudioEffectsService.PRESETS) {
+        for (const g of preset.bands) {
+          expect(Math.abs(g)).toBeLessThanOrEqual(5);
+        }
+        expect(Math.abs(preset.bassBoost)).toBeLessThanOrEqual(8);
+        expect(Math.abs(preset.treble)).toBeLessThanOrEqual(8);
+      }
+    });
+  });
+
+  // ═════════════════════════════════════════════════════════════════════
+  // Bypass transparency — disabled EQ must never color the audio
+  // ═════════════════════════════════════════════════════════════════════
+
+  describe('bypass transparency', () => {
+    const lastSetValue = (param: any): unknown =>
+      param.setValueAtTime.mock.calls.at(-1)?.[0];
+
+    it('a disabled EQ forces a fully transparent chain', async () => {
+      const el = document.createElement('audio');
+      await svc.init(el);
+      svc.setPreset('Rock');
+      svc.setLimiter(true);
+      svc.setLoudnessMode(true);
+      svc.toggle(); // enable
+      svc.toggle(); // disable — everything must collapse to unity
+
+      const filters = latestCtx.createBiquadFilter.mock.results.map((r: any) => r.value);
+      const gains = latestCtx.createGain.mock.results.map((r: any) => r.value);
+      const compressor = latestCtx.createDynamicsCompressor.mock.results[0].value;
+
+      for (let i = 0; i < 12; i++) {
+        expect(lastSetValue(filters[i].gain)).toBe(0); // all EQ bands + bass/treble
+      }
+      // Identity M/S decode: outL/outR reconstruct L/R exactly.
+      expect(lastSetValue(gains[0].gain)).toBe(0.5); // mid
+      expect(lastSetValue(gains[1].gain)).toBe(0.5); // side (identity width)
+      expect(lastSetValue(compressor.ratio)).toBe(1);      // limiter off
+      expect(lastSetValue(compressor.threshold)).toBe(0);
+      expect(lastSetValue(gains[6].gain)).toBe(1);         // loudness off
+    });
+
+    it('re-enabling restores the stored preset gains exactly', async () => {
+      const el = document.createElement('audio');
+      await svc.init(el);
+      svc.setPreset('Rock');
+      svc.toggle(); // enable
+      svc.toggle(); // disable
+      svc.toggle(); // enable again
+
+      const filters = latestCtx.createBiquadFilter.mock.results.map((r: any) => r.value);
+      const rock = AudioEffectsService.PRESETS.find(p => p.name === 'Rock')!;
+      for (let i = 0; i < 10; i++) {
+        expect(lastSetValue(filters[i].gain)).toBe(rock.bands[i]);
+      }
+      expect(lastSetValue(filters[10].gain)).toBe(rock.bassBoost);
+      expect(lastSetValue(filters[11].gain)).toBe(rock.treble);
+    });
+
+    it('suspended context: init resumes it and force-applies gains', async () => {
+      vi.stubGlobal('AudioContext', vi.fn().mockImplementation(function () {
+        const ctx = createMockContext();
+        ctx.state = 'suspended';
+        latestCtx = ctx;
+        return ctx;
+      }));
+      const fresh = new AudioEffectsService();
+      fresh.setPreset('Jazz');
+      fresh.toggle(); // enable while no context yet
+      const el = document.createElement('audio');
+      await fresh.init(el);
+
+      expect(latestCtx.resume).toHaveBeenCalled();
+      expect(latestCtx.state).toBeDefined();
+      const filters = latestCtx.createBiquadFilter.mock.results.map((r: any) => r.value);
+      const jazz = AudioEffectsService.PRESETS.find(p => p.name === 'Jazz')!;
+      for (let i = 0; i < 10; i++) {
+        expect(filters[i].gain.setValueAtTime).toHaveBeenCalledWith(
+          jazz.bands[i], expect.any(Number),
+        );
+      }
     });
   });
 });

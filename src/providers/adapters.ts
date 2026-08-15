@@ -40,10 +40,17 @@ export type TrackLike = {
   metadata?: Record<string, unknown>;
 };
 
-/** Infer the owning provider from legacy Song fields. */
+/**
+ * Determine the owning provider. An explicit `provider` field (carried by
+ * tracks produced through the provider system and preserved across queue /
+ * localStorage persistence) always wins; legacy songs without it fall back
+ * to structural inference from YouTube-specific fields.
+ */
 export function inferProvider(song: {
+  provider?: ProviderId;
   youtubeId?: string;
 }): ProviderId {
+  if (song.provider) return song.provider;
   return song.youtubeId && YT_ID_RE.test(song.youtubeId) ? 'youtube' : 'library';
 }
 
@@ -103,6 +110,10 @@ export function toSong(track: Track): Song {
     // provider's external id (e.g. a JioSaavn song id) as a YouTube id,
     // which would route it through YouTube download/playback paths.
     youtubeId: track.provider === 'youtube' ? track.externalId : undefined,
+    // Preserve provider identity across persistence boundaries (queue,
+    // favorites, history) so a future provider's tracks never get
+    // re-inferred as library tracks.
+    provider: track.provider,
     releaseYear: track.releaseYear || 0,
     isFavorite: track.isFavorite,
     playCount: track.playCount,

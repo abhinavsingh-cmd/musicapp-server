@@ -3,40 +3,49 @@ import { useNavigate } from 'react-router-dom';
 import { useGoBack } from '../hooks/useGoBack';
 import { useChartsStore, ChartSong, TrendingSource } from '../stores/chartsStore';
 import { useAudioStore } from '../stores/audioStore';
-import { trendingService } from '../services/trendingService';
-import { TrendingUp, TrendingDown, Minus, Sparkles, Music, ArrowLeft, RefreshCw, Clock, Globe, Radio, Download, Check, Loader2 } from 'lucide-react';
+import { TrendingUp, TrendingDown, Minus, Sparkles, Music, ArrowLeft, RefreshCw, Clock, Globe, AlertTriangle } from 'lucide-react';
 import CachedImage from '../components/CachedImage';
+import { DownloadButton } from '../components/DownloadButton';
 import { useSongContextMenu } from '../components/SongContextMenu';
-import { useDownloadsStore } from '../stores/downloadsStore';
+import { Song } from '../types/music';
+
+const chartSongToSong = (song: ChartSong): Song => ({
+  id: song.id,
+  title: song.title,
+  artist: song.artist,
+  album: 'Charts',
+  duration: song.duration || 200,
+  genre: 'Pop',
+  coverArt: song.thumbnail,
+  audioUrl: '',
+  youtubeId: song.youtubeId,
+  releaseYear: new Date().getFullYear(),
+});
 
 const SOURCE_LABELS: Record<TrendingSource, string> = {
-  youtube_music: 'Live from YouTube Music',
-  charts: 'Official Charts',
-  cache: 'Cached Data',
-  builtin: 'Built-in Catalog',
-  local_library: 'Local Library',
+  LIVE: 'Live from YouTube',
+  CACHED: 'Cached live data',
+  LIBRARY: 'From your library',
+  BUILT_IN: 'Built-in catalog',
   none: '',
 };
 
 const SOURCE_ICONS: Record<TrendingSource, React.ReactNode> = {
-  youtube_music: <Globe size={12} className="text-red-400" />,
-  charts: <Radio size={12} className="text-emerald-400" />,
-  cache: <Clock size={12} className="text-yellow-400" />,
-  builtin: <Music size={12} className="text-gray-400" />,
-  local_library: <Music size={12} className="text-blue-400" />,
+  LIVE: <Globe size={12} className="text-red-400" />,
+  CACHED: <Clock size={12} className="text-yellow-400" />,
+  LIBRARY: <Music size={12} className="text-blue-400" />,
+  BUILT_IN: <Music size={12} className="text-gray-400" />,
   none: null,
 };
 
-const ChartRow = memo(({ song, index, onPlay, getTrendIcon, onContextMenu, onTouchStart, isDownloaded, isDownloading, onDownload }: {
+const ChartRow = memo(({ song, index, onPlay, getTrendIcon, onContextMenu, onTouchStart, downloadableSong }: {
   song: ChartSong;
   index: number;
   onPlay: () => void;
   getTrendIcon: (trend: string) => React.ReactNode;
   onContextMenu: (e: React.MouseEvent) => void;
   onTouchStart: (e: React.TouchEvent) => void;
-  isDownloaded: boolean;
-  isDownloading: boolean;
-  onDownload: (e: React.MouseEvent) => void;
+  downloadableSong: Song;
 }) => (
   <div
     onClick={onPlay}
@@ -67,19 +76,7 @@ const ChartRow = memo(({ song, index, onPlay, getTrendIcon, onContextMenu, onTou
     <div className="text-gray-500 text-sm flex-shrink-0">
       {song.duration ? `${Math.floor(song.duration / 60)}:${(song.duration % 60).toString().padStart(2, '0')}` : '--:--'}
     </div>
-    <button
-      onClick={(e) => { e.stopPropagation(); onDownload(e); }}
-      className="w-8 h-8 rounded-full bg-white/5 flex items-center justify-center hover:bg-white/10 transition-colors flex-shrink-0"
-      title={isDownloaded ? 'Downloaded' : isDownloading ? 'Downloading...' : 'Download'}
-    >
-      {isDownloaded ? (
-        <Check size={14} className="text-emerald-400" />
-      ) : isDownloading ? (
-        <Loader2 size={14} className="text-violet-400 animate-spin" />
-      ) : (
-        <Download size={14} className="text-gray-400 group-hover:text-white" />
-      )}
-    </button>
+    <DownloadButton song={downloadableSong} className="w-8 h-8 rounded-full bg-white/5" />
   </div>
 ));
 ChartRow.displayName = 'ChartRow';
@@ -100,8 +97,12 @@ export const ChartsPage: React.FC = () => {
   const globalCharts = useChartsStore((s) => s.globalCharts);
   const bollywoodCharts = useChartsStore((s) => s.bollywoodCharts);
   const loading = useChartsStore((s) => s.loading);
+  const refreshing = useChartsStore((s) => s.refreshing);
+  const error = useChartsStore((s) => s.error);
   const lastUpdated = useChartsStore((s) => s.lastUpdated);
   const source = useChartsStore((s) => s.source);
+  const origin = useChartsStore((s) => s.origin);
+  const hydrateFromCache = useChartsStore((s) => s.hydrateFromCache);
   const fetchCharts = useChartsStore((s) => s.fetchCharts);
   const loadSong = useAudioStore((s) => s.loadSong);
   const [activeTab, setActiveTab] = React.useState<'top' | 'global' | 'bollywood'>('top');
@@ -111,10 +112,6 @@ export const ChartsPage: React.FC = () => {
     (album) => navigate(`/search?q=${encodeURIComponent(album)}`),
   );
 
-  const isDownloadedFn = useDownloadsStore((s) => s.isDownloaded);
-  const isDownloadingFn = useDownloadsStore((s) => s.isDownloading);
-  const downloadSong = useDownloadsStore((s) => s.downloadSong);
-
   useEffect(() => {
     const defer = typeof requestIdleCallback === 'function'
       ? requestIdleCallback
@@ -122,23 +119,11 @@ export const ChartsPage: React.FC = () => {
     
     // Initialize from cache synchronously, then fetch fresh
     defer(() => {
-      const initial = trendingService.getState();
-      if (initial && initial.songs.length > 0) {
-        useChartsStore.setState({
-          topCharts: initial.songs.map((song, i) => ({
-            id: `initial-${i}-${song.id}`, title: song.title, artist: song.artist,
-            thumbnail: song.coverArt, rank: i + 1, trend: 'up',
-            duration: song.duration, viewCount: 0
-          })),
-          source: initial.source as TrendingSource,
-          lastUpdated: initial.lastUpdated || Date.now(),
-        });
-      }
-      
+      hydrateFromCache();
       // Then fetch fresh data
       fetchCharts();
     });
-  }, [fetchCharts]);
+  }, [hydrateFromCache, fetchCharts]);
 
   const charts = useMemo(() =>
     (activeTab === 'top' ? topCharts : activeTab === 'global' ? globalCharts : bollywoodCharts) || [],
@@ -146,49 +131,25 @@ export const ChartsPage: React.FC = () => {
   );
 
   const handlePlay = useCallback((song: ChartSong, index: number) => {
-    const filteredChart = charts[index] || charts.find((c) => c.id === song.id);
-    if (!filteredChart) return;
-    const songData = {
-      id: song.id,
-      title: song.title,
-      artist: song.artist,
-      album: 'Charts',
-      duration: song.duration || 200,
-      genre: 'Pop',
-      coverArt: song.thumbnail,
-      audioUrl: '',
-      youtubeId: song.youtubeId,
-      releaseYear: new Date().getFullYear(),
-    };
-    loadSong(songData, (filteredChart ? [filteredChart] : []).map(c => ({
-      id: c.id,
-      title: c.title,
-      artist: c.artist,
-      album: 'Charts',
-      duration: c.duration || 200,
-      genre: 'Pop',
-      coverArt: c.thumbnail,
-      audioUrl: '',
-      youtubeId: c.youtubeId,
-      releaseYear: new Date().getFullYear(),
-    })), index);
+    const clicked = charts[index]?.id === song.id ? charts[index] : charts.find((c) => c.id === song.id);
+    if (!clicked) return;
+    let target: Song;
+    try {
+      target = chartSongToSong(clicked);
+    } catch {
+      return; // a malformed row must never crash playback
+    }
+    // Same playback pipeline as every other list: full visible chart as the
+    // queue with the clicked song's position — per-item isolated so one bad
+    // row is skipped instead of breaking the queue.
+    const queue: Song[] = [];
+    for (const c of charts) {
+      try { queue.push(chartSongToSong(c)); } catch { /* skip bad item */ }
+    }
+    const qIdx = queue.findIndex((s) => s.id === target.id);
+    if (queue.length === 0 || qIdx < 0) return;
+    loadSong(queue[qIdx], queue, qIdx);
   }, [charts, loadSong]);
-
-  const handleDownload = useCallback((song: ChartSong) => {
-    const songData = {
-      id: song.id,
-      title: song.title,
-      artist: song.artist,
-      album: 'Charts',
-      duration: song.duration || 200,
-      genre: 'Pop',
-      coverArt: song.thumbnail,
-      audioUrl: '',
-      youtubeId: song.youtubeId,
-      releaseYear: new Date().getFullYear(),
-    };
-    downloadSong(songData);
-  }, [downloadSong]);
 
   const getTrendIcon = useCallback((trend: string) => {
     switch (trend) {
@@ -235,19 +196,26 @@ export const ChartsPage: React.FC = () => {
           {lastUpdated && (
             <span className="text-xs text-gray-500 flex items-center gap-1">
               {SOURCE_ICONS[source]}
-              {SOURCE_LABELS[source]} · {formatLastUpdated(lastUpdated)}
+              {source === 'LIVE' && origin === 'charts' ? 'Live · Official Charts' : SOURCE_LABELS[source]} · {formatLastUpdated(lastUpdated)}
             </span>
           )}
           <button
-            onClick={fetchCharts}
-            disabled={loading}
+            onClick={() => fetchCharts({ force: true })}
+            disabled={loading || refreshing}
             className="p-2 rounded-lg hover:bg-white/5 transition-colors text-gray-400 hover:text-white disabled:opacity-50"
             title="Refresh"
           >
-            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+            <RefreshCw size={14} className={loading || refreshing ? 'animate-spin' : ''} />
           </button>
         </div>
       </div>
+
+      {error && (
+        <div className="flex items-center gap-2 px-4 py-3 rounded-xl bg-red-500/10 border border-red-500/20 text-sm text-red-300">
+          <AlertTriangle size={14} className="flex-shrink-0" />
+          <span>{charts.length > 0 ? `${error}.` : error}</span>
+        </div>
+      )}
 
       {loading && charts.length === 0 && (
         <div className="space-y-2">
@@ -266,9 +234,23 @@ export const ChartsPage: React.FC = () => {
         </div>
       )}
 
+      {!loading && charts.length === 0 && (
+        <div className="text-center py-16 space-y-3">
+          <Music size={40} className="mx-auto text-gray-600" />
+          <p className="text-gray-400">No songs in this chart right now</p>
+          <button
+            onClick={() => fetchCharts({ force: true })}
+            className="px-4 py-2 rounded-xl bg-violet-500 hover:bg-violet-600 text-white text-sm font-medium transition-colors"
+          >
+            Try again
+          </button>
+        </div>
+      )}
+
       {charts.length > 0 && (
         <div>
           {charts.map((song, i) => {
+            const downloadableSong = chartSongToSong(song);
             return (
               <ChartRow
                 key={song.id}
@@ -276,19 +258,9 @@ export const ChartsPage: React.FC = () => {
                 index={i}
                 onPlay={() => handlePlay(song, i)}
                 getTrendIcon={getTrendIcon}
-                onContextMenu={(e) => handleContextMenu(e, {
-                  id: song.id, title: song.title, artist: song.artist, album: 'Charts',
-                  duration: song.duration || 200, genre: 'Pop', coverArt: song.thumbnail,
-                  audioUrl: '', youtubeId: song.youtubeId, releaseYear: new Date().getFullYear(),
-                })}
-                onTouchStart={(e) => handleLongPress(e, {
-                  id: song.id, title: song.title, artist: song.artist, album: 'Charts',
-                  duration: song.duration || 200, genre: 'Pop', coverArt: song.thumbnail,
-                  audioUrl: '', youtubeId: song.youtubeId, releaseYear: new Date().getFullYear(),
-                })}
-                isDownloaded={isDownloadedFn(song.youtubeId || song.id)}
-                isDownloading={isDownloadingFn(song.youtubeId || song.id)}
-                onDownload={() => handleDownload(song)}
+                onContextMenu={(e) => handleContextMenu(e, downloadableSong)}
+                onTouchStart={(e) => handleLongPress(e, downloadableSong)}
+                downloadableSong={downloadableSong}
               />
             );
           })}

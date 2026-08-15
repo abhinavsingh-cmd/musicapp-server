@@ -207,7 +207,8 @@ describe('downloadsStore — download lifecycle', () => {
     const fetchSpy = vi.fn();
     vi.stubGlobal('fetch', fetchSpy);
 
-    fetchSpy.mockRejectedValueOnce(new TypeError('network down'));
+    // 404 is deterministic — no auto-retry, fails immediately
+    fetchSpy.mockResolvedValueOnce(failureResponse());
     await useDownloadsStore.getState().downloadSong(MOCK_SONG);
     expect(useDownloadsStore.getState().failedDownloads.length).toBe(1);
 
@@ -229,6 +230,170 @@ describe('downloadsStore — download lifecycle', () => {
 
     const state = useDownloadsStore.getState();
     expect(state.failedDownloads.length).toBe(1);
-    expect(state.failedDownloads[0].message).toContain('Download failed: 404');
+    expect(state.failedDownloads[0].message).toContain('404');
+    expect(state.failedDownloads[0].message).toMatch(/not found/i);
+  });
+
+  it('records an expired-link reason from a 403 response', async () => {
+    vi.stubGlobal('fetch', makeAbortableFetch(() => new Response(null, { status: 403 })));
+
+    await useDownloadsStore.getState().downloadSong(MOCK_SONG);
+
+    const state = useDownloadsStore.getState();
+    expect(state.failedDownloads.length).toBe(1);
+    expect(state.failedDownloads[0].message).toMatch(/access denied|expired/i);
+    expect(state.failedDownloads[0].message).toContain('403');
+  });
+
+  it('records a server-error reason from a JSON error body', async () => {
+    // 200 + application/json body: the server rejected the request with a
+    // structured reason. This is deterministic (no auto-retry), so the
+    // message must surface immediately and verbatim.
+    vi.stubGlobal('fetch', makeAbortableFetch(() => new Response(
+      JSON.stringify({ success: false, message: 'Download produced no audio data', code: 'DOWNLOAD_EMPTY' }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )));
+
+    await useDownloadsStore.getState().downloadSong(MOCK_SONG);
+
+    const state = useDownloadsStore.getState();
+    expect(state.failedDownloads.length).toBe(1);
+    expect(state.failedDownloads[0].message).toContain('Download produced no audio data');
+  });
+
+  it('preserves a 5xx server-error reason after auto-retries are exhausted', async () => {
+    vi.useFakeTimers();
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(null, { status: 500, statusText: 'Internal Server Error' }));
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const p = useDownloadsStore.getState().downloadSong(MOCK_SONG);
+    await vi.advanceTimersByTimeAsync(50);
+    await p;
+    await vi.advanceTimersByTimeAsync(1100);
+    await vi.advanceTimersByTimeAsync(3100);
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    const state = useDownloadsStore.getState();
+    expect(state.failedDownloads.length).toBe(1);
+    expect(state.failedDownloads[0].message).toContain('500');
+    vi.useRealTimers();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Automatic retry of transient failures
+// ---------------------------------------------------------------------------
+describe('downloadsStore — automatic retry', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('auto-retries a transient network failure and succeeds without user action', async () => {
+    vi.useFakeTimers();
+    const fetchSpy = vi.fn()
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValue(successResponse());
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const p = useDownloadsStore.getState().downloadSong(MOCK_SONG);
+    // Flush attempt 1 (IDB mock + fetch rejection are timer-driven)
+    await vi.advanceTimersByTimeAsync(50);
+    await p;
+
+    // Not surfaced as failed while retries remain
+    expect(useDownloadsStore.getState().failedDownloads.length).toBe(0);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    // The retry fires after the 1s backoff
+    await vi.advanceTimersByTimeAsync(1100);
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    const state = useDownloadsStore.getState();
+    expect(state.downloads.length).toBe(1);
+    expect(state.failedDownloads.length).toBe(0);
+  });
+
+  it('never auto-retries a deterministic 404 failure', async () => {
+    vi.useFakeTimers();
+    const fetchSpy = vi.fn().mockResolvedValue(failureResponse());
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const p = useDownloadsStore.getState().downloadSong(MOCK_SONG);
+    await vi.advanceTimersByTimeAsync(50);
+    await p;
+
+    expect(useDownloadsStore.getState().failedDownloads.length).toBe(1);
+
+    // No retry may fire, no matter how long we wait
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('surfaces the final error reason after exhausting all auto-retries', async () => {
+    vi.useFakeTimers();
+    const fetchSpy = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'));
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const p = useDownloadsStore.getState().downloadSong(MOCK_SONG);
+    await vi.advanceTimersByTimeAsync(50);
+    await p;
+    await vi.advanceTimersByTimeAsync(1100); // retry 1 fires (~t=1050)
+    await vi.advanceTimersByTimeAsync(3100); // retry 2 fires (~t=4060) + flush
+    await vi.advanceTimersByTimeAsync(50);
+
+    // 1 original + 2 auto-retries, then a preserved failure reason
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    const state = useDownloadsStore.getState();
+    expect(state.failedDownloads.length).toBe(1);
+    expect(state.failedDownloads[0].message).toMatch(/network error/i);
+    expect(state.downloads.length).toBe(0);
+  });
+
+  it('cancel suppresses a pending auto-retry', async () => {
+    vi.useFakeTimers();
+    const fetchSpy = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'));
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const p = useDownloadsStore.getState().downloadSong(MOCK_SONG);
+    await vi.advanceTimersByTimeAsync(50);
+    await p;
+
+    useDownloadsStore.getState().cancelDownload(MOCK_SONG.youtubeId);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(useDownloadsStore.getState().failedDownloads.length).toBe(0);
+    expect(useDownloadsStore.getState().downloads.length).toBe(0);
+  });
+
+  it('manual retry resets the auto-retry budget', async () => {
+    vi.useFakeTimers();
+    const fetchSpy = vi.fn()
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValue(successResponse());
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const p = useDownloadsStore.getState().downloadSong(MOCK_SONG);
+    await vi.advanceTimersByTimeAsync(50);
+    await p;
+    await vi.advanceTimersByTimeAsync(1100);
+    await vi.advanceTimersByTimeAsync(3100);
+    await vi.advanceTimersByTimeAsync(50);
+
+    // Budget exhausted — failure is now visible
+    expect(useDownloadsStore.getState().failedDownloads.length).toBe(1);
+
+    // Manual retry gets a fresh budget and succeeds
+    useDownloadsStore.getState().retryDownload(MOCK_SONG);
+    await vi.advanceTimersByTimeAsync(50);
+
+    const state = useDownloadsStore.getState();
+    expect(state.failedDownloads.length).toBe(0);
+    expect(state.downloads.length).toBe(1);
   });
 });

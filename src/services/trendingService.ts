@@ -1,10 +1,21 @@
 import { Song } from '../types/music';
-import { api, apiFetch, clearResponseCache } from '../config/api';
+import { api, apiFetch } from '../config/api';
 import { useSongsStore } from '../stores/songsStore';
+import { logger } from '../utils/logger';
+
+/**
+ * Where the trending data currently on screen actually came from.
+ * Explicit priority chain: LIVE → CACHED → LIBRARY → BUILT_IN.
+ * Fallback data must NEVER be labeled LIVE, and empty results are never
+ * cached as successful trending data.
+ */
+export type TrendingSourceLabel = 'LIVE' | 'CACHED' | 'LIBRARY' | 'BUILT_IN';
 
 export interface TrendingResult {
   songs: Song[];
-  source: string;
+  source: TrendingSourceLabel;
+  /** Upstream origin detail when known ('youtube_music' | 'charts'). */
+  origin?: string;
   lastUpdated: number | null;
 }
 
@@ -31,13 +42,16 @@ const CACHE_MAX_AGE = 60 * 60 * 1000;     // 60 min max for loading stale
 const BACKGROUND_INTERVAL = 15 * 60 * 1000; // 15 min
 const MAX_BACKOFF_MS = 16_000;
 const BASE_BACKOFF_MS = 1_000;
-const MAX_RETRIES = 2;
-const REQUEST_TIMEOUT_MS = 15_000;
-const TOTAL_TIMEOUT_MS = 30_000;
+// The server's live fetch (yt-dlp) can take up to ~45s on a cold cache.
+// A single failed request must NOT drop us straight to fallback: retry with
+// backoff so a later attempt can pick up the server's completed live fetch.
+const MAX_RETRIES = 3;
+const REQUEST_TIMEOUT_MS = 25_000;
+const TOTAL_TIMEOUT_MS = 55_000;
 
 // ── Built-in fallback (20 popular songs) ───────────────────────────────────
 const BUILTIN: TrendingResult = {
-  source: 'builtin',
+  source: 'BUILT_IN',
   lastUpdated: Date.now(),
   songs: [
     { id:'t-kN6HHzEXKFU', youtubeId:'kN6HHzEXKFU', title:'Pushpa Pushpa', artist:'Devi Sri Prasad', genre:'Trending', duration:230, coverArt:'https://img.youtube.com/vi/kN6HHzEXKFU/mqdefault.jpg', album:'', audioUrl:'', releaseYear:0, isFavorite:false, playCount:0 },
@@ -65,25 +79,64 @@ const BUILTIN: TrendingResult = {
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-function mapServerResults(data: any): Song[] {
-  const payload = data.details || data;
-  const results = (payload.results || [])
-    .filter((r: any) => r && r.id && r.title)
-    .map((r: any): Song => ({
-      id: 'trending-' + r.id,
-      youtubeId: r.id,
-      title: r.title || 'Unknown',
-      artist: r.artist || 'Unknown',
+function toFiniteDuration(value: unknown): number {
+  const n = typeof value === 'string' ? Number(value) : value;
+  return typeof n === 'number' && Number.isFinite(n) && n >= 0 ? n : 0;
+}
+
+/**
+ * Validate the server's raw result items. Malformed/unplayable items are
+ * skipped individually — a few bad rows must never discard a whole live
+ * response. An item is playable only if it has a non-empty id AND title.
+ */
+function validateServerItems(items: unknown): Song[] {
+  if (!Array.isArray(items)) return [];
+  const songs: Song[] = [];
+  for (const r of items) {
+    if (!r || typeof r !== 'object') continue;
+    const item = r as Record<string, unknown>;
+    const id = typeof item.id === 'string' ? item.id.trim() : '';
+    const title = typeof item.title === 'string' ? item.title.trim() : '';
+    if (!id || !title) continue; // unplayable — skip only this item
+    const artist = typeof item.artist === 'string' && item.artist.trim()
+      ? item.artist.trim()
+      : 'Unknown';
+    songs.push({
+      id: 'trending-' + id,
+      youtubeId: id,
+      title,
+      artist,
       genre: 'Trending',
-      duration: r.duration || 0,
-      coverArt: r.thumbnail || '',
+      duration: toFiniteDuration(item.duration),
+      coverArt: typeof item.thumbnail === 'string' ? item.thumbnail : '',
       album: '',
       audioUrl: '',
       releaseYear: 0,
       isFavorite: false,
       playCount: 0,
-    }));
-  return results;
+    });
+  }
+  return songs;
+}
+
+/** True if the reported upstream origin is genuine live data. */
+function isLiveOrigin(origin: string): boolean {
+  return origin === 'youtube_music' || origin === 'charts';
+}
+
+/**
+ * Normalize persisted results written by older versions of this service
+ * (legacy lowercase source strings) into the current label scheme.
+ */
+function normalizeResult(result: TrendingResult): TrendingResult {
+  const legacy = result.source as string;
+  if (legacy === 'youtube_music' || legacy === 'charts') {
+    return { ...result, source: 'LIVE', origin: result.origin ?? legacy };
+  }
+  if (legacy === 'cache') return { ...result, source: 'CACHED' };
+  if (legacy === 'local_library') return { ...result, source: 'LIBRARY' };
+  if (legacy === 'builtin') return { ...result, source: 'BUILT_IN' };
+  return result;
 }
 
 function buildLocalFallback(): TrendingResult {
@@ -97,14 +150,9 @@ function buildLocalFallback(): TrendingResult {
       id: 'trending-' + (s.youtubeId || s.id),
       genre: 'Trending' as const,
     })),
-    source: 'local_library',
+    source: 'LIBRARY',
     lastUpdated: Date.now(),
   };
-}
-
-/** Check if a source came from the network (not a local fallback). */
-function isLiveSource(source: string): boolean {
-  return source === 'youtube_music' || source === 'charts' || source === 'cache';
 }
 
 // ── TrendingService (singleton) ────────────────────────────────────────────
@@ -145,7 +193,7 @@ class TrendingService {
   }
 
   isFresh(): boolean {
-    return this.cache !== null && isLiveSource(this.cache.source) && Date.now() - this.cacheTime < CACHE_TTL;
+    return this.cache !== null && this.cache.source === 'LIVE' && this.cache.songs.length > 0 && Date.now() - this.cacheTime < CACHE_TTL;
   }
 
   // ── Persistence ──
@@ -156,8 +204,9 @@ class TrendingService {
       if (!raw) return null;
       const entry: CacheEntry = JSON.parse(raw);
       if (!entry.data?.songs || !Array.isArray(entry.data.songs)) return null;
+      if (entry.data.songs.length === 0) return null; // empty data is never valid
       if (Date.now() - entry.cachedAt > CACHE_MAX_AGE) return null;
-      return entry.data;
+      return normalizeResult(entry.data);
     } catch {
       return null;
     }
@@ -171,18 +220,36 @@ class TrendingService {
   }
 
   /**
-   * Cache live results in memory + disk. Never caches local_library or
-   * builtin results so they never masquerade as live data.
+   * Cache live results in memory + disk. ONLY non-empty LIVE results are
+   * cached — CACHED/LIBRARY/BUILT_IN data and empty results must never be
+   * persisted as successful trending data or masquerade as live later.
    */
   private setCache(result: TrendingResult): void {
-    if (!isLiveSource(result.source)) {
-      console.log(`[Trending] Skipping cache for non-live source: ${result.source}`);
+    if (result.source !== 'LIVE' || result.songs.length === 0) {
+      logger.debug(`[Trending] Skipping cache for source=${result.source}, songs=${result.songs.length}`);
       return;
     }
     this.cache = result;
     this.cacheTime = Date.now();
     this.saveToDisk(result);
     this.notify();
+  }
+
+  /**
+   * Explicit fallback priority chain after a failed/empty live fetch:
+   * cached live result (memory → disk, honestly labeled CACHED)
+   *   → valid library data → built-in catalog.
+   */
+  private bestAvailableFallback(reason: string): TrendingResult {
+    for (const candidate of [this.cache, this.loadFromDisk()]) {
+      if (candidate && candidate.songs.length > 0 && (candidate.source === 'LIVE' || candidate.source === 'CACHED')) {
+        logger.warn(`[Trending] Serving cached live data as CACHED (${reason})`);
+        return { ...candidate, source: 'CACHED' };
+      }
+    }
+    const fallback = buildLocalFallback();
+    logger.warn(`[Trending] Falling back to ${fallback.source} (${reason})`);
+    return fallback;
   }
 
   // ── Network ──
@@ -196,10 +263,15 @@ class TrendingService {
 
       const reqStart = Date.now();
       try {
-        console.log(`[Trending] Request started (attempt ${attempt + 1}/${MAX_RETRIES}) → ${api('/charts/trending.json')}`);
+        logger.debug(`[Trending] Request started (attempt ${attempt + 1}/${MAX_RETRIES}) → ${api('/charts/trending.json')}`);
         const res = await apiFetch(api('/charts/trending.json'), {
           timeout: REQUEST_TIMEOUT_MS,
           retries: 0,
+          // NEVER re-serve a previously cached trending response here.
+          // The generic apiFetch cache would keep returning a stale fallback
+          // (or empty) payload long after the server recovered, blocking the
+          // recovery back to LIVE.
+          cacheTTL: 0,
         });
 
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -207,68 +279,83 @@ class TrendingService {
         const contentType = res.headers.get('content-type') || '';
         if (!contentType.includes('application/json')) throw new Error('Not JSON');
 
-        const data = await res.json();
-        const songs = mapServerResults(data);
-        const payload = data.details || data;
+        let data: any;
+        try {
+          data = await res.json();
+        } catch {
+          throw new Error('Invalid JSON payload');
+        }
+
+        const payload = data?.details ?? data ?? {};
+        const origin: string = typeof payload?.source === 'string' ? payload.source : '';
+        const rawResults = payload?.results;
+        // Item-level validation: malformed/unplayable rows are skipped
+        // individually — they must never discard the whole response.
+        const songs = validateServerItems(rawResults);
+        const serverFresh = payload?.fresh !== false;
         const reqTime = Date.now() - reqStart;
 
-        if (songs.length > 0) {
+        if (isLiveOrigin(origin) && Array.isArray(rawResults) && songs.length > 0) {
           const result: TrendingResult = {
             songs,
-            source: payload.source || 'youtube_music',
-            lastUpdated: payload.lastUpdated || Date.now(),
+            // Data served from the server's own cache is live-sourced but
+            // stale — label it CACHED, never LIVE.
+            source: serverFresh ? 'LIVE' : 'CACHED',
+            origin,
+            lastUpdated: typeof payload?.lastUpdated === 'number' ? payload.lastUpdated : Date.now(),
           };
-          console.log(`[Trending] ✅ LIVE SUCCESS: ${songs.length} songs, source=${result.source}, responseTime=${reqTime}ms`);
+          logger.debug(`[Trending] ✅ ${result.source} SUCCESS: ${songs.length} songs, origin=${origin}, responseTime=${reqTime}ms`);
           this.recordSuccess(Date.now() - startTime);
           return result;
         }
 
-        // Server returned HTTP 200 but with zero results. This is NOT a
-        // network failure — the server simply has no trending data yet.
-        // Do NOT retry (retries hit the same cached empty response in
-        // apiFetch) and do NOT throw (that would trigger fallback caching).
-        // Return an empty result with a cache source so the UI shows
-        // "Cached" / "Offline" rather than falling through to local_library.
-        console.warn(`[Trending] ⚠️ Server returned empty results (attempt ${attempt + 1}, reqTime=${reqTime}ms). Treating as server-side empty state.`);
-        // Clear the apiFetch memory cache so the next call fetches fresh data
-        // instead of returning the same cached empty response.
-        clearResponseCache('/charts');
-        clearResponseCache('/youtube');
-        const emptyResult: TrendingResult = {
-          songs: [],
-          source: 'cache',
-          lastUpdated: Date.now(),
-        };
-        console.log(`[Trending] 📭 Empty trending result returned, source=${emptyResult.source}`);
-        return emptyResult;
+        if (isLiveOrigin(origin) && Array.isArray(rawResults)) {
+          // HTTP 200 but zero VALID items. The server genuinely has no live
+          // data right now — retrying would hit the same empty answer. Do
+          // NOT cache this; fall through to the fallback chain.
+          lastError = `Live response empty (origin=${origin})`;
+          logger.warn(`[Trending] ⚠️ Server returned empty/invalid results (origin=${origin}, reqTime=${reqTime}ms)`);
+          break;
+        }
+
+        if (isLiveOrigin(origin)) {
+          // Live origin but a structurally broken body (results not an
+          // array). That is NOT a definitive answer — it can be a transient
+          // proxy/pipeline glitch, so retry instead of falling back at once.
+          lastError = `Malformed live response (origin=${origin}, results not an array)`;
+          logger.warn(`[Trending] ⚠️ ${lastError}, reqTime=${reqTime}ms — treating as transient, retrying`);
+        } else if (origin) {
+          // The server itself already fell back (builtin/etc). This is a
+          // definitive answer — no point retrying the same response.
+          lastError = `Server has no live data (source=${origin})`;
+          logger.warn(`[Trending] ⚠️ ${lastError}, reqTime=${reqTime}ms`);
+          break;
+        } else {
+          // No origin at all — structurally malformed envelope. Might be a
+          // transient glitch; retry before dropping to the fallback chain.
+          lastError = 'Malformed response (missing source origin)';
+          logger.warn(`[Trending] ⚠️ ${lastError}, reqTime=${reqTime}ms — treating as transient, retrying`);
+        }
       } catch (err) {
         const reqTime = Date.now() - reqStart;
         lastError = err instanceof Error ? err.message : 'Unknown error';
-        console.warn(`[Trending] ❌ Request failed (attempt ${attempt + 1}): ${lastError}, reqTime=${reqTime}ms`);
+        logger.warn(`[Trending] ❌ Request failed (attempt ${attempt + 1}): ${lastError}, reqTime=${reqTime}ms`);
       }
 
-      // Exponential backoff: 1s, 2s, 4s (capped at MAX_BACKOFF_MS)
+      // Exponential backoff: 1s, 2s, 4s… — a first failed request must not
+      // immediately drop to fallback; the server may still be completing a
+      // legitimate live fetch.
       if (attempt < MAX_RETRIES - 1) {
         const delay = Math.min(BASE_BACKOFF_MS * Math.pow(2, attempt), MAX_BACKOFF_MS);
-        console.log(`[Trending] Backing off ${delay}ms before retry...`);
+        logger.debug(`[Trending] Backing off ${delay}ms before retry...`);
         await new Promise(r => setTimeout(r, delay));
       }
     }
 
-    console.warn(`[Trending] ❌ ALL RETRIES FAILED after ${MAX_RETRIES} attempts: ${lastError}`);
+    logger.warn(`[Trending] ❌ Live fetch unsuccessful: ${lastError}`);
     this.recordFailure();
-    // Do not throw — return the best-available fallback
-    // (disk cache → memory cache → local library → builtin). This ensures
-    // the UI never shows an unhandled error and the user always sees
-    // something useful.
-    const disk = this.loadFromDisk();
-    const fallback = this.cache && isLiveSource(this.cache.source)
-      ? this.cache
-      : disk && isLiveSource(disk.source)
-        ? disk
-        : buildLocalFallback();
-    console.warn(`[Trending] Falling back to: source=${fallback.source}, songs=${fallback.songs.length}`);
-    return fallback;
+    // Explicit priority chain: CACHED live data → LIBRARY → BUILT_IN.
+    return this.bestAvailableFallback(lastError);
   }
 
   // ── Metrics ──
@@ -301,21 +388,21 @@ class TrendingService {
    */
   async getTrending(): Promise<TrendingResult> {
     // 1. Return fresh live cache immediately
-    if (this.cache && isLiveSource(this.cache.source) && Date.now() - this.cacheTime < CACHE_TTL) {
-      console.log(`[Trending] Cache HIT (live): ${this.cache.songs.length} songs, source=${this.cache.source}, age=${Math.round((Date.now() - this.cacheTime) / 1000)}s`);
+    if (this.cache && this.cache.source === 'LIVE' && this.cache.songs.length > 0 && Date.now() - this.cacheTime < CACHE_TTL) {
+      logger.debug(`[Trending] Cache HIT (live): ${this.cache.songs.length} songs, origin=${this.cache.origin || 'unknown'}, age=${Math.round((Date.now() - this.cacheTime) / 1000)}s`);
       return this.cache;
     }
 
     // If cache exists but contains fallback data, log it clearly
-    if (this.cache && !isLiveSource(this.cache.source)) {
-      console.log(`[Trending] Cache contains fallback data (source=${this.cache.source}). Attempting live fetch...`);
+    if (this.cache && this.cache.source !== 'LIVE') {
+      logger.debug(`[Trending] Cache contains fallback data (source=${this.cache.source}). Attempting live fetch...`);
     }
 
-    console.log(`[Trending] Cache MISS or stale (age=${this.cache ? Math.round((Date.now() - this.cacheTime) / 1000) + 's' : 'null'}), fetching from network...`);
+    logger.debug(`[Trending] Cache MISS or stale (age=${this.cache ? Math.round((Date.now() - this.cacheTime) / 1000) + 's' : 'null'}), fetching from network...`);
 
     // 2. Deduplicate concurrent requests
     if (this.inFlight) {
-      console.log('[Trending] Deduplicating concurrent request');
+      logger.debug('[Trending] Deduplicating concurrent request');
       return this.inFlight;
     }
 
@@ -323,19 +410,15 @@ class TrendingService {
     this.inFlight = this.fetchFromNetwork()
       .then(result => {
         this.setCache(result);
-        console.log(`[Trending] Network fetch complete: ${result.songs.length} songs, source=${result.source}`);
+        logger.debug(`[Trending] Network fetch complete: ${result.songs.length} songs, source=${result.source}`);
         return result;
       })
 .catch((err) => {
-        // Network failed — return best available, but do NOT cache it
-        const disk = this.loadFromDisk();
-        const fallback = this.cache && isLiveSource(this.cache.source)
-          ? this.cache
-          : disk && isLiveSource(disk.source)
-            ? disk
-            : buildLocalFallback();
-        console.warn(`[Trending] Falling back to: source=${fallback.source}, songs=${fallback.songs.length}, reason=${err.message || err}`);
-        return fallback;
+        // Defensive — fetchFromNetwork resolves with a fallback instead of
+        // throwing, so this path only ever runs on unexpected errors.
+        const reason = err instanceof Error ? err.message : String(err);
+        logger.warn(`[Trending] Unexpected fetch error: ${reason}`);
+        return this.bestAvailableFallback(reason);
       })
       .finally(() => {
         this.inFlight = null;
@@ -373,9 +456,9 @@ class TrendingService {
         this.cacheTime = 0;
       }
       const age = Math.round((Date.now() - this.cacheTime) / 1000);
-      console.log(`[Trending] init: loaded from disk: ${disk.songs.length} songs, source=${disk.source}, age=${age}s`);
+      logger.debug(`[Trending] init: loaded from disk: ${disk.songs.length} songs, source=${disk.source}, age=${age}s`);
     } else {
-      console.log('[Trending] init: no disk cache, using builtin');
+      logger.debug('[Trending] init: no disk cache, using builtin');
     }
 
     this.startBackgroundRefresh();
@@ -385,9 +468,9 @@ class TrendingService {
 
   private startBackgroundRefresh(): void {
     this.stopBackgroundRefresh();
-    console.log(`[Trending] Background refresh started (interval: ${BACKGROUND_INTERVAL / 1000}s)`);
+    logger.debug(`[Trending] Background refresh started (interval: ${BACKGROUND_INTERVAL / 1000}s)`);
     this.backgroundTimer = setInterval(() => {
-      console.log('[Trending] Background refresh triggered');
+      logger.debug('[Trending] Background refresh triggered');
       this.getTrending();
     }, BACKGROUND_INTERVAL);
   }

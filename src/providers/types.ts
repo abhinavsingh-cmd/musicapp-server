@@ -77,6 +77,12 @@ export interface ResolveStreamOptions {
    * Used when a previously resolved stream URL is known to be stale/expired.
    */
   force?: boolean;
+  /**
+   * Allow falling back to a locally downloaded copy when the provider has
+   * nothing. Default true. Recovery from a CORRUPTED local file sets this
+   * false so the failed copy can never be handed back to the engine.
+   */
+  localFallback?: boolean;
 }
 
 /** A direct URL the HTML audio element / native player can consume. */
@@ -167,6 +173,14 @@ export interface TrackProvider {
 
   /** Optional: drop any cached stream for a track (e.g. stale proxy URL). */
   invalidateStream?(track: Track): void;
+
+  /**
+   * Optional: warm provider-owned network resources (DNS prefetch,
+   * preconnect, embed-script prefetch) so first playback is fast.
+   * Must be idempotent and must never touch shared/app-level resources —
+   * the generic engine calls this without knowing which provider it is.
+   */
+  preconnect?(): void;
 }
 
 export interface ProviderRegistry {

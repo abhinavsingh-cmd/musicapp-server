@@ -33,8 +33,16 @@ export const LyricsDisplay: React.FC = memo(() => {
     if (currentSong) {
       fetchLyrics(currentSong.id, currentSong.title, currentSong.artist);
     }
+    // Song changed — forget the old song's DOM refs and reset the scroll
+    // position so the next song's lyrics never render mid-scroll.
     lineRefs.current.clear();
+    containerRef.current?.scrollTo({ top: 0 });
   }, [currentSong, fetchLyrics]);
+
+  // A new lyrics array invalidates every captured line ref.
+  useEffect(() => {
+    lineRefs.current.clear();
+  }, [lyrics]);
 
   // Throttled progress sync — reads from store directly to avoid re-renders
   useEffect(() => {
@@ -93,7 +101,10 @@ export const LyricsDisplay: React.FC = memo(() => {
         {lyrics.map((line, i) => (
           <div
             key={i}
-            ref={(el) => { if (el) lineRefs.current.set(i, el); }}
+            ref={(el) => {
+              if (el) lineRefs.current.set(i, el);
+              else lineRefs.current.delete(i);
+            }}
           >
             <LyricsLine
               text={line.text}

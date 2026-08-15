@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useCallback, useState } from 'react';
 import { useGoBack } from '../hooks/useGoBack';
 import { useDownloadsStore } from '../stores/downloadsStore';
 import { useAudioStore } from '../stores/audioStore';
+import { downloadEntryToSong } from '../services/musicSource';
 import { Song } from '../types/music';
 import {
   Download, Trash2, Play, HardDrive, Loader2, WifiOff, ArrowLeft, X, RotateCcw,
@@ -58,16 +59,8 @@ const DownloadsPage: React.FC = () => {
   }, [loadDownloads, refreshStorageBreakdown]);
 
   const handlePlay = useCallback((d: typeof downloads[0]) => {
-    const song: Song = {
-      id: d.id, youtubeId: d.youtubeId, title: d.title, artist: d.artist,
-      genre: d.genre, duration: d.duration, coverArt: d.coverArt,
-      album: '', audioUrl: d.audioUrl, releaseYear: 0,
-    };
-    const playlist = downloads.map(dl => ({
-      id: dl.id, youtubeId: dl.youtubeId, title: dl.title, artist: dl.artist,
-      genre: dl.genre, duration: dl.duration, coverArt: dl.coverArt,
-      album: '', audioUrl: dl.audioUrl, releaseYear: 0,
-    } as Song));
+    const song: Song = downloadEntryToSong(d);
+    const playlist = downloads.map(downloadEntryToSong) as Song[];
     loadSong(song, playlist, downloads.findIndex(dl => dl.id === d.id));
   }, [loadSong, downloads]);
 

@@ -40,6 +40,18 @@ public class BackgroundAudioPlugin extends Plugin {
     public void load() {
         super.load();
         instance = this;
+        // Activity/WebView recreation while the foreground service keeps
+        // playing: handleOnDestroy stopped the keepalive for the OLD plugin,
+        // so resume it for the recreated WebView — otherwise the new JS layer
+        // can be suspended and lose lifecycle events (ended/controls).
+        try {
+            MusicForegroundService service = MusicForegroundService.instance;
+            if (service != null && service.isNativeEngineActive()) {
+                startKeepAlive();
+            }
+        } catch (Exception ignored) {
+            // Never fail plugin load over keepalive bookkeeping.
+        }
     }
 
     @Override
@@ -116,6 +128,15 @@ public class BackgroundAudioPlugin extends Plugin {
     }
 
     public static void notifyMediaAction(String action, long position) {
+        notifyMediaAction(action, position, -1);
+    }
+
+    /**
+     * Variant carrying the service's playback generation so the JS layer can
+     * deterministically drop stale lifecycle events (e.g. a late 'ended' for a
+     * track that has already been replaced must never advance the queue).
+     */
+    public static void notifyMediaAction(String action, long position, int generation) {
         BackgroundAudioPlugin plugin = instance;
         if (plugin == null) return;
 
@@ -123,6 +144,9 @@ public class BackgroundAudioPlugin extends Plugin {
         payload.put("action", action);
         if (position >= 0) {
             payload.put("position", position);
+        }
+        if (generation >= 0) {
+            payload.put("generation", generation);
         }
         plugin.notifyListeners("mediaAction", payload, true);
     }
@@ -256,35 +280,98 @@ public class BackgroundAudioPlugin extends Plugin {
     @PluginMethod
     public void getPlaybackState(PluginCall call) {
         MusicForegroundService service = getService();
+        JSObject result = new JSObject();
         if (service != null) {
-            JSObject result = new JSObject();
             result.put("isPlaying", service.isNativePlaying());
             result.put("position", service.getCurrentPosition());
             result.put("duration", service.getDuration());
-            call.resolve(result);
+            result.put("nativeActive", service.isNativeEngineActive());
+            result.put("isBuffering", service.isNativeBuffering());
+            result.put("endedPending", service.hasEndedPending());
+            result.put("generation", service.getPlaybackGeneration());
+            result.put("title", service.getCurrentTitle());
+            result.put("artist", service.getCurrentArtist());
+            if (service.getCurrentUrl() != null) {
+                result.put("url", service.getCurrentUrl());
+            }
         } else {
-            JSObject result = new JSObject();
             result.put("isPlaying", false);
             result.put("position", 0.0);
             result.put("duration", 0.0);
-            call.resolve(result);
+            result.put("nativeActive", false);
+            result.put("endedPending", false);
         }
+        call.resolve(result);
+    }
+
+    /**
+     * Consume the pending-ended flag. Called by JS once it has taken over
+     * queue continuation for a track that completed while the WebView was
+     * disconnected — makes the recovery exactly-once.
+     */
+    @PluginMethod
+    public void acknowledgeEnded(PluginCall call) {
+        MusicForegroundService service = getService();
+        if (service != null) {
+            service.consumeEndedPending();
+        }
+        call.resolve();
     }
 
     @PluginMethod
     public void playAudioUrl(PluginCall call) {
         String audioUrl = call.getString("audioUrl", "");
-        MusicForegroundService service = getService();
-        if (service != null && !audioUrl.isEmpty()) {
-            service.playAudioUrl(audioUrl);
-            JSObject result = new JSObject();
-            result.put("started", true);
-            call.resolve(result);
-        } else {
-            JSObject result = new JSObject();
+        JSObject result = new JSObject();
+        if (audioUrl == null || audioUrl.isEmpty()) {
             result.put("started", false);
             call.resolve(result);
+            return;
         }
+        String title = call.getString("title", "MusicApp");
+        String artist = call.getString("artist", "Playing music");
+        String album = call.getString("album", "MusicApp Album");
+        String albumArt = call.getString("albumArt", null);
+        double startPositionMs = call.getDouble("startPositionMs", 0.0);
+        double volume = call.getDouble("volume", 1.0);
+
+        MusicForegroundService service = getService();
+        if (service != null) {
+            service.updateNotification(title, artist, album, albumArt);
+            service.setVolume((float) volume);
+            service.playAudioUrl(audioUrl, (long) startPositionMs);
+            // Report the generation of THIS play session so JS can match
+            // future lifecycle events against the session that produced them.
+            result.put("generation", service.getPlaybackGeneration());
+        } else {
+            // Service not running yet — attach the play request to the start
+            // intent so playback begins the moment the service is created
+            // (race-free: no dependence on service-instance timing).
+            Intent intent = new Intent(getContext(), MusicForegroundService.class);
+            intent.setAction(MusicForegroundService.ACTION_PLAY_URL);
+            intent.putExtra("audioUrl", audioUrl);
+            intent.putExtra("title", title);
+            intent.putExtra("artist", artist);
+            intent.putExtra("album", album);
+            if (albumArt != null) {
+                intent.putExtra("albumArt", albumArt);
+            }
+            intent.putExtra("startPositionMs", (long) startPositionMs);
+            intent.putExtra("volume", (float) volume);
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    getContext().startForegroundService(intent);
+                } else {
+                    getContext().startService(intent);
+                }
+            } catch (Exception e) {
+                System.err.println("[BackgroundAudio] playAudioUrl start failed: " + e.getMessage());
+                result.put("started", false);
+                call.resolve(result);
+                return;
+            }
+        }
+        result.put("started", true);
+        call.resolve(result);
     }
 
     @PluginMethod

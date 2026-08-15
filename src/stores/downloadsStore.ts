@@ -14,10 +14,12 @@ import {
   resumeDownload,
   repairDownloads,
   isValidBlob,
+  isTransientDownloadError,
   DownloadedSong,
   DownloadProgress,
 } from '../utils/downloadManager';
 import { metricsCollector } from '../services/metricsCollector';
+import { logger } from '../utils/logger';
 
 export type DownloadError = {
   song: Song;
@@ -75,6 +77,39 @@ const cancelledKeys = new Set<string>();
 // Track active download count
 let activeDownloadCount = 0;
 
+// ---------------------------------------------------------------------------
+// Automatic retry for transient failures
+//
+// Network blips, dropped connections and truncated transfers should not
+// require a manual retry tap. Transient failures (see
+// isTransientDownloadError) are retried automatically with backoff; the
+// original error reason is preserved and only surfaced after the final
+// attempt fails. Deterministic failures (expired link, 404, non-audio
+// payload) are never auto-retried.
+// ---------------------------------------------------------------------------
+const MAX_AUTO_RETRIES = 2;
+const RETRY_DELAYS_MS = [1000, 3000];
+const retryAttempts = new Map<string, number>();
+const pendingRetries = new Map<string, ReturnType<typeof setTimeout>>();
+
+function clearPendingRetry(key: string): void {
+  const timer = pendingRetries.get(key);
+  if (timer) {
+    clearTimeout(timer);
+    pendingRetries.delete(key);
+  }
+  retryAttempts.delete(key);
+}
+
+/** Cancel only the scheduled timer — the attempt budget stays intact. */
+function cancelRetryTimer(key: string): void {
+  const timer = pendingRetries.get(key);
+  if (timer) {
+    clearTimeout(timer);
+    pendingRetries.delete(key);
+  }
+}
+
 export const useDownloadsStore = create<DownloadsState>((set, get) => ({
   downloads: [],
   downloadingIds: new Set(),
@@ -123,7 +158,7 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
     try {
       already = await isDownloaded(key);
     } catch {
-      console.error('[DownloadsStore] isDownloaded check failed, proceeding anyway');
+      logger.error('[DownloadsStore] isDownloaded check failed, proceeding anyway');
     }
     if (already) {
       set((s) => {
@@ -220,6 +255,7 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
       if (controller.signal.aborted) return;
 
       evictOldCache().catch(() => {});
+      retryAttempts.delete(key);
 
       set((s) => {
         const newIds = new Set(s.downloadingIds);
@@ -244,8 +280,36 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
 
       if (controller.signal.aborted) return;
 
-      console.error('Download failed:', e);
+      logger.error('Download failed:', e);
       const msg = e instanceof Error ? e.message : 'Download failed';
+
+      // Transient failure with retries left: schedule an automatic retry
+      // instead of surfacing the error. The failed-download entry is only
+      // created once every attempt has been exhausted, so the preserved
+      // reason always comes from the final attempt.
+      const attempts = retryAttempts.get(key) || 0;
+      if (isTransientDownloadError(e) && attempts < MAX_AUTO_RETRIES && !cancelledKeys.has(key) && navigator.onLine) {
+        retryAttempts.set(key, attempts + 1);
+        const delay = RETRY_DELAYS_MS[Math.min(attempts, RETRY_DELAYS_MS.length - 1)];
+        logger.warn(`[DownloadsStore] Transient failure for "${song.title}" (${msg}) — auto-retry ${attempts + 1}/${MAX_AUTO_RETRIES} in ${delay}ms`);
+        cancelRetryTimer(key);
+        pendingRetries.set(key, setTimeout(() => {
+          pendingRetries.delete(key);
+          if (cancelledKeys.has(key)) { retryAttempts.delete(key); return; }
+          if (get().downloadingIds.has(key)) return;
+          void get().downloadSong(song);
+        }, delay));
+        set((s) => {
+          const newIds = new Set(s.downloadingIds);
+          newIds.delete(key);
+          const newProgress = { ...s.progressMap };
+          delete newProgress[key];
+          return { downloadingIds: newIds, progressMap: newProgress };
+        });
+        return;
+      }
+      retryAttempts.delete(key);
+
       set((s) => {
         const newIds = new Set(s.downloadingIds);
         newIds.delete(key);
@@ -267,6 +331,9 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
   },
 
   cancelDownload: (youtubeId) => {
+    // A pending auto-retry must die with the cancel — otherwise the song
+    // would start downloading again seconds after the user cancelled it.
+    clearPendingRetry(youtubeId);
     const controller = activeControllers.get(youtubeId);
     if (controller) {
       controller.abort();
@@ -275,9 +342,11 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
       // downloadSong promise always decrements exactly once (success or
       // catch path). Decrementing here too would double-decrement and
       // eventually allow more parallel downloads than maxParallel.
-    } else {
+    } else if (get().downloadingIds.has(youtubeId)) {
       // The download is still being set up — flag it so downloadSong aborts
-      // as soon as its controller is registered.
+      // as soon as its controller is registered. Only flag keys that are
+      // actually in flight: a stale flag would silently self-abort the NEXT
+      // download attempt for this song.
       cancelledKeys.add(youtubeId);
     }
     set((s) => {
@@ -313,6 +382,9 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
 
   retryDownload: (song) => {
     const key = song.youtubeId || song.id;
+    // Manual retry resets the auto-retry budget — the user explicitly asked
+    // for another attempt.
+    clearPendingRetry(key);
     set((s) => ({
       failedDownloads: s.failedDownloads.filter(f =>
         (f.song.youtubeId || f.song.id) !== key
@@ -370,7 +442,7 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
       const cacheSize = await getCacheSize();
       set({ cacheSize });
     } catch {
-      console.error('[DownloadsStore] Failed to refresh cache size');
+      logger.error('[DownloadsStore] Failed to refresh cache size');
     }
   },
 
@@ -379,7 +451,7 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
       const breakdown = await getStorageBreakdown();
       set({ storageBreakdown: breakdown });
     } catch {
-      console.error('[DownloadsStore] Failed to get storage breakdown');
+      logger.error('[DownloadsStore] Failed to get storage breakdown');
     }
   },
 
@@ -391,6 +463,9 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
       }
       activeControllers.clear();
       cancelledKeys.clear();
+      for (const timer of pendingRetries.values()) clearTimeout(timer);
+      pendingRetries.clear();
+      retryAttempts.clear();
       activeDownloadCount = 0;
 
       await clearAllDownloads();
@@ -409,7 +484,7 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
         loading: false,
       });
     } catch (error) {
-      console.error('[DownloadsStore] Failed to clear downloads:', error);
+      logger.error('[DownloadsStore] Failed to clear downloads:', error);
     }
   },
 
@@ -418,7 +493,7 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
       await clearThumbnailCache();
       await get().refreshCacheSize();
     } catch {
-      console.error('[DownloadsStore] Failed to clear thumbnail cache');
+      logger.error('[DownloadsStore] Failed to clear thumbnail cache');
     }
   },
 }));

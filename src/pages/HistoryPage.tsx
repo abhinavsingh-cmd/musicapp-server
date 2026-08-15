@@ -3,6 +3,7 @@ import { useGoBack } from '../hooks/useGoBack';
 import { useHistoryStore } from '../stores/historyStore';
 import { useAudioStore } from '../stores/audioStore';
 import { Clock, Trash2, Music, Play, ArrowLeft } from 'lucide-react';
+import { DownloadButton } from '../components/DownloadButton';
 
 const ROW_HEIGHT = 64;
 const BUFFER = 5;
@@ -19,7 +20,8 @@ const HistoryRow = memo(({ entry, formatTime, onPlay, onRemove }: {
   >
     <button
       onClick={onPlay}
-      className="w-10 h-10 rounded-lg bg-violet-500/20 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
+      aria-label={`Play ${entry.song.title}`}
+      className="w-10 h-10 rounded-lg bg-violet-500/20 flex items-center justify-center flex-shrink-0"
     >
       <Play size={16} className="text-violet-400 ml-0.5" />
     </button>
@@ -35,9 +37,12 @@ const HistoryRow = memo(({ entry, formatTime, onPlay, onRemove }: {
       <p className="text-xs text-gray-400 truncate">{entry.song.artist}</p>
     </div>
     <span className="text-xs text-gray-500 flex-shrink-0">{formatTime(entry.playedAt)}</span>
+    {/* Shared download action — always visible on mobile, never hover-gated */}
+    <DownloadButton song={entry.song} className="p-2" />
     <button
       onClick={onRemove}
-      className="w-8 h-8 rounded-full flex items-center justify-center text-gray-500 hover:text-red-400 hover:bg-red-500/10 transition-all opacity-0 group-hover:opacity-100 flex-shrink-0"
+      aria-label={`Remove ${entry.song.title} from history`}
+      className="w-8 h-8 rounded-full flex items-center justify-center text-gray-500 hover:text-red-400 hover:bg-red-500/10 transition-all flex-shrink-0"
     >
       <Trash2 size={14} />
     </button>
