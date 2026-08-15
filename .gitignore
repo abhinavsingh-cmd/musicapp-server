@@ -38,3 +38,4 @@ dist
 # Compiled Vite config (regenerated from vite.config.ts)
 vite.config.js
 vite.config.d.ts
+test-results

@@ -24,7 +24,7 @@ async function waitForPlayerIcon(page: Page, name: 'play' | 'pause', timeout = 6
   }
 }
 
-const songRow = (page: Page) => page.locator('.grid.grid-cols-12.group');
+const songRow = (page: Page) => page.locator('.song-row');
 
 async function login(page: Page) {
   await page.goto(`${BASE}/login`);
@@ -43,7 +43,9 @@ async function openPanel(page: Page, title: string) {
 }
 
 async function closePanel(page: Page, title: string) {
-  await player(page).locator(`[title="${title}"]`).click();
+  // Panel backdrop covers the player bar, so close via the dialog's button
+  await page.locator(`[role="dialog"][aria-label="${title}"] [aria-label="Close ${title}"]`).click();
+  await page.waitForTimeout(300);
 }
 
 test.describe.configure({ mode: 'serial' });
@@ -193,7 +195,7 @@ test('full user journey (desktop)', async ({ page }) => {
   // ── 3. QUEUE ───────────────────────────────────────────────────────────────
   await test.step('10. queue panel', async () => {
     await openPanel(page, 'Queue');
-    const q = page.locator('.fixed.bottom-28');
+    const q = page.locator('[role="dialog"][aria-label="Queue"]');
     await expect(q).toBeVisible();
     await expect(q.getByText('Queue', { exact: true })).toBeVisible();
     console.log('[Queue] panel opened');
@@ -203,7 +205,7 @@ test('full user journey (desktop)', async ({ page }) => {
   // ── 4. LYRICS ──────────────────────────────────────────────────────────────
   await test.step('11. lyrics panel', async () => {
     await openPanel(page, 'Lyrics');
-    const panel = page.locator('.fixed.bottom-28');
+    const panel = page.locator('[role="dialog"][aria-label="Lyrics"]');
     await expect(panel.getByText('Lyrics', { exact: true })).toBeVisible();
     await page.waitForTimeout(8000);
     const hasLines = await panel.locator('.cursor-pointer.hover\\:bg-white\\/5').count();
@@ -226,7 +228,7 @@ test('full user journey (desktop)', async ({ page }) => {
     console.log('[EQ] all 10 presets rendered');
 
     // 10 band sliders + 3 extra sliders live in the panel, not the player bar
-    const panel = page.locator('.fixed.bottom-28');
+    const panel = page.locator('[role="dialog"][aria-label="Equalizer"]');
     const ranges = panel.locator('input[type="range"]');
     console.log(`[EQ] range inputs: ${await ranges.count()}`);
     expect(await ranges.count()).toBeGreaterThanOrEqual(13);
@@ -387,7 +389,7 @@ await test.step('13. keyboard shortcuts (L=favorite, space, shift+arrows/N/P)', 
   await test.step('18. history page', async () => {
     await page.goto(`${BASE}/history`);
     await expect(page.getByRole('heading', { name: /History/i }).first()).toBeVisible();
-    const clearBtn = page.getByRole('button', { name: /Clear all/i });
+    const clearBtn = page.getByRole('button', { name: /Clear History/i });
     if (await clearBtn.count()) {
       await clearBtn.click();
       console.log('[History] cleared');

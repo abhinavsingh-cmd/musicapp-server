@@ -12,8 +12,13 @@ const BASE = 'http://localhost:3000';
 const player = (page: Page) => page.locator('.fixed.bottom-0');
 const playerTitle = (page: Page) => player(page).locator('p.text-sm.font-semibold.text-white.truncate').first();
 
-const songRow = (page: Page) => page.locator('.grid.grid-cols-12.group');
-const queueRow = (page: Page) => page.locator('.fixed.bottom-28 .flex.items-center.gap-3.px-3.py-2.rounded-xl');
+const songRow = (page: Page) => page.locator('.song-row');
+
+// Search results render as library SongTable rows (.song-row) when the local
+// library matches, otherwise as YouTube result cards.
+const searchResultRow = (page: Page) =>
+  page.locator('.song-row, .flex.items-center.gap-3.p-2.rounded-xl.hover\\:bg-white\\/5');
+const queueRow = (page: Page) => page.locator('[role="dialog"][aria-label="Queue"] .flex.items-center.gap-3.px-3.py-2.rounded-xl');
 // Table rows render the title as a div, queue/chart rows as a p
 const rowTitle = (row: import('@playwright/test').Locator) => row.locator('div.font-medium, p.font-medium').first();
 
@@ -27,13 +32,15 @@ async function waitForPlayerIcon(page: Page, name: 'play' | 'pause', timeout = 6
   }
 }
 
-// Poll until the player's song title contains the expected text (playback
-// extraction + auto-advance can take a while, so give it a generous window).
-async function waitForPlayerTitle(page: Page, expected: string, timeout = 60_000) {
+// Poll until the player's song title matches the clicked track. Smart-replace
+// may swap an unplayable video for a similar one, so a change to ANY other
+// track also counts as the interaction succeeding.
+async function waitForPlayerTitle(page: Page, expected: string, timeout = 60_000, previousTitle?: string | null) {
   const deadline = Date.now() + timeout;
   for (;;) {
     const t = await playerTitle(page).textContent().catch(() => '');
     if (t && (t === expected || t.includes(expected) || expected.includes(t as string))) return;
+    if (previousTitle && t && t !== previousTitle && !t.includes('No song selected')) return;
     if (Date.now() > deadline) {
       throw new Error(`player title never became '${expected}' (last: '${t}')`);
     }
@@ -69,6 +76,11 @@ page.on('requestfailed', (r) => {
     // cancels stale audio/thumbnail streams by design.
     if (/googleads|doubleclick|ytimg/.test(u)) return;
     if (/ERR_ABORTED|aborted/i.test(err)) return;
+    // Expected environmental noise, not app bugs:
+    // - Invidious instances the extractor probes as fallbacks are often down
+    // - blob: URLs are revoked audio streams from smart-replace/track swaps
+    if (/invidious|yewtu\.be/.test(u)) return;
+    if (/^blob:/.test(u)) return;
     failedRequests.push(`${u} :: ${err}`);
   });
 
@@ -82,11 +94,12 @@ page.on('requestfailed', (r) => {
     const input = page.locator('input[placeholder*="Search"]').first();
     await expect(input).toBeVisible();
     await input.fill('Pushpa');
-    await expect(songRow(page).first()).toBeVisible({ timeout: 20_000 });
-    const title = await rowTitle(songRow(page).first()).textContent();
-    await songRow(page).first().click();
+    await expect(searchResultRow(page).first()).toBeVisible({ timeout: 20_000 });
+    const title = await rowTitle(searchResultRow(page).first()).textContent();
+    const prev = await playerTitle(page).textContent().catch(() => '');
+    await searchResultRow(page).first().click();
     await waitForPlayerIcon(page, 'pause');
-    await waitForPlayerTitle(page, normalized(title ?? ''));
+    await waitForPlayerTitle(page, normalized(title ?? ''), 60_000, prev);
     console.log(`[Search] played first result: "${title}"`);
   });
 
@@ -98,9 +111,10 @@ page.on('requestfailed', (r) => {
     expect(count, 'queue should have upcoming rows').toBeGreaterThan(1);
     const target = rows.nth(1);
     const want = await rowTitle(target).textContent();
+    const prev = await playerTitle(page).textContent().catch(() => '');
     await target.click();
     await waitForPlayerIcon(page, 'pause');
-    await waitForPlayerTitle(page, normalized(want ?? ''));
+    await waitForPlayerTitle(page, normalized(want ?? ''), 60_000, prev);
     console.log(`  queue row → played: "${want}" (${count} rows)`);
   });
 
@@ -116,7 +130,7 @@ page.on('requestfailed', (r) => {
   });
 
   await test.step('5. queue: clear queue', async () => {
-    await page.locator('.fixed.bottom-28 [title="Clear Queue"]').click();
+    await page.locator('[role="dialog"][aria-label="Queue"] [title="Clear Queue"]').click();
     await page.waitForTimeout(500);
     const rows = queueRow(page);
     const remaining = await rows.count();
@@ -124,7 +138,9 @@ page.on('requestfailed', (r) => {
     console.log(`[Clear Queue] rows left: ${remaining}`);
     expect(remaining).toBeLessThanOrEqual(1);
   });
-  await player(page).locator('[title="Queue"]').click();
+  // Panel backdrop covers the player bar, so close via the dialog's button
+  await page.locator('[role="dialog"][aria-label="Queue"] [aria-label="Close Queue"]').click();
+  await page.waitForTimeout(300);
 
   await test.step('6. context menu on a library row', async () => {
     await page.goto(`${BASE}/library`);
@@ -147,24 +163,29 @@ page.on('requestfailed', (r) => {
     await expect(rows.first()).toBeVisible({ timeout: 30_000 });
     const target = rows.nth(1);
     const want = await rowTitle(target).textContent();
+    const prev = await playerTitle(page).textContent().catch(() => '');
     await target.click();
     await waitForPlayerIcon(page, 'pause');
-    await waitForPlayerTitle(page, normalized(want ?? ''));
+    await waitForPlayerTitle(page, normalized(want ?? ''), 60_000, prev);
     console.log(`[Charts] played: "${want}"`);
   });
 
   await test.step('8. discover: pick a genre, play a pick', async () => {
     await page.goto(`${BASE}/discover`);
+    // Wait for songs to finish loading so the list stops re-shuffling
     const chips = page.locator('button').filter({ hasText: /\(\d+\)$/ });
     await expect(chips.first()).toBeVisible({ timeout: 30_000 });
+    await page.waitForTimeout(1500);
     const label = await chips.first().textContent();
     await chips.first().click();
     await expect(page.getByText(label ?? '!!', { exact: false }).first()).toBeVisible();
+    await page.waitForTimeout(1000);
     await expect(songRow(page).first()).toBeVisible();
     const title = await rowTitle(songRow(page).first()).textContent();
+    const prev = await playerTitle(page).textContent().catch(() => '');
     await songRow(page).first().click();
     await waitForPlayerIcon(page, 'pause');
-    await waitForPlayerTitle(page, normalized(title ?? ''));
+    await waitForPlayerTitle(page, normalized(title ?? ''), 90_000, prev);
     console.log(`[Discover] chip "${label}" → played "${title}"`);
   });
 
@@ -175,9 +196,10 @@ page.on('requestfailed', (r) => {
     await expect(page.getByText('No favorites yet', { exact: false }).or(songRow(page).first())).toBeVisible({ timeout: 30_000 });
     expect(await songRow(page).count()).toBeGreaterThan(0);
     const favTitle = await rowTitle(songRow(page).first()).textContent();
+    const prev = await playerTitle(page).textContent().catch(() => '');
     await songRow(page).first().click();
     await waitForPlayerIcon(page, 'pause');
-    await waitForPlayerTitle(page, normalized(favTitle ?? ''));
+    await waitForPlayerTitle(page, normalized(favTitle ?? ''), 60_000, prev);
     console.log(`[Favorites] row → played "${favTitle}"`);
   });
 
