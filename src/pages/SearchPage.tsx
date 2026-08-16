@@ -21,6 +21,8 @@ import {
   FilterType,
   SortMode,
   DurationFilter,
+  SearchStatus,
+  isFailureStatus,
   YTSong,
 } from '../stores/searchStore';
 import { cn } from '../utils/cn';
@@ -79,6 +81,11 @@ export const SearchPage: React.FC = memo(() => {
   const goBack = useGoBack();
   const inputRef = useRef<HTMLInputElement>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
+  // The last query actually sent to the store. The effect below re-runs when
+  // `showSuggestions` flips (input focus), which would otherwise re-fire an
+  // identical completed search — a duplicate request. Only a query CHANGE
+  // may trigger search(); retries go through the banner's Retry button.
+  const lastSearchedQueryRef = useRef<string | null>(null);
   const [query, setQuery] = useState('');
   const [showFilters, setShowFilters] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(false);
@@ -131,7 +138,10 @@ export const SearchPage: React.FC = memo(() => {
   const loadSong = useAudioStore((s) => s.loadSong);
 
   useEffect(() => {
-    search(debouncedQuery);
+    if (debouncedQuery !== lastSearchedQueryRef.current) {
+      lastSearchedQueryRef.current = debouncedQuery;
+      search(debouncedQuery);
+    }
     if (debouncedQuery && !showSuggestions) {
       setShowSuggestions(true);
     }
@@ -139,9 +149,15 @@ export const SearchPage: React.FC = memo(() => {
 
   useEffect(() => {
     if (!sentinelRef.current || !hasMore) return;
-    const isLoading = ytStatus === 'loading';
+    // Auto-page ONLY from a settled success/empty state. Re-firing loadMore
+    // from a failure state (error/timeout/network/offline) re-enters the
+    // loading state every time the observer re-fires while the sentinel is
+    // visible — with the backend down that loops the "Searching YouTube..."
+    // spinner forever. A failed page stays failed until the user retries
+    // (the failure banner's Retry re-runs search()).
+    const canAutoPage = ytStatus === 'success' || ytStatus === 'empty';
     const obs = new IntersectionObserver(
-      ([entry]) => { if (entry.isIntersecting && !isLoading && hasMore) loadMore(); },
+      ([entry]) => { if (entry.isIntersecting && canAutoPage && hasMore) loadMore(); },
       { rootMargin: '200px' },
     );
     obs.observe(sentinelRef.current);
@@ -183,9 +199,33 @@ export const SearchPage: React.FC = memo(() => {
   // different state with its own banner/retry, not an empty result set.
   const isNoResults =
     query &&
-    status !== 'loading' && ytStatus !== 'loading' &&
-    status !== 'error' && ytStatus !== 'error' && status !== 'offline' &&
+    status !== 'loading' && status !== 'retrying' &&
+    ytStatus !== 'loading' && ytStatus !== 'retrying' &&
+    !isFailureStatus(status) && !isFailureStatus(ytStatus) &&
     !hasResults;
+
+  // The YouTube section renders only when it has something to say: an
+  // explicit loading/retrying spinner, results, or a YouTube-only failure
+  // (the library half succeeded and carries the page).
+  const showYtSection = !!query && (
+    ytStatus === 'loading' || ytStatus === 'retrying' ||
+    ytResults.length > 0 ||
+    // Explicit "no YouTube results" state: the library half succeeded but
+    // YouTube answered with zero rows — that is a real outcome, not an
+    // error and not a hidden section.
+    (ytStatus === 'empty' && status === 'success') ||
+    (isFailureStatus(ytStatus) && status === 'success')
+  );
+
+  const ytFailureMessage = (s: SearchStatus, err: string | null): string => {
+    switch (s) {
+      case 'timeout': return 'YouTube search timed out. Try again.';
+      case 'network': return 'Could not reach YouTube — network error.';
+      case 'offline': return 'You are offline — YouTube search is unavailable.';
+      case 'error': return err || 'YouTube search failed (server error). Try again.';
+      default: return err || 'YouTube search failed.';
+    }
+  };
 
   return (
     <div className="p-4 sm:p-6 space-y-5">
@@ -353,7 +393,7 @@ export const SearchPage: React.FC = memo(() => {
         </div>
       )}
 
-      {status === 'error' && error && (
+      {status === 'network' && error && (
         <div className="flex items-center gap-3 text-red-400 py-4 px-4 rounded-xl bg-red-500/10 border border-red-500/20">
           <AlertCircle size={18} />
           <span className="text-sm">{error}</span>
@@ -363,12 +403,20 @@ export const SearchPage: React.FC = memo(() => {
         </div>
       )}
 
-      {/* YouTube-only failure: library results stay visible; the dead YouTube
-          backend is surfaced explicitly instead of masquerading as "no results". */}
-      {query && ytStatus === 'error' && error && status !== 'error' && status !== 'offline' && (
-        <div className="flex items-center gap-3 text-red-400 py-3 px-4 rounded-xl bg-red-500/10 border border-red-500/20">
+      {status === 'timeout' && error && (
+        <div className="flex items-center gap-3 text-red-400 py-4 px-4 rounded-xl bg-red-500/10 border border-red-500/20">
           <AlertCircle size={18} />
-          <span className="text-sm">YouTube search failed — {error}</span>
+          <span className="text-sm">{error}</span>
+          <button onClick={() => search(query)} className="ml-auto text-xs text-red-300 hover:text-white underline">
+            Retry
+          </button>
+        </div>
+      )}
+
+      {status === 'error' && error && (
+        <div className="flex items-center gap-3 text-red-400 py-4 px-4 rounded-xl bg-red-500/10 border border-red-500/20">
+          <AlertCircle size={18} />
+          <span className="text-sm">{error}</span>
           <button onClick={() => search(query)} className="ml-auto text-xs text-red-300 hover:text-white underline">
             Retry
           </button>
@@ -435,17 +483,29 @@ export const SearchPage: React.FC = memo(() => {
         </ErrorBoundary>
       )}
 
-      {(ytStatus === 'loading' || ytResults.length > 0) && query && (
+      {showYtSection && (
         <ErrorBoundary level="section" onReset={() => search(query)}>
         <div>
           <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3 flex items-center gap-2">
             <Globe size={14} className="text-red-400" />YouTube {ytResults.length > 0 ? `(${ytResults.length})` : ''}
           </h3>
-          {ytStatus === 'loading' && ytResults.length === 0 ? (
+
+          {(ytStatus === 'loading' || ytStatus === 'retrying') && ytResults.length === 0 && (
             <div className="flex items-center gap-3 text-gray-400 py-6">
-              <Loader2 size={20} className="animate-spin text-violet-400" />Searching YouTube...
+              <Loader2 size={20} className="animate-spin text-violet-400" />
+              {ytStatus === 'retrying' ? 'Retrying...' : 'Searching YouTube...'}
             </div>
-          ) : (
+          )}
+
+          {ytStatus === 'empty' && status === 'success' && ytResults.length === 0 && (
+            <div className="text-center py-6">
+              <SearchX size={28} className="mx-auto text-gray-600 mb-2" />
+              <p className="text-gray-500 text-sm">No YouTube results found</p>
+              <p className="text-gray-600 text-xs mt-1">Try a different search term</p>
+            </div>
+          )}
+
+          {ytResults.length > 0 && (
             <div className="space-y-2">
               {ytResults.filter((r) => r && r.id).map((r) => {
                 const ytSong: Song = {
@@ -490,11 +550,24 @@ export const SearchPage: React.FC = memo(() => {
               })}
 
               <div ref={sentinelRef} className="h-4" />
-              {ytStatus === 'loading' && ytResults.length > 0 && (
+              {(ytStatus === 'loading' || ytStatus === 'retrying') && (
                 <div className="flex justify-center py-4">
                   <Loader2 size={20} className="animate-spin text-violet-400" />
                 </div>
               )}
+            </div>
+          )}
+
+          {/* YouTube-only failure: library results stay visible; the dead
+              YouTube backend is surfaced explicitly instead of masquerading
+              as "no results". */}
+          {isFailureStatus(ytStatus) && status === 'success' && (
+            <div className="flex items-center gap-3 text-red-400 py-3 px-4 rounded-xl bg-red-500/10 border border-red-500/20">
+              <AlertCircle size={18} />
+              <span className="text-sm">{ytFailureMessage(ytStatus, error)}</span>
+              <button onClick={() => search(query)} className="ml-auto text-xs text-red-300 hover:text-white underline">
+                Retry
+              </button>
             </div>
           )}
         </div>

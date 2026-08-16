@@ -101,6 +101,10 @@ export const Player: React.FC<PlayerProps> = memo(({ className }) => {
   const error = useAudioStore((s) => s.error);
   const currentSong = useAudioStore((s) => s.currentSong);
   const retry = useAudioStore((s) => s.retry);
+  // True idle state: no track loaded. The bar must not look like an active
+  // player (no progress row, no transport cluster) and must not run any
+  // playback timer — ProgressBar mounts only when there is a song.
+  const hasSong = currentSong !== null;
   const playerBarRef = useRef<HTMLDivElement>(null);
   usePlayerLayout(playerBarRef);
 
@@ -117,6 +121,9 @@ export const Player: React.FC<PlayerProps> = memo(({ className }) => {
   }, []);
 
   const togglePanel = useCallback((panel: 'lyrics' | 'equalizer' | 'queue') => {
+    // A panel is a modal takeover — it replaces the expanded player instead of
+    // stacking under/over it (both are z-[60] bottom sheets).
+    setIsExpanded(false);
     if (panel === 'lyrics') {
       setShowLyrics((v) => !v);
       setShowEqualizer(false);
@@ -144,8 +151,9 @@ export const Player: React.FC<PlayerProps> = memo(({ className }) => {
     };
   }, [togglePanel, closeAll]);
 
-  // Lock body scroll when any panel is open
-  const hasOpenPanel = showQueue || showLyrics || showEqualizer;
+  // Lock body scroll when any panel is open (the expanded sheet covers the
+  // content area like a panel does).
+  const hasOpenPanel = showQueue || showLyrics || showEqualizer || isExpanded;
   useEffect(() => {
     if (hasOpenPanel) {
       document.body.style.overflow = 'hidden';
@@ -222,7 +230,7 @@ export const Player: React.FC<PlayerProps> = memo(({ className }) => {
           </div>
         )}
 
-        <ProgressBar />
+        {hasSong && <ProgressBar />}
 
         <div className="flex items-center px-4 gap-4 relative z-10" style={{ height: '64px' }}>
           <SongInfo className="flex-1 min-w-0" />
@@ -271,63 +279,78 @@ export const Player: React.FC<PlayerProps> = memo(({ className }) => {
           <PlayerControls className="flex-shrink-0" />
         </div>
 
-        {/* Mobile expanded view */}
-        {isExpanded && (
-          <div className="lg:hidden pb-safe overflow-y-auto" style={{ maxHeight: 'calc(100vh - 100px)' }}>
-            <div className="px-4 pb-4 space-y-4">
-              <div className="flex items-center justify-between">
-                <h3 className="text-lg font-semibold text-white">Now Playing</h3>
-                <button
-                  onClick={() => setIsExpanded(false)}
-                  className="w-8 h-8 rounded-full bg-white/5 flex items-center justify-center text-gray-400 hover:text-white hover:bg-white/10 transition-all active:scale-90"
-                >
-                  <ChevronDown size={20} />
-                </button>
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <button
-                  onClick={() => togglePanel('lyrics')}
-                  className={cn(
-                    "p-4 rounded-2xl bg-white/10 text-center transition-all active:scale-95",
-                    showLyrics ? "bg-violet-500/20 border border-violet-500/30" : ""
-                  )}
-                >
-                  <Mic2 size={24} className="mx-auto mb-2 text-white" />
-                  <span className="text-sm font-medium">Lyrics</span>
-                </button>
-                <button
-                  onClick={() => togglePanel('equalizer')}
-                  className={cn(
-                    "p-4 rounded-2xl bg-white/10 text-center transition-all active:scale-95",
-                    showEqualizer ? "bg-violet-500/20 border border-violet-500/30" : ""
-                  )}
-                >
-                  <Sliders size={24} className="mx-auto mb-2 text-white" />
-                  <span className="text-sm font-medium">Equalizer</span>
-                </button>
-                <button
-                  onClick={() => togglePanel('queue')}
-                  className={cn(
-                    "p-4 rounded-2xl bg-white/10 text-center transition-all active:scale-95",
-                    showQueue ? "bg-violet-500/20 border border-violet-500/30" : ""
-                  )}
-                >
-                  <ListMusic size={24} className="mx-auto mb-2 text-white" />
-                  <span className="text-sm font-medium">Queue</span>
-                </button>
-              </div>
+        {hasSong && (
+          <button
+            onClick={() => setIsExpanded((v) => !v)}
+            className="lg:hidden w-full h-2 bg-gradient-to-r from-transparent via-violet-500/30 to-transparent rounded-t-2xl"
+            aria-label="Expand player"
+          >
+            {isExpanded ? (
+              <ChevronDown size={16} className="mx-auto text-violet-400" />
+            ) : (
+              <ChevronUp size={16} className="mx-auto text-violet-400" />
+            )}
+          </button>
+        )}
+      </div>
+
+      {/* Mobile expanded view — a bottom-sheet OVERLAY above the collapsed
+          bar, NOT a child of it. It must never grow the measured --player-h:
+          the bar staying collapsed keeps the bottom nav anchored and the
+          content padding stable (a sheet that inflated the bar pushed the
+          nav to mid-screen and ballooned the scroll padding). */}
+      {hasSong && isExpanded && (
+        <div
+          className="fixed left-0 right-0 z-[60] bottom-[var(--player-h,72px)] lg:hidden bg-[#121220] border-t border-white/10 rounded-t-3xl pb-safe overflow-y-auto overscroll-contain"
+          style={{ maxHeight: 'calc(85vh - var(--player-h, 72px))' }}
+          role="dialog"
+          aria-label="Now Playing"
+        >
+          <div className="px-4 pb-4 pt-3 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold text-white">Now Playing</h3>
+              <button
+                onClick={() => setIsExpanded(false)}
+                className="w-8 h-8 rounded-full bg-white/5 flex items-center justify-center text-gray-400 hover:text-white hover:bg-white/10 transition-all active:scale-90"
+              >
+                <ChevronDown size={20} />
+              </button>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <button
+                onClick={() => togglePanel('lyrics')}
+                className={cn(
+                  "p-4 rounded-2xl bg-white/10 text-center transition-all active:scale-95",
+                  showLyrics ? "bg-violet-500/20 border border-violet-500/30" : ""
+                )}
+              >
+                <Mic2 size={24} className="mx-auto mb-2 text-white" />
+                <span className="text-sm font-medium">Lyrics</span>
+              </button>
+              <button
+                onClick={() => togglePanel('equalizer')}
+                className={cn(
+                  "p-4 rounded-2xl bg-white/10 text-center transition-all active:scale-95",
+                  showEqualizer ? "bg-violet-500/20 border border-violet-500/30" : ""
+                )}
+              >
+                <Sliders size={24} className="mx-auto mb-2 text-white" />
+                <span className="text-sm font-medium">Equalizer</span>
+              </button>
+              <button
+                onClick={() => togglePanel('queue')}
+                className={cn(
+                  "p-4 rounded-2xl bg-white/10 text-center transition-all active:scale-95",
+                  showQueue ? "bg-violet-500/20 border border-violet-500/30" : ""
+                )}
+              >
+                <ListMusic size={24} className="mx-auto mb-2 text-white" />
+                <span className="text-sm font-medium">Queue</span>
+              </button>
             </div>
           </div>
-        )}
-
-        <button
-          onClick={() => setIsExpanded(true)}
-          className="lg:hidden w-full h-2 bg-gradient-to-r from-transparent via-violet-500/30 to-transparent rounded-t-2xl"
-          aria-label="Expand player"
-        >
-          <ChevronUp size={16} className="mx-auto text-violet-400" />
-        </button>
-      </div>
+        </div>
+      )}
     </>
   );
 });

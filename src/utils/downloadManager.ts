@@ -28,6 +28,26 @@ const STORE_META = 'meta';
 const MAX_CACHE_SIZE = 500 * 1024 * 1024; // 500 MB soft limit
 const MIN_AUDIO_SIZE = 10 * 1024; // 10 KB — anything smaller is not a valid audio file
 
+/**
+ * Hard deadline for the initial download request (response headers). The
+ * server's /api/download endpoint buffers the whole yt-dlp payload before
+ * committing headers and caps each attempt at 60s × 2 attempts, so a
+ * healthy-but-slow download can legitimately take ~2 minutes. This bound
+ * sits above that: it only fires when the server accepts the connection but
+ * NEVER responds (a wedged process/network) — which would otherwise leave
+ * the row button spinning forever.
+ */
+export const HEADER_TIMEOUT_MS = 150_000;
+
+/**
+ * No-data stall deadline while streaming the body. Reset on every received
+ * chunk, so it only fires when the connection is truly dead (no bytes AND no
+ * end-of-stream for this long) — the server's own idle caps are shorter, so
+ * a healthy transfer can never trip it. Without this a wedged mid-stream
+ * connection keeps the download "in progress" forever.
+ */
+export const STALL_TIMEOUT_MS = 40_000;
+
 // ---------------------------------------------------------------------------
 // IndexedDB helpers
 // ---------------------------------------------------------------------------
@@ -143,6 +163,15 @@ function getThumbnailObjectUrl(entry: CachedThumbnail): string {
   if (existing) return existing;
   const objectUrl = URL.createObjectURL(entry.blob);
   thumbnailUrlCache.set(entry.url, objectUrl);
+  // Bounded map: evict the oldest entry (and its object URL) when full.
+  if (thumbnailUrlCache.size > MAX_THUMBNAIL_URLS) {
+    const oldest = thumbnailUrlCache.keys().next().value;
+    if (oldest !== undefined) {
+      const oldUrl = thumbnailUrlCache.get(oldest);
+      if (oldUrl) URL.revokeObjectURL(oldUrl);
+      thumbnailUrlCache.delete(oldest);
+    }
+  }
   return objectUrl;
 }
 
@@ -184,6 +213,23 @@ function downloadFailure(message: string, opts?: { transient?: boolean; cause?: 
   const err = new Error(message, opts?.cause !== undefined ? { cause: opts.cause } : undefined);
   (err as { transient?: boolean }).transient = opts?.transient ?? false;
   return err;
+}
+
+/**
+ * Race a promise against a hard deadline. `onTimeout` runs first so the
+ * caller can cancel the underlying operation (abort the fetch, cancel the
+ * reader) before the TimeoutError rejects the race. The wrapped operation is
+ * abandoned — the returned promise ALWAYS settles within `ms`.
+ */
+function raceWithTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () => void): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      onTimeout();
+      reject(new DOMException('TimedOut', 'TimeoutError'));
+    }, ms);
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
 }
 
 // ---------------------------------------------------------------------------
@@ -332,18 +378,35 @@ export async function downloadSongWithProgress(
   if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 
   let res: Response;
+  // The caller's abort must still cancel the fetch — it forwards to a local
+  // controller so exactly one abort path drives the request. A hard header
+  // deadline then races the fetch itself: a server that accepts the
+  // connection but never responds (wedged process/network) is a transient
+  // failure instead of an endless spinner.
+  const requestController = new AbortController();
+  const forwardCallerAbort = () => requestController.abort();
+  signal?.addEventListener('abort', forwardCallerAbort, { once: true });
   try {
     // fetch() follows redirects automatically; whatever the final hop serves
     // still passes every validation below (status, content-type, magic bytes).
-    res = await fetch(downloadUrl, {
-      signal,
-      redirect: 'follow',
-      headers: { 'Accept': 'audio/*' },
-    });
+    res = await raceWithTimeout(
+      fetch(downloadUrl, {
+        signal: requestController.signal,
+        redirect: 'follow',
+        headers: { 'Accept': 'audio/*' },
+      }),
+      HEADER_TIMEOUT_MS,
+      () => requestController.abort(),
+    );
   } catch (fetchErr: any) {
     if (fetchErr?.name === 'AbortError' || signal?.aborted) throw fetchErr;
+    if (fetchErr?.name === 'TimeoutError') {
+      throw downloadFailure('Download request timed out — the server did not respond', { transient: true, cause: fetchErr });
+    }
     logger.error('[Download] fetch() failed:', fetchErr?.message || fetchErr);
     throw downloadFailure(`Network error: ${fetchErr?.message || fetchErr}`, { transient: true, cause: fetchErr });
+  } finally {
+    signal?.removeEventListener('abort', forwardCallerAbort);
   }
 
   if (res.redirected) {
@@ -407,6 +470,33 @@ export async function downloadSongWithProgress(
   const chunks: Uint8Array[] = [];
   let received = 0;
 
+  // A cancel while paused must release the pause gate — otherwise the read
+  // loop blocks on it forever, the downloadSong promise never settles, and
+  // the store's parallel-download slot leaks until new downloads queue up.
+  const releasePauseOnAbort = () => {
+    const c = activeControllers.get(track.externalId || track.id);
+    if (c?.pauseGate) { c.pauseGate.resolve(); c.pauseGate = null; }
+  };
+  if (signal) signal.addEventListener('abort', releasePauseOnAbort, { once: true });
+
+  // Stall-safe read: any single read that yields nothing for STALL_TIMEOUT_MS
+  // is a dead connection. The race rejects independently of the reader so a
+  // platform that never surfaces the stall cannot leave the download pending.
+  const readWithStall = (): Promise<ReadableStreamReadResult<Uint8Array>> =>
+    new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        try { reader.cancel(); } catch {}
+        reject(downloadFailure(`Download stalled — no data received for ${STALL_TIMEOUT_MS / 1000}s`, { transient: true }));
+      }, STALL_TIMEOUT_MS);
+      reader.read().then(
+        (r) => { if (!settled) { settled = true; clearTimeout(timer); resolve(r); } },
+        (err) => { if (!settled) { settled = true; clearTimeout(timer); reject(err); } },
+      );
+    });
+
   try {
     while (true) {
       if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
@@ -418,7 +508,7 @@ export async function downloadSongWithProgress(
         if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
       }
 
-      const { done, value } = await reader.read();
+      const { done, value } = await readWithStall();
       if (done) break;
       chunks.push(value);
       received += value.length;
@@ -436,12 +526,21 @@ export async function downloadSongWithProgress(
     if (isTransientDownloadError(err)) throw err;
     logger.error('[Download] Stream interrupted:', err?.message || err);
     throw downloadFailure(`Connection lost during download${err?.message ? ': ' + err.message : ''}`, { transient: true, cause: err });
+  } finally {
+    signal?.removeEventListener('abort', releasePauseOnAbort);
   }
 
   // Partial transfer: the server declared more bytes than the connection
   // actually delivered. Never persist a truncated file as a valid download.
   if (contentLength > 0 && received < contentLength) {
     throw downloadFailure(`Incomplete download: received ${received} of ${contentLength} bytes`, { transient: true });
+  }
+
+  // A fully-empty stream is never a valid download. Rejected explicitly so
+  // the error names the real cause, and so the "invalid file" check below
+  // can never report a 0-byte file.
+  if (received === 0) {
+    throw downloadFailure('Downloaded file is empty: 0 bytes — the server returned no audio data', { transient: true });
   }
 
   if (received < MIN_AUDIO_SIZE) {
@@ -491,7 +590,7 @@ export async function downloadSongWithProgress(
   entry.audioUrl = URL.createObjectURL(blob);
 
   // Cache thumbnail in background
-  cacheThumbnail(track.artwork).catch(() => {});
+  getCachedImageUrl(track.artwork).catch(() => {});
 
   // Cache metadata
   cacheMetadata({
@@ -510,40 +609,47 @@ export async function downloadSongWithProgress(
 }
 
 // ---------------------------------------------------------------------------
-// Thumbnail cache
+// Thumbnail cache — THE single image cache for the app
 // ---------------------------------------------------------------------------
+// CachedImage (UI cover art) and the download pipeline both read through
+// this one function. Blobs persist in IndexedDB (offline-safe, counted in
+// the storage breakdown) and surface as blob: URLs via a bounded in-memory
+// map so repeat renders never re-read the DB or re-fetch the network.
 
-export async function cacheThumbnail(url: string): Promise<string> {
-  if (!url) return '';
+/** Cap for the in-memory blob-URL map (evicts oldest first). */
+const MAX_THUMBNAIL_URLS = 100;
+
+/**
+ * Resolve a cover-art URL to a cached blob: URL, fetching and persisting on
+ * miss. Returns the original URL unchanged for empty/data: URLs and when the
+ * fetch fails (callers fall back to the remote URL).
+ */
+export async function getCachedImageUrl(url: string): Promise<string> {
+  if (!url || url.startsWith('data:')) return url;
+
+  // Fast path: already materialized as a blob URL this session.
+  const memHit = thumbnailUrlCache.get(url);
+  if (memHit) return memHit;
+
   const db = await openDB();
-  const existing = await txGet<CachedThumbnail>(db, STORE_THUMBS, url);
-  if (existing?.blob) {
-    db.close();
-    return getThumbnailObjectUrl(existing);
-  }
-
   try {
+    const existing = await txGet<CachedThumbnail>(db, STORE_THUMBS, url);
+    if (existing?.blob) return getThumbnailObjectUrl(existing);
+
+    // Fetch + persist on miss.
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10_000);
-    const res = await fetch(url, { signal: controller.signal });
+    const res = await fetch(url, { credentials: 'omit', signal: controller.signal });
     clearTimeout(timer);
-    if (!res.ok) { db.close(); return url; }
+    if (!res.ok) return url;
     const blob = await res.blob();
     await txPut(db, STORE_THUMBS, { url, blob, cachedAt: Date.now() });
-    db.close();
     return getThumbnailObjectUrl({ url, blob, cachedAt: Date.now() });
   } catch {
-    db.close();
     return url;
+  } finally {
+    db.close();
   }
-}
-
-export async function getCachedThumbnail(url: string): Promise<string> {
-  if (!url) return '';
-  const db = await openDB();
-  const entry = await txGet<CachedThumbnail>(db, STORE_THUMBS, url);
-  db.close();
-  return entry?.blob ? getThumbnailObjectUrl(entry) : url;
 }
 
 // ---------------------------------------------------------------------------

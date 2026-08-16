@@ -89,6 +89,56 @@ public class AndroidDownloadManagerTest {
         assertNull(AndroidDownloadManager.validateDownloadedFile(m4a));
     }
 
+    // ── Content-Length aware validation ────────────────────────────────────
+
+    @Test
+    public void validateWithDeclaredSize_rejectsTruncatedFile() throws IOException {
+        // Valid header, large enough to pass every sniff — only the declared
+        // Content-Length can catch that the transfer was cut off.
+        File file = writeFile("truncated.mp3", id3Header(32 * 1024));
+        String reason = AndroidDownloadManager.validateDownloadedFile(file, 64L * 1024);
+        assertNotNull(reason);
+        assertTrue("reason must mention the truncation: " + reason, reason.contains("truncated"));
+    }
+
+    @Test
+    public void validateWithDeclaredSize_acceptsExactMatch() throws IOException {
+        File file = writeFile("ok.mp3", id3Header(32 * 1024));
+        assertNull(AndroidDownloadManager.validateDownloadedFile(file, 32 * 1024));
+    }
+
+    @Test
+    public void validateWithDeclaredSize_ignoresUnknownOrZeroSize() throws IOException {
+        // Unknown (-1) or unset (0) declared sizes must not reject a valid file.
+        File file = writeFile("ok.mp3", id3Header(32 * 1024));
+        assertNull(AndroidDownloadManager.validateDownloadedFile(file, -1));
+        assertNull(AndroidDownloadManager.validateDownloadedFile(file, 0));
+    }
+
+    @Test
+    public void validateWithDeclaredSize_stillRejectsZeroByteFile() throws IOException {
+        File empty = tmp.newFile("empty.mp3");
+        String reason = AndroidDownloadManager.validateDownloadedFile(empty, 50_000);
+        assertNotNull(reason);
+        assertTrue(reason.contains("0 bytes"));
+    }
+
+    // ── Invalid-file cleanup ───────────────────────────────────────────────
+
+    @Test
+    public void deleteQuietly_removesInvalidFile() throws IOException {
+        File garbage = tmp.newFile("garbage.mp3");
+        assertTrue(garbage.exists());
+        assertTrue(AndroidDownloadManager.deleteFileQuietly(garbage));
+        assertFalse(garbage.exists());
+    }
+
+    @Test
+    public void deleteQuietly_handlesNullAndMissing() {
+        assertFalse(AndroidDownloadManager.deleteFileQuietly(null));
+        assertFalse(AndroidDownloadManager.deleteFileQuietly(new File(tmp.getRoot(), "never-existed.mp3")));
+    }
+
     // ── Magic byte sniffing ────────────────────────────────────────────────
 
     @Test

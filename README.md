@@ -97,14 +97,6 @@ npm test
 npx playwright test
 ```
 
-Smoke and diagnostic scripts are also available:
-
-```bash
-node e2e-smoke.mjs        # quick smoke test
-node e2e-prod.mjs         # production environment test
-node e2e-diagnostic.mjs   # detailed diagnostics
-```
-
 ## Android (Capacitor)
 
 ```bash

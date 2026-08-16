@@ -3,9 +3,24 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 vi.mock('../config/api', () => ({
   apiFetch: vi.fn(),
   api: (path: string) => `/api${path}`,
+  raceWithDeadline: <T,>(
+    promise: Promise<T>,
+    ms: number,
+    _url: string,
+    onTimeout?: () => void,
+  ) => {
+    let timer: ReturnType<typeof setTimeout>;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        onTimeout?.();
+        reject(new Error('Request timed out'));
+      }, ms);
+    });
+    return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+  },
 }));
 
-import { youtubeSearch } from './youtubeSearchService';
+import { youtubeSearch, SEARCH_TIMEOUT_MS } from './youtubeSearchService';
 import { apiFetch } from '../config/api';
 
 const mockedApiFetch = apiFetch as unknown as ReturnType<typeof vi.fn>;
@@ -126,12 +141,27 @@ describe('youtubeSearch — server response normalization', () => {
     expect(mockedApiFetch).not.toHaveBeenCalled();
   });
 
-  it('returns [] when the server response is not parseable and Invidious is down', async () => {
+  it('rejects (not fake "no results") when the server body is malformed and Invidious is down', async () => {
     mockedApiFetch.mockResolvedValueOnce({ json: async () => { throw new Error('bad json'); } });
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('network down'); }));
+
+    await expect(youtubeSearch('test')).rejects.toThrow('bad json');
+  });
+
+  it('returns [] only for a definitive empty server answer, even when Invidious is down', async () => {
+    // Server replies authoritatively: valid envelope, zero results.
+    mockedApiFetch.mockResolvedValueOnce(serverOk([]));
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('network down'); }));
 
     const results = await youtubeSearch('test');
     expect(results).toEqual([]);
+  });
+
+  it('rejects with the server error when the server times out and Invidious is down', async () => {
+    mockedApiFetch.mockRejectedValueOnce(new Error('Request timed out'));
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('network down'); }));
+
+    await expect(youtubeSearch('test')).rejects.toThrow('Request timed out');
   });
 
   it('falls back to Invidious when every server row is invalid', async () => {
@@ -181,5 +211,46 @@ describe('youtubeSearch — server response normalization', () => {
     expect(results[0].duration).toBe(200);
     expect(typeof results[0].duration).toBe('number');
     expect(results[0].viewCount).toBe(99);
+  });
+
+  // ---- Hard-deadline guarantees: the search must ALWAYS settle ----
+
+  it('never hangs when Invidious instances neither resolve nor reject — the deadline bounds the fallback and surfaces a real error', async () => {
+    vi.useFakeTimers();
+    try {
+      mockedApiFetch.mockRejectedValueOnce(new Error('server down'));
+      // Platform-wedged instances: the fetch ignores its abort and never settles.
+      vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+
+      const p = youtubeSearch('test');
+      let settled = false;
+      p.then(() => { settled = true; }, () => { settled = true; });
+
+      await vi.advanceTimersByTimeAsync(SEARCH_TIMEOUT_MS + 100);
+      await expect(p).rejects.toThrow('server down');
+      expect(settled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('never hangs on a stalled server body — it rejects with a timeout after the deadlines elapse', async () => {
+    vi.useFakeTimers();
+    try {
+      // Headers arrive (apiFetch resolves), but the body never completes.
+      mockedApiFetch.mockResolvedValueOnce({ json: () => new Promise(() => {}) });
+      vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+
+      const p = youtubeSearch('test');
+      let settled = false;
+      p.then(() => { settled = true; }, () => { settled = true; });
+
+      // 12s body deadline + 8s Invidious deadlines, all parallel.
+      await vi.advanceTimersByTimeAsync(12_000 + SEARCH_TIMEOUT_MS + 200);
+      await expect(p).rejects.toThrow('Request timed out');
+      expect(settled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

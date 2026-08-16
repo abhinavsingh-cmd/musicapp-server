@@ -4,9 +4,11 @@ import { useSongsStore } from '../stores/songsStore';
 import { SongTable } from '../features/library/SongTable';
 import { PlaylistDetail } from '../features/playlist/PlaylistDetail';
 import { Song, Playlist } from '../types/music';
-import { trendingService, getInitialTrending, fetchYouTubeTrending } from '../services/trendingService';
+import { trendingService, getInitialTrending, fetchYouTubeTrending, TrendingSourceLabel } from '../services/trendingService';
 import { motion, AnimatePresence } from 'framer-motion';
+import { deferIdle } from '../utils/idle';
 import { Disc3, TrendingUp, Play, Music, Sparkles, Radio, Zap, Globe, RefreshCw } from 'lucide-react';
+import { trendingTagline, TRENDING_SOURCE_LABELS } from '../utils/trendingLabels';
 import { performanceMonitor } from '../utils/performanceMonitor';
 import { renderMonitor } from '../utils/renderMonitor';
 import { logger } from '../utils/logger';
@@ -24,7 +26,7 @@ const HERO_GRADIENTS = [
   'from-rose-600 via-pink-500 to-violet-500',
 ];
 
-const HeroSection = memo(({ songCount, onPlayAll, onPlayTrending }: { songCount: number; onPlayAll: () => void; onPlayTrending: () => void }) => {
+const HeroSection = memo(({ songCount, trendingSource, onPlayAll, onPlayTrending }: { songCount: number; trendingSource: TrendingSourceLabel | 'none'; onPlayAll: () => void; onPlayTrending: () => void }) => {
   const [heroIdx, setHeroIdx] = useState(0);
 
   useEffect(() => {
@@ -68,7 +70,7 @@ const HeroSection = memo(({ songCount, onPlayAll, onPlayTrending }: { songCount:
           whileTap={{ scale: 0.95 }}
         >
           <Sparkles size={14} className="text-violet-300" />
-          <span>{songCount} songs + live YouTube trending</span>
+          <span>{trendingTagline(songCount, trendingSource)}</span>
         </motion.div>
         
         <motion.h1 
@@ -134,7 +136,7 @@ export const HomePage: React.FC = memo(() => {
   const songs = useSongsStore((s) => s.songs);
   const [trending, setTrending] = useState<Song[]>(initialTrending.songs);
   const [trendingLoading, setTrendingLoading] = useState(false);
-  const [trendingSource, setTrendingSource] = useState<string>(initialTrending.source);
+  const [trendingSource, setTrendingSource] = useState<TrendingSourceLabel | 'none'>(initialTrending.source);
   const [trendingLastUpdated, setTrendingLastUpdated] = useState<number | null>(initialTrending.lastUpdated);
   const [selectedPlaylist, setSelectedPlaylist] = useState<Playlist | null>(null);
   const [selectedArtist, setSelectedArtist] = useState<string | null>(null);
@@ -149,12 +151,8 @@ export const HomePage: React.FC = memo(() => {
     let cancelled = false;
     let timeoutId: ReturnType<typeof setTimeout>;
 
-    const defer = typeof requestIdleCallback === 'function'
-      ? requestIdleCallback
-      : (cb: IdleRequestCallback) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 } as IdleDeadline), 0);
-
     // Initial refresh after 1.5 seconds — keeps previous data visible while loading
-    defer(() => {
+    deferIdle(() => {
       if (cancelled) return;
       timeoutId = setTimeout(() => {
         if (cancelled) return;
@@ -269,7 +267,7 @@ export const HomePage: React.FC = memo(() => {
 
   return (
     <div className="pb-8">
-      <HeroSection songCount={songs.length} onPlayAll={handlePlayAll} onPlayTrending={handlePlayTrending} />
+      <HeroSection songCount={songs.length} trendingSource={trendingSource} onPlayAll={handlePlayAll} onPlayTrending={handlePlayTrending} />
 
       <div className="px-4 sm:px-6 space-y-8 sm:space-y-10 mt-6 sm:mt-8">
 
@@ -285,10 +283,7 @@ export const HomePage: React.FC = memo(() => {
               {trendingLastUpdated && !trendingLoading && (
                 <span className="text-xs text-gray-500 flex items-center gap-1">
                   <Globe size={12} className="text-red-400" />
-                   {trendingSource === 'LIVE' ? 'Live from YouTube' :
-                   trendingSource === 'CACHED' ? 'Cached' :
-                   trendingSource === 'LIBRARY' ? 'From Library' :
-                   trendingSource === 'BUILT_IN' ? 'Offline' : 'Loading'}
+                   {trendingSource === 'none' ? 'Loading' : TRENDING_SOURCE_LABELS[trendingSource]}
                   {' · '}
                   {(() => {
                     const diff = Date.now() - trendingLastUpdated;

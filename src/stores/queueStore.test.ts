@@ -4,6 +4,31 @@ vi.mock('../services/preloadService', () => ({
   preloadNextSongs: vi.fn(),
 }));
 
+// playAtIndex / removeFromQueue reach into the audio store (and the engine)
+// through dynamic imports — replace them with controllable doubles so the
+// queue-store reactions are what we assert, not real audio.
+const audioMocks = vi.hoisted(() => {
+  const holder: {
+    currentSong: Song | null;
+    isPlaying: boolean;
+    loadSong: ReturnType<typeof vi.fn>;
+    setState: ReturnType<typeof vi.fn>;
+  } = { currentSong: null, isPlaying: false, loadSong: vi.fn(), setState: vi.fn() };
+  return {
+    holder,
+    getState: vi.fn(() => holder),
+    stop: vi.fn(),
+  };
+});
+
+vi.mock('./audioStore', () => ({
+  useAudioStore: { getState: audioMocks.getState, setState: audioMocks.holder.setState },
+}));
+
+vi.mock('../services/audioServiceInstance', () => ({
+  audioService: { stop: audioMocks.stop },
+}));
+
 import { useQueueStore, isValidSong, type RepeatMode } from './queueStore';
 import type { Song } from '../types/music';
 
@@ -356,5 +381,115 @@ describe('crossfade settings', () => {
     const raw = JSON.parse(localStorage.getItem('playback-queue') || '{}');
     expect(raw.crossfadeEnabled).toBe(true);
     expect(raw.crossfadeDurationSec).toBe(9);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Queue-panel interactions: jumping to a row inside the existing queue must
+// not silently turn shuffle off, and removing the CURRENT song while paused
+// must not leave the removed track as the stale "current" song.
+// ---------------------------------------------------------------------------
+describe('queue-panel interactions (playAtIndex / removeFromQueue)', () => {
+  beforeEach(() => {
+    resetStore();
+    audioMocks.holder.currentSong = null;
+    audioMocks.holder.isPlaying = false;
+    audioMocks.holder.loadSong.mockReset();
+    audioMocks.holder.setState.mockReset();
+    audioMocks.stop.mockReset();
+  });
+
+  const flushAsync = () => new Promise((r) => setTimeout(r, 0));
+
+  it('setQueue with preserveShuffle keeps shuffle mode and the original order', () => {
+    const a = makeSong('a'); const b = makeSong('b'); const c = makeSong('c');
+    useQueueStore.setState({ isShuffled: true, originalQueue: [a, b, c] });
+
+    useQueueStore.getState().setQueue([a, b, c], 2, true);
+
+    const s = useQueueStore.getState();
+    expect(s.isShuffled).toBe(true);
+    expect(s.originalQueue.map((q) => q.id)).toEqual(['a', 'b', 'c']);
+    expect(s.currentIndex).toBe(2);
+  });
+
+  it('setQueue without preserveShuffle starts unshuffled (fresh list click)', () => {
+    const a = makeSong('a'); const b = makeSong('b'); const c = makeSong('c');
+    useQueueStore.setState({ isShuffled: true, originalQueue: [a, b, c] });
+
+    useQueueStore.getState().setQueue([a, b, c], 0);
+
+    const s = useQueueStore.getState();
+    expect(s.isShuffled).toBe(false);
+    expect(s.originalQueue).toEqual([]);
+  });
+
+  it('playAtIndex jumps within the existing queue WITHOUT turning shuffle off', async () => {
+    const a = makeSong('a'); const b = makeSong('b'); const c = makeSong('c');
+    useQueueStore.getState().setQueue([a, b, c], 1);
+    useQueueStore.setState({ isShuffled: true, originalQueue: [a, b, c] });
+
+    await useQueueStore.getState().playAtIndex(2);
+
+    expect(audioMocks.holder.loadSong).toHaveBeenCalledTimes(1);
+    expect(audioMocks.holder.loadSong.mock.calls[0][0]).toMatchObject({ id: 'c' });
+    // 4th argument = preserveShuffle — the jump must keep the mode.
+    expect(audioMocks.holder.loadSong.mock.calls[0][3]).toBe(true);
+  });
+
+  it('removing the current song while PLAYING loads the new current track', async () => {
+    const a = makeSong('a'); const b = makeSong('b'); const c = makeSong('c');
+    useQueueStore.getState().setQueue([a, b, c], 1);
+    audioMocks.holder.currentSong = b;
+    audioMocks.holder.isPlaying = true;
+
+    useQueueStore.getState().removeFromQueue(1);
+    await flushAsync();
+
+    const s = useQueueStore.getState();
+    expect(s.queue.map((q) => q.id)).toEqual(['a', 'c']);
+    expect(s.currentIndex).toBe(1);
+    expect(audioMocks.holder.loadSong).toHaveBeenCalledTimes(1);
+    expect(audioMocks.holder.loadSong.mock.calls[0][0]).toMatchObject({ id: 'c' });
+    expect(audioMocks.stop).not.toHaveBeenCalled();
+  });
+
+  it('removing the current song while PAUSED stops the engine and re-points currentSong (no autoplay)', async () => {
+    const a = makeSong('a'); const b = makeSong('b'); const c = makeSong('c');
+    useQueueStore.getState().setQueue([a, b, c], 1);
+    audioMocks.holder.currentSong = b;
+    audioMocks.holder.isPlaying = false;
+
+    useQueueStore.getState().removeFromQueue(1);
+    await flushAsync();
+
+    const s = useQueueStore.getState();
+    expect(s.queue.map((q) => q.id)).toEqual(['a', 'c']);
+    expect(s.currentIndex).toBe(1);
+    // The removed track's engine session is stopped so play() can never
+    // resume a song that is no longer in the queue.
+    expect(audioMocks.stop).toHaveBeenCalledTimes(1);
+    expect(audioMocks.holder.loadSong).not.toHaveBeenCalled();
+    expect(audioMocks.holder.setState).toHaveBeenCalledWith(expect.objectContaining({
+      currentSong: expect.objectContaining({ id: 'c' }),
+      isPlaying: false,
+      isLoading: false,
+    }));
+  });
+
+  it('removing a NON-current song leaves playback state untouched', async () => {
+    const a = makeSong('a'); const b = makeSong('b'); const c = makeSong('c');
+    useQueueStore.getState().setQueue([a, b, c], 1);
+    audioMocks.holder.currentSong = b;
+    audioMocks.holder.isPlaying = true;
+    audioMocks.holder.loadSong.mockClear();
+    audioMocks.stop.mockClear();
+
+    useQueueStore.getState().removeFromQueue(2); // 'c', not current
+    await flushAsync();
+
+    expect(audioMocks.holder.loadSong).not.toHaveBeenCalled();
+    expect(audioMocks.stop).not.toHaveBeenCalled();
+    expect(useQueueStore.getState().queue.map((q) => q.id)).toEqual(['a', 'b']);
   });
 });

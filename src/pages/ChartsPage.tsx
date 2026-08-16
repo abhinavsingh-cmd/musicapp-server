@@ -4,8 +4,10 @@ import { useGoBack } from '../hooks/useGoBack';
 import { useChartsStore, ChartSong, TrendingSource } from '../stores/chartsStore';
 import { useAudioStore } from '../stores/audioStore';
 import { TrendingUp, TrendingDown, Minus, Sparkles, Music, ArrowLeft, RefreshCw, Clock, Globe, AlertTriangle } from 'lucide-react';
+import { TRENDING_SOURCE_LABELS } from '../utils/trendingLabels';
 import CachedImage from '../components/CachedImage';
 import { DownloadButton } from '../components/DownloadButton';
+import { deferIdle } from '../utils/idle';
 import { useSongContextMenu } from '../components/SongContextMenu';
 import { Song } from '../types/music';
 
@@ -23,10 +25,7 @@ const chartSongToSong = (song: ChartSong): Song => ({
 });
 
 const SOURCE_LABELS: Record<TrendingSource, string> = {
-  LIVE: 'Live from YouTube',
-  CACHED: 'Cached live data',
-  LIBRARY: 'From your library',
-  BUILT_IN: 'Built-in catalog',
+  ...TRENDING_SOURCE_LABELS,
   none: '',
 };
 
@@ -113,12 +112,8 @@ export const ChartsPage: React.FC = () => {
   );
 
   useEffect(() => {
-    const defer = typeof requestIdleCallback === 'function'
-      ? requestIdleCallback
-      : (cb: IdleRequestCallback) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 } as IdleDeadline), 0);
-    
     // Initialize from cache synchronously, then fetch fresh
-    defer(() => {
+    deferIdle(() => {
       hydrateFromCache();
       // Then fetch fresh data
       fetchCharts();

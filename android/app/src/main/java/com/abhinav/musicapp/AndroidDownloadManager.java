@@ -251,12 +251,17 @@ public class AndroidDownloadManager extends Plugin {
             int statusIndex = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS);
             int localUriIndex = cursor.getColumnIndex(DownloadManager.COLUMN_LOCAL_URI);
             int reasonIndex = cursor.getColumnIndex(DownloadManager.COLUMN_REASON);
+            int totalSizeIndex = cursor.getColumnIndex(DownloadManager.COLUMN_TOTAL_SIZE_BYTES);
             int status = statusIndex >= 0 ? cursor.getInt(statusIndex) : -1;
             String localUri = localUriIndex >= 0 ? cursor.getString(localUriIndex) : null;
             int reason = reasonIndex >= 0 ? cursor.getInt(reasonIndex) : -1;
+            long declaredSize = totalSizeIndex >= 0 ? cursor.getLong(totalSizeIndex) : -1;
             cursor.close();
 
             if (status != DownloadManager.STATUS_SUCCESSFUL) {
+                // A failed/aborted download can still leave partial bytes on
+                // disk — never leave them behind on the user's device.
+                deleteFileQuietly(uriToFile(localUri));
                 call.reject("Download did not complete successfully (status=" + status
                     + (reason >= 0 ? ", reason=" + reason : "") + ")");
                 return;
@@ -268,9 +273,16 @@ public class AndroidDownloadManager extends Plugin {
             }
 
             // Validate the actual bytes on disk before declaring success.
+            // The declared Content-Length (when known) must match the bytes
+            // on disk exactly — a truncated transfer otherwise passes every
+            // header sniff.
             File file = uriToFile(localUri);
-            String invalidReason = validateDownloadedFile(file);
+            String invalidReason = validateDownloadedFile(file, declaredSize);
             if (invalidReason != null) {
+                // The file failed every check (empty, truncated, error page) —
+                // it is garbage, not a valid download: remove it instead of
+                // leaving a broken file in the user's Music folder.
+                deleteFileQuietly(file);
                 call.reject("Downloaded file is invalid: " + invalidReason);
                 return;
             }
@@ -386,6 +398,35 @@ public class AndroidDownloadManager extends Plugin {
             return "header bytes are not a known audio container (possibly an HTML/JSON error page)";
         }
         return null;
+    }
+
+    /**
+     * Content-Length aware validation. When the DownloadManager knows the
+     * declared total size, the bytes on disk must match it exactly — a
+     * truncated transfer would otherwise pass the header sniff and look like
+     * a perfectly valid (but cut-off) audio file.
+     */
+    static String validateDownloadedFile(File file, long declaredSize) {
+        String reason = validateDownloadedFile(file);
+        if (reason != null) return reason;
+        if (declaredSize > 0 && file.length() != declaredSize) {
+            return file.length() + " bytes but the server declared " + declaredSize
+                + " — truncated transfer";
+        }
+        return null;
+    }
+
+    /**
+     * Best-effort removal of an invalid or partial download file. Never
+     * throws — cleanup must never mask the original rejection reason.
+     */
+    static boolean deleteFileQuietly(File file) {
+        if (file == null) return false;
+        try {
+            return file.delete();
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     /**

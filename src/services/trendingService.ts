@@ -206,7 +206,11 @@ class TrendingService {
       if (!entry.data?.songs || !Array.isArray(entry.data.songs)) return null;
       if (entry.data.songs.length === 0) return null; // empty data is never valid
       if (Date.now() - entry.cachedAt > CACHE_MAX_AGE) return null;
-      return normalizeResult(entry.data);
+      const result = normalizeResult(entry.data);
+      // Disk data is not freshly verified by the server — label it CACHED,
+      // never LIVE, even though it was originally live at fetch time.
+      if (result.source === 'LIVE') return { ...result, source: 'CACHED' as const };
+      return result;
     } catch {
       return null;
     }
@@ -243,12 +247,13 @@ class TrendingService {
   private bestAvailableFallback(reason: string): TrendingResult {
     for (const candidate of [this.cache, this.loadFromDisk()]) {
       if (candidate && candidate.songs.length > 0 && (candidate.source === 'LIVE' || candidate.source === 'CACHED')) {
-        logger.warn(`[Trending] Serving cached live data as CACHED (${reason})`);
+        logger.warn(`[Trending] CACHED_YOUTUBE: Serving cached live data as CACHED (${reason})`);
         return { ...candidate, source: 'CACHED' };
       }
     }
     const fallback = buildLocalFallback();
-    logger.warn(`[Trending] Falling back to ${fallback.source} (${reason})`);
+    const marker = fallback.source === 'LIBRARY' ? 'LIBRARY_FALLBACK' : 'BUILT_IN_FALLBACK';
+    logger.warn(`[Trending] ${marker}: Falling back to ${fallback.source} (${reason})`);
     return fallback;
   }
 
@@ -304,7 +309,11 @@ class TrendingService {
             origin,
             lastUpdated: typeof payload?.lastUpdated === 'number' ? payload.lastUpdated : Date.now(),
           };
-          logger.debug(`[Trending] ✅ ${result.source} SUCCESS: ${songs.length} songs, origin=${origin}, responseTime=${reqTime}ms`);
+          if (result.source === 'CACHED') {
+            logger.debug(`[Trending] CACHED_YOUTUBE: ${songs.length} songs from ${origin} (server-stale, responseTime=${reqTime}ms)`);
+          } else {
+            logger.debug(`[Trending] LIVE_YOUTUBE: ${songs.length} songs from ${origin} (live, responseTime=${reqTime}ms)`);
+          }
           this.recordSuccess(Date.now() - startTime);
           return result;
         }
@@ -389,7 +398,7 @@ class TrendingService {
   async getTrending(): Promise<TrendingResult> {
     // 1. Return fresh live cache immediately
     if (this.cache && this.cache.source === 'LIVE' && this.cache.songs.length > 0 && Date.now() - this.cacheTime < CACHE_TTL) {
-      logger.debug(`[Trending] Cache HIT (live): ${this.cache.songs.length} songs, origin=${this.cache.origin || 'unknown'}, age=${Math.round((Date.now() - this.cacheTime) / 1000)}s`);
+      logger.debug(`[Trending] LIVE_YOUTUBE: ${this.cache.songs.length} songs (fresh cache hit, origin=${this.cache.origin || 'unknown'}, age=${Math.round((Date.now() - this.cacheTime) / 1000)}s)`);
       return this.cache;
     }
 
@@ -456,7 +465,7 @@ class TrendingService {
         this.cacheTime = 0;
       }
       const age = Math.round((Date.now() - this.cacheTime) / 1000);
-      logger.debug(`[Trending] init: loaded from disk: ${disk.songs.length} songs, source=${disk.source}, age=${age}s`);
+      logger.debug(`[Trending] CACHED_YOUTUBE: init loaded ${disk.songs.length} songs from disk (source=${disk.source}, age=${age}s)`);
     } else {
       logger.debug('[Trending] init: no disk cache, using builtin');
     }

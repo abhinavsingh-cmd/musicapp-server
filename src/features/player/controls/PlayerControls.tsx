@@ -57,19 +57,25 @@ export const PlayerControls: React.FC<PlayerControlsProps> = React.memo(({ class
   const RepeatIcon = repeatMode === 'one' ? Repeat1 : Repeat;
   const downloaded = download.state === 'downloaded';
   const downloading = download.state === 'downloading';
+  // With no track the player is idle: shuffle/repeat must not LOOK active
+  // (or be toggleable) — an "on" state with nothing playing is misleading.
+  const showShuffleActive = isShuffled && !!currentSong;
+  const showRepeatActive = repeatMode !== 'off' && !!currentSong;
 
   return (
     <div className={cn("flex items-center justify-between px-2", className)}>
       <div className="flex items-center space-x-1 sm:space-x-2">
         <button
           onClick={toggleShuffle}
+          disabled={!currentSong}
           className={cn(
             "w-9 h-9 rounded-full flex items-center justify-center transition-all duration-200 active:scale-90",
-            isShuffled
+            showShuffleActive
               ? "bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white shadow-glow"
-              : "text-gray-500 hover:text-white hover:bg-white/10"
+              : "text-gray-500 hover:text-white hover:bg-white/10",
+            !currentSong && "disabled:opacity-40 disabled:cursor-not-allowed"
           )}
-          title={isShuffled ? "Shuffle On" : "Shuffle Off"}
+          title={showShuffleActive ? "Shuffle On" : "Shuffle Off"}
         >
           <Shuffle size={16} />
         </button>
@@ -111,16 +117,18 @@ export const PlayerControls: React.FC<PlayerControlsProps> = React.memo(({ class
 
         <button
           onClick={cycleRepeat}
+          disabled={!currentSong}
           className={cn(
             "w-9 h-9 rounded-full flex items-center justify-center transition-all duration-200 active:scale-90 relative",
-            repeatMode !== 'off'
+            showRepeatActive
               ? "bg-gradient-to-br from-emerald-500 to-teal-500 text-white shadow-[0_0_20px_rgba(16,185,129,0.4)]"
-              : "text-gray-500 hover:text-white hover:bg-white/10"
+              : "text-gray-500 hover:text-white hover:bg-white/10",
+            !currentSong && "disabled:opacity-40 disabled:cursor-not-allowed"
           )}
           title={`Repeat: ${repeatMode}`}
         >
           <RepeatIcon size={16} />
-          {repeatMode === 'one' && (
+          {showRepeatActive && repeatMode === 'one' && (
             <span className="absolute -top-1 -right-1 text-[8px] font-bold bg-white text-emerald-600 rounded-full w-4 h-4 flex items-center justify-center">
               1
             </span>

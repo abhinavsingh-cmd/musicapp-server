@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { audioEffectsService, AudioEffectPreset } from '../services/audioEffectsService';
+import { deferIdle } from '../utils/idle';
 
 const STORAGE_KEY = 'audio_effects_v1';
 
@@ -197,10 +198,7 @@ export const useAudioEffectsStore = create<AudioEffectsStore>((set, get) => ({
 
 // Apply persisted settings to service on startup
 if (typeof window !== 'undefined') {
-  const deferInit = typeof requestIdleCallback === 'function'
-    ? requestIdleCallback
-    : (cb: IdleRequestCallback) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 } as IdleDeadline), 0);
-  deferInit(() => {
+  deferIdle(() => {
     applyToService(getPersistedOrDefault());
   });
 }

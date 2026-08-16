@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, ImgHTMLAttributes, memo } from 'react';
-import { getCachedImageUrl } from '../services/imageCache';
+import { getCachedImageUrl } from '../utils/downloadManager';
 import { Music } from 'lucide-react';
 
 interface CachedImageProps extends Omit<ImgHTMLAttributes<HTMLImageElement>, 'src'> {

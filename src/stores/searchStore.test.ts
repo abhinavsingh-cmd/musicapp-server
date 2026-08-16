@@ -215,7 +215,7 @@ describe('failure surfacing', () => {
     expect(s.ytResults).toEqual([]);
   });
 
-  it('timeout gets a user-actionable message', async () => {
+  it('timeout gets its own explicit state and a user-actionable message', async () => {
     const p = useSearchStore.getState().search('slow');
     await flush();
     pending.get('slow')!.reject(new TimeoutError('http://x/api/youtube/search'));
@@ -223,7 +223,8 @@ describe('failure surfacing', () => {
     await p;
 
     const s = useSearchStore.getState();
-    expect(s.ytStatus).toBe('error');
+    expect(s.ytStatus).toBe('timeout');
+    expect(s.status).toBe('timeout');
     expect(s.error).toBe('Search timed out. Try again.');
   });
 
@@ -292,6 +293,122 @@ describe('result sanitization', () => {
   });
 });
 
+// ---- Lifecycle guarantees: no forever-spinner, no stale overwrites ----
+
+describe('lifecycle guarantees', () => {
+  it('deduplicates an identical in-flight search instead of re-firing it', async () => {
+    const first = useSearchStore.getState().search('same');
+    await flush(); // debouncedQuery set, YT request in flight
+
+    const second = useSearchStore.getState().search('same');
+    await flush();
+    await expect(second).resolves.toBeUndefined(); // returned early — no new promise
+
+    pending.get('same')!.resolve(ytResult([makeTrack('v1')]));
+    await flush();
+    await first;
+
+    // Exactly ONE provider request for the duplicate query.
+    expect((searchProviders as Mock).mock.calls.filter((c) => c[0] === 'same')).toHaveLength(1);
+    expect(useSearchStore.getState().ytStatus).toBe('success');
+  });
+
+  it('clears the previous query results the moment a new query starts', async () => {
+    const p1 = useSearchStore.getState().search('oldq');
+    await flush();
+    pending.get('oldq')!.resolve(ytResult([makeTrack('old-1')]));
+    await flush();
+    await p1;
+    expect(useSearchStore.getState().ytResults.map((r) => r.id)).toEqual(['old-1']);
+
+    // New query begins while its request is pending — old rows must vanish.
+    const p2 = useSearchStore.getState().search('newq');
+    await flush();
+    expect(useSearchStore.getState().ytResults).toEqual([]);
+    expect(useSearchStore.getState().ytQuery).toBe('newq');
+
+    pending.get('newq')!.resolve(ytResult([makeTrack('new-1')]));
+    await flush();
+    await p2;
+    expect(useSearchStore.getState().ytResults.map((r) => r.id)).toEqual(['new-1']);
+  });
+
+  it('retrying a failed query passes through an explicit retrying state', async () => {
+    const p1 = useSearchStore.getState().search('retryme');
+    await flush();
+    pending.get('retryme')!.reject(new Error('server exploded'));
+    await flush();
+    await p1;
+    expect(useSearchStore.getState().ytStatus).toBe('error');
+
+    // Retry — must surface as 'retrying', never as a silent first load.
+    const p2 = useSearchStore.getState().search('retryme');
+    await flush();
+    expect(useSearchStore.getState().ytStatus).toBe('retrying');
+    expect(useSearchStore.getState().error).toBeNull();
+
+    pending.get('retryme')!.resolve(ytResult([makeTrack('recovered')]));
+    await flush();
+    await p2;
+    expect(useSearchStore.getState().ytStatus).toBe('success');
+  });
+
+  it('keeps same-query results visible when a refresh fails', async () => {
+    const p1 = useSearchStore.getState().search('keepq');
+    await flush();
+    pending.get('keepq')!.resolve(ytResult([makeTrack('k1'), makeTrack('k2')]));
+    await flush();
+    await p1;
+    expect(useSearchStore.getState().ytResults).toHaveLength(2);
+
+    // Expire the 60s result cache so the refresh must hit the network.
+    vi.useFakeTimers();
+    try {
+      await vi.advanceTimersByTimeAsync(61_000);
+
+      // Refresh of the SAME query fails — rows stay, error state surfaces.
+      const p2 = useSearchStore.getState().search('keepq');
+      await vi.advanceTimersByTimeAsync(0);
+      pending.get('keepq')!.reject(new Error('transient down'));
+      await vi.advanceTimersByTimeAsync(0);
+      await p2;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const s = useSearchStore.getState();
+    expect(s.ytStatus).toBe('error');
+    expect(s.ytResults.map((r) => r.id)).toEqual(['k1', 'k2']);
+  });
+
+  it('a result that lands after the query was cleared is discarded', async () => {
+    void useSearchStore.getState().search('doomed');
+    await flush();
+
+    useSearchStore.getState().clear();
+    pending.get('doomed')!.resolve(ytResult([makeTrack('too-late')]));
+    await flush();
+
+    const s = useSearchStore.getState();
+    expect(s.ytStatus).toBe('idle');
+    expect(s.ytResults).toEqual([]);
+    expect(s.debouncedQuery).toBe('');
+  });
+
+  it('a result that lands after search("") reset is discarded', async () => {
+    void useSearchStore.getState().search('doomed2');
+    await flush();
+
+    await useSearchStore.getState().search('');
+    pending.get('doomed2')!.resolve(ytResult([makeTrack('too-late')]));
+    await flush();
+
+    const s = useSearchStore.getState();
+    expect(s.ytStatus).toBe('idle');
+    expect(s.ytResults).toEqual([]);
+  });
+});
+
 // ---- Paging vs. new search race ----
 
 describe('paging races', () => {
@@ -344,5 +461,156 @@ describe('paging races', () => {
   it('loadMore is a no-op when nothing has been searched', async () => {
     await useSearchStore.getState().loadMore();
     expect(searchProviders).not.toHaveBeenCalled();
+  });
+
+  it('a new search aborts an in-flight paging request', async () => {
+    // 1) Complete a search with > 15 rows so paging is armed.
+    const p1 = useSearchStore.getState().search('pageq');
+    await flush();
+    const many = Array.from({ length: 20 }, (_, i) => makeTrack(`pageq-${i}`));
+    pending.get('pageq')!.resolve(ytResult(many));
+    await flush();
+    await p1;
+    expect(useSearchStore.getState().hasMore).toBe(true);
+
+    // 2) Expire the 60s result cache so loadMore must hit the network.
+    vi.useFakeTimers();
+    try {
+      await vi.advanceTimersByTimeAsync(61_000);
+
+      const lm = useSearchStore.getState().loadMore();
+      await vi.advanceTimersByTimeAsync(0);
+      const calls = (searchProviders as Mock).mock.calls;
+      const pageCall = calls[calls.length - 1];
+      const pageSignal: AbortSignal = pageCall[1].signal;
+      expect(pageSignal.aborted).toBe(false);
+
+      // 3) A new top-level search supersedes it — the paging request's
+      //    AbortController must be aborted (no zombie fetch), and its
+      //    response must be discarded.
+      const p2 = useSearchStore.getState().search('freshq');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(pageSignal.aborted).toBe(true);
+
+      pending.get('pageq')!.resolve(ytResult(many)); // stale page lands late
+      await vi.advanceTimersByTimeAsync(0);
+      await lm;
+
+      const s = useSearchStore.getState();
+      expect(s.ytResults.map((r) => r.id)).not.toContain('pageq-15');
+      expect(s.debouncedQuery).toBe('freshq');
+
+      pending.get('freshq')!.resolve(ytResult([makeTrack('fresh-1')]));
+      await vi.advanceTimersByTimeAsync(0);
+      await p2;
+      expect(useSearchStore.getState().ytResults.map((r) => r.id)).toEqual(['fresh-1']);
+      expect(useSearchStore.getState().ytStatus).toBe('success');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancelSearch aborts an in-flight paging request too', async () => {
+    const p1 = useSearchStore.getState().search('cancelpage');
+    await flush();
+    const many = Array.from({ length: 20 }, (_, i) => makeTrack(`cp-${i}`));
+    pending.get('cancelpage')!.resolve(ytResult(many));
+    await flush();
+    await p1;
+
+    vi.useFakeTimers();
+    try {
+      await vi.advanceTimersByTimeAsync(61_000);
+      void useSearchStore.getState().loadMore();
+      await vi.advanceTimersByTimeAsync(0);
+      const calls = (searchProviders as Mock).mock.calls;
+      const pageSignal: AbortSignal = calls[calls.length - 1][1].signal;
+      expect(pageSignal.aborted).toBe(false);
+
+      useSearchStore.getState().cancelSearch();
+      expect(pageSignal.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+// ---- Errors must never be swallowed ----
+
+describe('error surfacing', () => {
+  it('a library-index failure surfaces as an explicit error, never swallowed', async () => {
+    (librarySearchIndex.search as Mock).mockRejectedValue(new Error('index corrupted'));
+
+    await useSearchStore.getState().search('boom');
+    await flush();
+
+    const s = useSearchStore.getState();
+    // Both the page status and the YouTube status are terminal error states —
+    // no stuck spinner, no unhandled rejection, and no fake "no results".
+    expect(s.status).toBe('error');
+    expect(s.ytStatus).toBe('error');
+    expect(s.error).toContain('index corrupted');
+    // The provider must not have been hit at all — the library half failed
+    // before the YouTube request was even started.
+    expect((searchProviders as Mock).mock.calls.filter((c) => c[0] === 'boom')).toHaveLength(0);
+  });
+
+  it('a blank query after a library failure still resets to idle', async () => {
+    (librarySearchIndex.search as Mock).mockRejectedValue(new Error('index corrupted'));
+    await useSearchStore.getState().search('boom');
+    await flush();
+    expect(useSearchStore.getState().status).toBe('error');
+
+    await useSearchStore.getState().search('');
+    const s = useSearchStore.getState();
+    expect(s.status).toBe('idle');
+    expect(s.ytStatus).toBe('idle');
+    expect(s.error).toBeNull();
+  });
+});
+
+// ---- Duplicate-request prevention (the suggestions focus re-fire) ----
+
+describe('duplicate requests', () => {
+  it('an identical in-flight search is not re-fired', async () => {
+    const p1 = useSearchStore.getState().search('dupeq');
+    await flush();
+    const callsAfterFirst = (searchProviders as Mock).mock.calls.filter((c) => c[0] === 'dupeq');
+
+    // Same query while still in flight — the store guard absorbs it.
+    await useSearchStore.getState().search('dupeq');
+    await flush();
+
+    expect((searchProviders as Mock).mock.calls.filter((c) => c[0] === 'dupeq')).toHaveLength(callsAfterFirst.length);
+    pending.get('dupeq')!.resolve(ytResult([makeTrack('d1')]));
+    await flush();
+    await p1;
+    expect(useSearchStore.getState().ytStatus).toBe('success');
+  });
+
+  it('a same-query REFRESH after completion still works (not over-suppressed)', async () => {
+    const p1 = useSearchStore.getState().search('refq');
+    await flush();
+    pending.get('refq')!.resolve(ytResult([makeTrack('r1')]));
+    await flush();
+    await p1;
+    expect(useSearchStore.getState().ytStatus).toBe('success');
+
+    vi.useFakeTimers();
+    try {
+      await vi.advanceTimersByTimeAsync(61_000); // expire the result cache
+
+      // A deliberate refresh of the completed query must still reach the
+      // network (the store guard only absorbs IN-FLIGHT duplicates).
+      const p2 = useSearchStore.getState().search('refq');
+      await vi.advanceTimersByTimeAsync(0);
+      expect((searchProviders as Mock).mock.calls.filter((c) => c[0] === 'refq')).toHaveLength(2);
+      pending.get('refq')!.resolve(ytResult([makeTrack('r2')]));
+      await vi.advanceTimersByTimeAsync(0);
+      await p2;
+      expect(useSearchStore.getState().ytResults.map((r) => r.id)).toEqual(['r2']);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

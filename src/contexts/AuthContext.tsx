@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useEffect, useRef, type ReactNode } from 'react';
 import { User } from '../types/music';
+import { deferIdle } from '../utils/idle';
 
 interface AuthContextType {
   user: User | null;
@@ -36,10 +37,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   }, []);
 
   useEffect(() => {
-    const deferInit = typeof requestIdleCallback === 'function'
-      ? requestIdleCallback
-      : (cb: IdleRequestCallback) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 } as IdleDeadline), 0);
-    deferInit(() => {
+    deferIdle(() => {
       if (!mounted.current) return;
       try {
         const savedUser = localStorage.getItem('musicAppUser');

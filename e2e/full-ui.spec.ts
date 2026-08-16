@@ -1,41 +1,11 @@
 import { test, expect, Page } from '@playwright/test';
+import { BASE, player, songRow, login, waitForPlayerIcon, waitForAnyPlayerIcon } from './helpers';
 
 /**
  * Full user-style E2E journey: login → home → every player control → queue →
  * lyrics → equalizer → shortcuts → every page/form → 404. Requires the dev
  * server running (`npm run dev`: vite :3000, api :3001).
  */
-
-const BASE = 'http://localhost:3000';
-
-const player = (page: Page) => page.locator('.fixed.bottom-0');
-
-// Wait until the player shows the given icon (play/pause). Tolerates the
-// auto-advance loading state (~15s of spinner when a track ends/changes).
-async function waitForPlayerIcon(page: Page, name: 'play' | 'pause', timeout = 60_000) {
-  const deadline = Date.now() + timeout;
-  for (;;) {
-    const n = await player(page).locator(`svg.lucide-${name}`).count();
-    if (n > 0) return;
-    if (Date.now() > deadline) {
-      throw new Error(`player icon '${name}' never appeared in ${timeout}ms`);
-    }
-    await page.waitForTimeout(400);
-  }
-}
-
-const songRow = (page: Page) => page.locator('.song-row');
-
-async function login(page: Page) {
-  await page.goto(`${BASE}/login`);
-  await expect(page.locator('input#email')).toBeVisible();
-  await page.fill('input#email', 'e2e-user@example.com');
-  await page.fill('input#password', 'password123');
-  await page.click('button[type="submit"]');
-  await page.waitForURL(`${BASE}/`);
-  // wait for the content area to mount
-  await expect(songRow(page).first()).toBeVisible({ timeout: 30000 });
-}
 
 async function openPanel(page: Page, title: string) {
   await player(page).locator(`[title="${title}"]`).click();
@@ -75,7 +45,7 @@ test('full user journey (desktop)', async ({ page }) => {
     const title = await player(page).locator('p').first().textContent();
     console.log(`[Playback] song: ${title?.trim()}`);
     expect(title?.trim()).toBeTruthy();
-    expect(title).not.toContain('No song selected');
+    expect(title).not.toContain('Nothing playing');
     await expect(player(page).locator('.font-mono').first()).toBeVisible();
   });
 
@@ -96,7 +66,11 @@ test('full user journey (desktop)', async ({ page }) => {
 
   await test.step('4. play / pause toggle', async () => {
     const p = player(page);
-    // Normalize to a loaded-paused state first (auto-advance may be mid-load)
+    // Normalize to a loaded-paused state first. The engine can legitimately
+    // sit in a spinner while a throttled stream recovers (bounded to ~30s by
+    // the stall guard) — wait for an actionable icon before clicking so the
+    // toggle is never issued blind into a loading button.
+    await waitForAnyPlayerIcon(page);
     if ((await p.locator('svg.lucide-pause').count()) > 0) {
       await p.locator('button:has(svg.lucide-pause)').click();
     }
@@ -222,13 +196,16 @@ test('full user journey (desktop)', async ({ page }) => {
     await openPanel(page, 'Equalizer');
     await expect(page.getByRole('heading', { name: 'Audio Effects' })).toBeVisible();
 
+    // Presets live only inside the Equalizer panel — scope the lookup there
+    // with exact matching, or chart-row Download buttons behind the dialog
+    // (e.g. "Download Spotify Pop Hits 2026…") collide via substring matches.
+    const panel = page.locator('[role="dialog"][aria-label="Equalizer"]');
     for (const preset of ['Flat', 'Bass Boost', 'Treble Boost', 'Rock', 'Classical', 'Jazz', 'Hip Hop', 'Electronic', 'Vocal', 'Pop']) {
-      await expect(page.getByRole('button', { name: preset })).toBeVisible();
+      await expect(panel.getByRole('button', { name: preset, exact: true })).toBeVisible();
     }
     console.log('[EQ] all 10 presets rendered');
 
     // 10 band sliders + 3 extra sliders live in the panel, not the player bar
-    const panel = page.locator('[role="dialog"][aria-label="Equalizer"]');
     const ranges = panel.locator('input[type="range"]');
     console.log(`[EQ] range inputs: ${await ranges.count()}`);
     expect(await ranges.count()).toBeGreaterThanOrEqual(13);
@@ -242,7 +219,7 @@ test('full user journey (desktop)', async ({ page }) => {
     expect(store?.enabled).toBe(true);
 
     // preset 'Rock' applies gains
-    await page.getByRole('button', { name: 'Rock' }).click();
+    await panel.getByRole('button', { name: 'Rock', exact: true }).click();
     store = await eqStore(page);
     console.log(`[EQ] Rock preset gains: [${(store?.gains || []).slice(0, 4)}]`);
     expect(store?.preset).toBe('Rock');
@@ -265,7 +242,7 @@ test('full user journey (desktop)', async ({ page }) => {
 
     // effect toggles — verify a real state flip (presets may pre-enable effects)
     for (const label of ['Loudness', 'Limiter', 'Virtualizer']) {
-      const btn = page.getByRole('button', { name: new RegExp(label) });
+      const btn = panel.getByRole('button', { name: new RegExp(`^${label}$`) });
       const key = label === 'Loudness' ? 'loudnessMode' : label === 'Limiter' ? 'limiterEnabled' : 'virtualizerEnabled';
       const before = (await eqStore(page))?.[key];
       await btn.click();
@@ -302,17 +279,18 @@ await test.step('13. keyboard shortcuts (L=favorite, space, shift+arrows/N/P)', 
     await page.keyboard.press('Shift+P');
     await page.waitForTimeout(3000);
 
-    // Space toggles play/pause — normalize to a paused state first
+    // Space toggles play/pause — normalize to a clean paused state first.
+    // The engine can legitimately sit in a spinner while a throttled stream
+    // recovers (bounded to ~30s by the stall guard), so wait for an
+    // actionable icon before deciding what to press — pressing space into a
+    // spinner PAUSES (the store still holds isPlaying from the prior track)
+    // instead of playing.
     const p = player(page);
-    for (let i = 0; i < 4; i++) {
-      if ((await p.locator('svg.lucide-pause').count()) > 0) {
-        await p.locator('button:has(svg.lucide-pause)').click();
-        await waitForPlayerIcon(page, 'play', 30000);
-        break;
-      }
-      if ((await p.locator('svg.lucide-play').count()) > 0) break;
-      await page.waitForTimeout(800);
+    await waitForAnyPlayerIcon(page);
+    if ((await p.locator('svg.lucide-pause').count()) > 0) {
+      await p.locator('button:has(svg.lucide-pause)').click();
     }
+    await waitForPlayerIcon(page, 'play', 30_000);
     await page.locator('body').press('Space');
     await waitForPlayerIcon(page, 'pause');
     console.log('[Keys] space toggles play → playing');
@@ -366,24 +344,28 @@ await test.step('13. keyboard shortcuts (L=favorite, space, shift+arrows/N/P)', 
   });
 
   await test.step('17. favorites page', async () => {
-    // (Re-)favorite the current track so the page has content — step 13's
-    // keyboard test toggled it off with the L shortcut.
-    const heartBtn = player(page).locator('button:has(svg.lucide-heart)');
-    if ((await heartBtn.locator('svg').getAttribute('fill')) !== 'currentColor') {
-      await heartBtn.click();
+    // The favorites page only renders favorites that exist in the songs
+    // catalog — a favorited YouTube-only trending track shows as empty. So
+    // favorite a LIBRARY (catalog) row directly: deterministic regardless of
+    // which track happens to be playing, and independent of step 13's L-key
+    // toggle of the current track.
+    await page.goto(`${BASE}/library`);
+    const row = songRow(page).first();
+    await expect(row).toBeVisible({ timeout: 15000 });
+    const rowHeart = row.locator('button:has(svg.lucide-heart)');
+    await row.hover();
+    if ((await rowHeart.locator('svg').getAttribute('fill')) !== 'currentColor') {
+      await rowHeart.click();
       await page.waitForTimeout(400);
     }
+
     await page.goto(`${BASE}/favorites`);
     // Catalog fetch is async — wait for either the empty state or a row
     const empty = page.getByText('No favorites yet');
     await expect(empty.or(songRow(page).first())).toBeVisible({ timeout: 20000 });
     const rows = await songRow(page).count();
     console.log(`[Favorites] favorite rows: ${rows}`);
-    if (rows === 0) {
-      const heading = await page.getByRole('heading', { name: /Favorites/i }).textContent();
-      console.log(`[Favorites] heading: ${heading}`);
-    }
-    expect(rows, 'favorited track should appear on the favorites page').toBeGreaterThan(0);
+    expect(rows, 'favorited catalog song should appear on the favorites page').toBeGreaterThan(0);
   });
 
   await test.step('18. history page', async () => {
@@ -466,6 +448,11 @@ test('mobile viewport: player expand + panels', async ({ page }) => {
   await stubAuth(page);
   await page.goto(BASE);
   await expect(songRow(page).first()).toBeVisible({ timeout: 30000 });
+
+  // The idle bar (no track) hides the expand affordance — load a song first
+  // so the expanded player has something to control.
+  await songRow(page).first().click();
+  await expect(player(page).locator('p').first()).not.toContainText('Nothing playing', { timeout: 60000 });
 
   const expand = page.locator('[aria-label="Expand player"]');
   await expect(expand).toBeVisible();

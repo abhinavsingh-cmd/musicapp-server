@@ -14,6 +14,7 @@ import { findVerifiedReplacement } from '../services/smartReplaceService';
 import { resolvePlayableSong, sourceKey, stripStaleBlobUrl } from '../services/musicSource';
 import { showToast } from '../utils/toast';
 import { logger } from '../utils/logger';
+import { deferIdle } from '../utils/idle';
 
 // Offline playback bridge: resolution (and the engine's stream-failure
 // recovery) can ask the download system for a track's stored local copy.
@@ -60,7 +61,7 @@ export interface AudioStore {
   duration: number;
   favorites: string[];
 
-  loadSong: (song: Song, playlist: Song[], index: number) => void;
+  loadSong: (song: Song, playlist: Song[], index: number, preserveShuffle?: boolean) => void;
   retry: () => void;
   play: () => void;
   pause: () => void;
@@ -593,11 +594,7 @@ function initAudioServiceHandler() {
 if (!(globalThis as any).__audioStoreInitialized) {
   (globalThis as any).__audioStoreInitialized = true;
 
-  const deferInit = typeof requestIdleCallback === 'function'
-    ? requestIdleCallback
-    : (cb: IdleRequestCallback) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 } as IdleDeadline), 0);
-
-  deferInit(() => {
+  deferIdle(() => {
     try { prewarmOnFirstInteraction(); } catch {}
 
     try {
@@ -709,6 +706,74 @@ function autoSkipNextSong() {
     nextSongRetryTimeout = null;
     useAudioStore.getState().nextSong();
   }, backoff);
+}
+
+/**
+ * The authoritative next/previous transition pipeline — shared by both
+ * directions so the resolve/play/failure paths can never drift apart.
+ *
+ * Handles: single-flight guard (one transition of this direction at a
+ * time), command-sequence claiming at EXECUTION time, the queue move, and
+ * starting playback of the moved-to track with the standard failure
+ * recovery (auto-skip). `onNoSong` runs when the queue has no valid move
+ * target (end-of-queue / one-track edge cases) — each direction finishes
+ * the no-target tail slightly differently.
+ */
+function chainQueueTransition(opts: {
+  isPending: () => boolean;
+  setPending: (v: boolean) => void;
+  /** Perform the queue move (nextSong/previousSong on the queue store). */
+  move: () => Promise<Song | null>;
+  /** Error-log label (nextSong/previousSong). */
+  label: string;
+  /** Runs when the queue has no valid move target. */
+  onNoSong: () => void;
+}): Promise<void> | undefined {
+  const { isPending, setPending, move, label, onNoSong } = opts;
+
+  if (isPending()) return; // exactly one transition of this kind at a time
+  setPending(true);
+  clearNextSongRetry();
+  pendingResumePosition = null;
+  return chainAdvance(async () => {
+    // Claim the command sequence at EXECUTION time, not issue time: this
+    // invalidates any older in-flight command (stale next / clicked-then-
+    // superseded load) while keeping a queued next/previous pair both
+    // authoritative — each executes exactly once, in order.
+    const seq = ++commandSeq;
+    try {
+      const song = await move();
+      // A newer command (song click / previous / another next) completed
+      // while the queue transition was in flight — it owns playback now.
+      if (seq !== commandSeq) return;
+      if (song) {
+        const resolved = resolveDownloadUrl(song);
+        // Read queue + index synchronously right after the move set them
+        const qs = useQueueStore.getState();
+        const resolvedQueue = resolveQueueDownloads(qs.queue);
+        useAudioStore.setState({
+          currentSong: resolved,
+          progress: 0,
+          isLoading: true,
+          duration: resolved.duration,
+          error: null,
+        });
+        startLoadingTimeout();
+        audioService.play(resolved, resolvedQueue, qs.currentIndex).catch(err => {
+          if (seq !== commandSeq) return; // superseded by a newer command
+          const msg = err instanceof Error ? err.message : 'Playback failed';
+          logger.error(`[AudioStore] ${label} play() failed:`, msg);
+          clearLoadingTimeout();
+          useAudioStore.setState({ error: msg, isLoading: false, isPlaying: false });
+          autoSkipNextSong();
+        });
+      } else {
+        onNoSong();
+      }
+    } finally {
+      setPending(false);
+    }
+  });
 }
 
 /**
@@ -828,7 +893,7 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
   duration: 0,
   favorites: [],
 
-  loadSong: (song: Song, playlist: Song[], index: number) => {
+  loadSong: (song: Song, playlist: Song[], index: number, preserveShuffle = false) => {
     clearNextSongRetry();
 
     // Boundary validation: a malformed track must produce a controlled
@@ -883,7 +948,7 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
     const resolvedQueue = resolveQueueDownloads(playlist);
 
     const qs = useQueueStore.getState();
-    qs.setQueue(resolvedQueue, index);
+    qs.setQueue(resolvedQueue, index, preserveShuffle);
 
     set({
       currentSong: resolvedSong,
@@ -976,95 +1041,31 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
     }
   },
 
-  nextSong: () => {
-    if (isNextSongPending) return; // exactly one next-transition at a time
-    isNextSongPending = true;
-    clearNextSongRetry();
-    pendingResumePosition = null;
-    return chainAdvance(async () => {
-      // Claim the command sequence at EXECUTION time, not issue time: this
-      // invalidates any older in-flight command (stale next / clicked-then-
-      // superseded load) while keeping a queued next/previous pair both
-      // authoritative — each executes exactly once, in order.
-      const seq = ++commandSeq;
-      try {
-        const song = await useQueueStore.getState().nextSong();
-        // A newer command (song click / previous / another next) completed
-        // while the queue transition was in flight — it owns playback now.
-        if (seq !== commandSeq) return;
-        if (song) {
-          const resolved = resolveDownloadUrl(song);
-          // Read queue + index synchronously right after nextSong() set them
-          const qs = useQueueStore.getState();
-          const resolvedQueue = resolveQueueDownloads(qs.queue);
-          set({
-            currentSong: resolved,
-            progress: 0,
-            isLoading: true,
-            duration: resolved.duration,
-            error: null,
-          });
-          startLoadingTimeout();
-          audioService.play(resolved, resolvedQueue, qs.currentIndex).catch(err => {
-            if (seq !== commandSeq) return; // superseded by a newer command
-            const msg = err instanceof Error ? err.message : 'Playback failed';
-            logger.error('[AudioStore] nextSong play() failed:', msg);
-            clearLoadingTimeout();
-            set({ error: msg, isLoading: false, isPlaying: false });
-            autoSkipNextSong();
-          });
-        } else {
-          clearNextSongRetry();
-          clearLoadingTimeout();
-          set({ isPlaying: false, progress: 0, isLoading: false });
-          syncMediaSessionEnded();
-        }
-      } finally {
-        isNextSongPending = false;
-      }
-    });
-  },
+  nextSong: () => chainQueueTransition({
+    isPending: () => isNextSongPending,
+    setPending: (v) => { isNextSongPending = v; },
+    move: () => useQueueStore.getState().nextSong(),
+    label: 'nextSong',
+    onNoSong: () => {
+      // End of queue — stop playback and flush the media session state.
+      clearNextSongRetry();
+      clearLoadingTimeout();
+      useAudioStore.setState({ isPlaying: false, progress: 0, isLoading: false });
+      syncMediaSessionEnded();
+    },
+  }),
 
-  previousSong: () => {
-    if (isPreviousSongPending) return; // exactly one previous-transition at a time
-    isPreviousSongPending = true;
-    clearNextSongRetry();
-    pendingResumePosition = null;
-    return chainAdvance(async () => {
-      // Claim the command sequence at EXECUTION time — see nextSong.
-      const seq = ++commandSeq;
-      try {
-        const song = await useQueueStore.getState().previousSong();
-        if (seq !== commandSeq) return; // superseded by a newer command
-        if (song) {
-          const resolved = resolveDownloadUrl(song);
-          const qs = useQueueStore.getState();
-          const resolvedQueue = resolveQueueDownloads(qs.queue);
-          set({
-            currentSong: resolved,
-            progress: 0,
-            isLoading: true,
-            duration: resolved.duration,
-            error: null,
-          });
-          startLoadingTimeout();
-          audioService.play(resolved, resolvedQueue, qs.currentIndex).catch(err => {
-            if (seq !== commandSeq) return; // superseded by a newer command
-            const msg = err instanceof Error ? err.message : 'Playback failed';
-            logger.error('[AudioStore] previousSong play() failed:', msg);
-            clearLoadingTimeout();
-            set({ error: msg, isLoading: false, isPlaying: false });
-            autoSkipNextSong();
-          });
-        } else {
-          clearLoadingTimeout();
-          set({ isLoading: false });
-        }
-      } finally {
-        isPreviousSongPending = false;
-      }
-    });
-  },
+  previousSong: () => chainQueueTransition({
+    isPending: () => isPreviousSongPending,
+    setPending: (v) => { isPreviousSongPending = v; },
+    move: () => useQueueStore.getState().previousSong(),
+    label: 'previousSong',
+    onNoSong: () => {
+      // Queue boundary — just clear the loading flag; playback keeps going.
+      clearLoadingTimeout();
+      useAudioStore.setState({ isLoading: false });
+    },
+  }),
 
   seek: (time: number) => {
     pendingResumePosition = null;
@@ -1184,10 +1185,7 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
 }));
 
 if (typeof window !== 'undefined') {
-  const deferInit = typeof requestIdleCallback === 'function'
-    ? requestIdleCallback
-    : (cb: IdleRequestCallback) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 } as IdleDeadline), 0);
-  deferInit(() => {
+  deferIdle(() => {
     try {
       const favorites = loadFavorites();
       const volume = loadVolume();
@@ -1196,7 +1194,8 @@ if (typeof window !== 'undefined') {
     } catch {}
   });
 }
-  if (import.meta.env.DEV) {
+
+if (import.meta.env.DEV) {
   try {
     useAudioStore.subscribe((state, prev) => {
       const changes: string[] = [];

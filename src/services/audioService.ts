@@ -23,6 +23,14 @@ function isLocalSrc(url: string): boolean {
   return url.startsWith('blob:') || url.startsWith('file:') || url.startsWith('data:');
 }
 
+// A mid-stream buffer stall on the HTML engine is bounded exactly like the
+// YouTube engine's buffering timeout: a throttled/403'd direct stream can
+// starve the <audio> element (endless 'waiting') without ever firing
+// 'error' — without this guard the player would spin forever instead of
+// recovering through the session's single bounded recovery (fresh stream
+// resolution → embedded IFrame fallback).
+const HTML_STALL_TIMEOUT_MS = 30_000;
+
 interface AudioState {
   currentSong: Song | null;
   isPlaying: boolean;
@@ -116,6 +124,7 @@ export class AudioService {
   private progressInterval: ReturnType<typeof setInterval> | null = null;
   private streamStartTime = 0;
   private waitingStartTime = 0;
+  private htmlStallTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingStartTime = 0;
   private reEntryLock = false;
   // Session ids bind engine/element callbacks to the playback session that
@@ -178,6 +187,10 @@ export class AudioService {
   }
 
   private detachHtmlAudioListeners(): void {
+    if (this.htmlStallTimer) {
+      clearTimeout(this.htmlStallTimer);
+      this.htmlStallTimer = null;
+    }
     if (!this.htmlAudio) return;
     this.htmlAudio.removeEventListener('ended', this.handleEnded);
     this.htmlAudio.removeEventListener('timeupdate', this.handleTimeUpdate);
@@ -296,6 +309,19 @@ export class AudioService {
   private handleWaiting = (): void => {
     if (this.htmlSessionId !== this.currentPlaybackId) return; // stale element
     this.waitingStartTime = performance.now();
+    // Bounded mid-stream stall guard — one timer per stall episode. When it
+    // fires, route through the session's SINGLE bounded recovery (fresh
+    // resolution → IFrame fallback); a second stall on the same session
+    // fails the track so the queue advances instead of looping.
+    if (!this.htmlStallTimer) {
+      this.htmlStallTimer = setTimeout(() => {
+        this.htmlStallTimer = null;
+        if (this.htmlSessionId !== this.currentPlaybackId) return; // stale
+        if (!this.state.isPlaying && !this.state.isLoading) return; // user paused / dead
+        log('HTML stream stalled >30s — attempting one bounded recovery');
+        void this.recoverHtmlStream('Stream stalled (buffering timeout)');
+      }, HTML_STALL_TIMEOUT_MS);
+    }
     this.emit('waiting');
   };
 
@@ -306,6 +332,11 @@ export class AudioService {
 
   private handlePlaying = (): void => {
     if (this.htmlSessionId !== this.currentPlaybackId) return; // stale element
+    // The stream genuinely resumed — disarm the stall guard.
+    if (this.htmlStallTimer) {
+      clearTimeout(this.htmlStallTimer);
+      this.htmlStallTimer = null;
+    }
     if (!this.state.isPlaying) {
       this.setState({ isPlaying: true, isLoading: false, error: null });
       this.startProgressTracking();
@@ -331,6 +362,11 @@ export class AudioService {
 
   private handlePause = (): void => {
     if (this.htmlSessionId !== this.currentPlaybackId) return; // stale element
+    // A deliberate pause must not be mistaken for a stall.
+    if (this.htmlStallTimer) {
+      clearTimeout(this.htmlStallTimer);
+      this.htmlStallTimer = null;
+    }
     if (this.state.isPlaying) {
       this.setState({ isPlaying: false });
       this.stopProgressTracking();
@@ -723,6 +759,12 @@ export class AudioService {
     // Bind element events to THIS session — stale events from the previous
     // track are dropped by the element listeners.
     this.htmlSessionId = playbackId;
+    // Fresh playback session (or a recovered attempt): a stale stall timer
+    // from a previous stream must not fire into this one.
+    if (this.htmlStallTimer) {
+      clearTimeout(this.htmlStallTimer);
+      this.htmlStallTimer = null;
+    }
 
     let params = initialParams;
 

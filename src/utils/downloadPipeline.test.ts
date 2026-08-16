@@ -5,7 +5,15 @@ import {
   isTransientDownloadError,
   pauseDownload,
   resumeDownload,
+  cancelDownloadById,
+  HEADER_TIMEOUT_MS,
+  STALL_TIMEOUT_MS,
 } from './downloadManager';
+// Warm the provider module graph at import time. The download path lazy-
+// imports the YouTube provider; under vi.useFakeTimers() a first-time
+// vite-node dynamic import never settles, so the stall tests below would
+// hang on descriptor resolution instead of exercising the timeout.
+import '../providers/index';
 
 // ---------------------------------------------------------------------------
 // Mock audio data (fake MP3: ID3v2 header + frame sync)
@@ -241,6 +249,39 @@ describe('downloadSongWithProgress — full pipeline', () => {
     await expect(
       downloadSongWithProgress(MOCK_SONG),
     ).rejects.toThrow(/too small|empty|invalid/i);
+  });
+
+  it('REQUIREMENT: a simulated 0-byte response is rejected AND nothing is persisted', async () => {
+    // The exact failure mode from the field: HTTP 200, audio/mpeg, empty body.
+    // A 0-byte blob must never be written to the store as a "successful"
+    // download, regardless of what the server claimed.
+    fetchSpy.mockResolvedValue(new Response(new Uint8Array(0), {
+      status: 200,
+      headers: { 'Content-Type': 'audio/mpeg', 'Content-Length': '0' },
+    }));
+
+    await expect(downloadSongWithProgress(MOCK_SONG)).rejects.toThrow(/empty|too small/i);
+
+    const songsStore = stores.get('songs')!;
+    expect(songsStore._data.size).toBe(0);
+    expect(songsStore._data.get('test-song-1')).toBeUndefined();
+  });
+
+  it('REQUIREMENT: a valid audio response succeeds AND is persisted', async () => {
+    const audioBytes = makeAudioBytes(50_000);
+    fetchSpy.mockResolvedValue(makeAudioResponse(audioBytes));
+
+    const result = await downloadSongWithProgress(MOCK_SONG);
+
+    expect(result.size).toBe(50_000);
+    expect(isValidBlob(result.audioBlob)).toBe(true);
+
+    const songsStore = stores.get('songs')!;
+    expect(songsStore._data.size).toBe(1);
+    const entry = songsStore._data.get('test-song-1');
+    expect(entry).toBeDefined();
+    expect(entry.size).toBe(50_000);
+    expect(entry.audioBlob).toBeInstanceOf(Blob);
   });
 
   it('throws when downloaded blob is too small (< 10KB)', async () => {
@@ -656,5 +697,101 @@ describe('download edge cases', () => {
 
     const result = await downloadSongWithProgress(MOCK_SONG);
     expect(result.size).toBe(30_000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Hard-settlement guarantees: a download must NEVER stay "in progress"
+// forever. These are the exact failure modes that would otherwise leave the
+// row button spinning: a server that accepts the connection but never
+// responds, and a body that stops producing bytes mid-stream.
+// ---------------------------------------------------------------------------
+describe('download hard-settlement guarantees', () => {
+  let fetchSpy: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+  });
+
+  it('REQUIREMENT: a server that never sends response headers fails as a transient timeout, never hangs', async () => {
+    vi.useFakeTimers();
+    try {
+      // The connection is accepted but no response ever arrives — a wedged
+      // server/network would otherwise hold the fetch (and the button's
+      // downloading state) forever.
+      fetchSpy.mockImplementation(() => new Promise(() => {}));
+
+      const p = downloadSongWithProgress(MOCK_SONG);
+      let settled = false;
+      p.finally(() => { settled = true; }).catch(() => {});
+
+      await vi.advanceTimersByTimeAsync(HEADER_TIMEOUT_MS + 100);
+      const err = await p.catch((e: unknown) => e);
+      expect(settled).toBe(true);
+      expect(err).toMatchObject({ transient: true });
+      expect((err as Error).message).toMatch(/timed out/i);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('REQUIREMENT: a body that stalls mid-stream fails as transient after the stall deadline, never hangs', async () => {
+    vi.useFakeTimers();
+    try {
+      // Headers arrive and the first chunk is delivered — then the
+      // connection dies silently: read() never resolves and never errors.
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(makeAudioBytes(10_000));
+        },
+      });
+      fetchSpy.mockResolvedValue(new Response(stream, {
+        status: 200,
+        headers: { 'Content-Type': 'audio/mpeg' },
+      }));
+
+      const p = downloadSongWithProgress(MOCK_SONG);
+      let settled = false;
+      p.finally(() => { settled = true; }).catch(() => {});
+
+      // First chunk lands immediately; the transfer is then mid-flight.
+      await vi.advanceTimersByTimeAsync(10);
+      expect(settled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(STALL_TIMEOUT_MS + 100);
+      const err = await p.catch((e: unknown) => e);
+      expect(settled).toBe(true);
+      expect(err).toMatchObject({ transient: true });
+      expect((err as Error).message).toMatch(/stalled/i);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancelling a paused download settles promptly (pause gate is released)', async () => {
+    const audioBytes = makeAudioBytes(30_000);
+    fetchSpy.mockResolvedValue(makeAudioResponse(audioBytes));
+
+    const key = MOCK_SONG.youtubeId;
+    pauseDownload(key);
+
+    const ctrl = new AbortController();
+    const promise = downloadSongWithProgress(MOCK_SONG, undefined, ctrl.signal);
+    let settled = false;
+    void promise.then(() => { settled = true; }).catch(() => {});
+
+    // Let the loop reach the pause gate and block on it, THEN cancel — this
+    // is the exact race that used to leak the parallel slot forever because
+    // the gate was never released.
+    await new Promise((r) => setTimeout(r, 30));
+    expect(settled).toBe(false);
+
+    ctrl.abort();
+    // The promise must settle (reject with AbortError) instead of blocking
+    // on the pause gate forever — that is the whole point of the fix.
+    await expect(promise).rejects.toThrow(/abort/i);
+    // Clean up the downloadManager controller so no state leaks to other tests.
+    cancelDownloadById(key);
   });
 });

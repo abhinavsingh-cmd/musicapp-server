@@ -9,6 +9,7 @@ import { useDownloadsStore } from './stores/downloadsStore';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { backgroundAudio } from './services/backgroundAudio';
 import { logger } from './utils/logger';
+import { deferIdle } from './utils/idle';
 
 const LoginPage = lazy(() => import('./pages/LoginPage'));
 const NotFoundPage = lazy(() => import('./pages/NotFoundPage'));
@@ -49,6 +50,18 @@ const PageSpinner = () => (
   </div>
 );
 
+/**
+ * Lazy-loaded route with the standard per-page ErrorBoundary + Suspense
+ * wrapping. Removes the 15x-repeated boilerplate from the route table below.
+ */
+function LazyRoute({ element }: { element: React.ReactNode }) {
+  return (
+    <ErrorBoundary level="page">
+      <Suspense fallback={<PageSpinner />}>{element}</Suspense>
+    </ErrorBoundary>
+  );
+}
+
 const App: React.FC = () => {
   useKeyboardShortcuts();
 
@@ -61,10 +74,7 @@ const App: React.FC = () => {
     // loadDownloads() MUST run on startup so isDownloaded()/getBlobUrl() work
     // from any page. Without this, downloaded songs appear as non-downloaded
     // after app restart and the app re-requests YouTube unnecessarily.
-    const defer = typeof requestIdleCallback === 'function'
-      ? requestIdleCallback
-      : (cb: IdleRequestCallback) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 } as IdleDeadline), 0);
-    defer(() => {
+    deferIdle(() => {
       try {
         useAudioStore.getState().restoreFromPersistence();
       } catch (e) {
@@ -82,62 +92,28 @@ const App: React.FC = () => {
     <ErrorBoundary level="app">
       <AuthProvider>
         <LayoutProvider>
-              <Routes>
-                <Route path="/login" element={
-                  <ErrorBoundary level="page">
-                    <Suspense fallback={<PageSpinner />}>
-                      <LoginPage />
-                    </Suspense>
-                  </ErrorBoundary>
-                } />
-                <Route element={<AppLayout />}>
-                  <Route path="/" element={
-                    <ErrorBoundary level="page"><Suspense fallback={<PageSpinner />}><HomePage /></Suspense></ErrorBoundary>
-                  } />
-                  <Route path="/library" element={
-                    <ErrorBoundary level="page"><Suspense fallback={<PageSpinner />}><LibraryPage /></Suspense></ErrorBoundary>
-                  } />
-                  <Route path="/search" element={
-                    <ErrorBoundary level="page"><Suspense fallback={<PageSpinner />}><SearchPage /></Suspense></ErrorBoundary>
-                  } />
-                  <Route path="/discover" element={
-                    <ErrorBoundary level="page"><Suspense fallback={<PageSpinner />}><DiscoverPage /></Suspense></ErrorBoundary>
-                  } />
-                  <Route path="/favorites" element={
-                    <ErrorBoundary level="page"><Suspense fallback={<PageSpinner />}><FavoritesPage /></Suspense></ErrorBoundary>
-                  } />
-                  <Route path="/create-playlist" element={
-                    <ErrorBoundary level="page"><Suspense fallback={<PageSpinner />}><CreatePlaylistPage /></Suspense></ErrorBoundary>
-                  } />
-                  <Route path="/create-album" element={
-                    <ErrorBoundary level="page"><Suspense fallback={<PageSpinner />}><CreateAlbumPage /></Suspense></ErrorBoundary>
-                  } />
-                  <Route path="/downloads" element={
-                    <ErrorBoundary level="page"><Suspense fallback={<PageSpinner />}><DownloadsPage /></Suspense></ErrorBoundary>
-                  } />
-                  <Route path="/playlist/:id" element={
-                    <ErrorBoundary level="page"><Suspense fallback={<PageSpinner />}><PlaylistDetailPage /></Suspense></ErrorBoundary>
-                  } />
-                  <Route path="/charts" element={
-                    <ErrorBoundary level="page"><Suspense fallback={<PageSpinner />}><ChartsPage /></Suspense></ErrorBoundary>
-                  } />
-                  <Route path="/history" element={
-                    <ErrorBoundary level="page"><Suspense fallback={<PageSpinner />}><HistoryPage /></Suspense></ErrorBoundary>
-                  } />
-                  <Route path="/settings" element={
-                    <ErrorBoundary level="page"><Suspense fallback={<PageSpinner />}><SettingsPage /></Suspense></ErrorBoundary>
-                  } />
-                  <Route path="/dev" element={
-                    <ErrorBoundary level="page"><Suspense fallback={<PageSpinner />}><DevPage /></Suspense></ErrorBoundary>
-                  } />
-                  <Route path="*" element={
-                    <ErrorBoundary level="page"><Suspense fallback={<PageSpinner />}><NotFoundPage /></Suspense></ErrorBoundary>
-                  } />
-                </Route>
-              </Routes>
-          </LayoutProvider>
-        </AuthProvider>
-      </ErrorBoundary>
+          <Routes>
+            <Route path="/login" element={<LazyRoute element={<LoginPage />} />} />
+            <Route element={<AppLayout />}>
+              <Route path="/" element={<LazyRoute element={<HomePage />} />} />
+              <Route path="/library" element={<LazyRoute element={<LibraryPage />} />} />
+              <Route path="/search" element={<LazyRoute element={<SearchPage />} />} />
+              <Route path="/discover" element={<LazyRoute element={<DiscoverPage />} />} />
+              <Route path="/favorites" element={<LazyRoute element={<FavoritesPage />} />} />
+              <Route path="/create-playlist" element={<LazyRoute element={<CreatePlaylistPage />} />} />
+              <Route path="/create-album" element={<LazyRoute element={<CreateAlbumPage />} />} />
+              <Route path="/downloads" element={<LazyRoute element={<DownloadsPage />} />} />
+              <Route path="/playlist/:id" element={<LazyRoute element={<PlaylistDetailPage />} />} />
+              <Route path="/charts" element={<LazyRoute element={<ChartsPage />} />} />
+              <Route path="/history" element={<LazyRoute element={<HistoryPage />} />} />
+              <Route path="/settings" element={<LazyRoute element={<SettingsPage />} />} />
+              <Route path="/dev" element={<LazyRoute element={<DevPage />} />} />
+              <Route path="*" element={<LazyRoute element={<NotFoundPage />} />} />
+            </Route>
+          </Routes>
+        </LayoutProvider>
+      </AuthProvider>
+    </ErrorBoundary>
   );
 };
 

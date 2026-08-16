@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { Song } from '../types/music';
+import { deferIdle } from '../utils/idle';
 
 export interface HistoryEntry {
   song: Song;
@@ -91,8 +92,5 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
 }));
 
 if (typeof window !== 'undefined') {
-  const deferInit = typeof requestIdleCallback === 'function'
-    ? requestIdleCallback
-    : (cb: IdleRequestCallback) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 } as IdleDeadline), 0);
-  deferInit(() => { initHistoryStore().catch(() => {}); });
+  deferIdle(() => { initHistoryStore().catch(() => {}); });
 }

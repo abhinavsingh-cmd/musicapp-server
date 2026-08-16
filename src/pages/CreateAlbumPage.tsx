@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useGoBack } from '../hooks/useGoBack';
 import { useAlbumStore } from '../stores/albumStore';
 import { useSongsStore } from '../stores/songsStore';
-import { Plus, Disc, X, Music2, Check, ChevronUp, ChevronDown, ArrowLeft } from 'lucide-react';
+import { Plus, Disc, ArrowLeft } from 'lucide-react';
+import { SongPicker } from '../components/SongPicker';
 
 export const CreateAlbumPage: React.FC = () => {
   const [title, setTitle] = useState('');
@@ -12,8 +13,6 @@ export const CreateAlbumPage: React.FC = () => {
   const [genre, setGenre] = useState('Pop');
   const [coverPreview, setCoverPreview] = useState<string | null>(null);
   const [selectedSongs, setSelectedSongs] = useState<string[]>([]);
-  const [showSongPicker, setShowSongPicker] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
   const allSongs = useSongsStore((s) => s.songs);
   const loading = useSongsStore((s) => s.loading);
   const ensureLoaded = useSongsStore((s) => s.ensureLoaded);
@@ -26,11 +25,6 @@ export const CreateAlbumPage: React.FC = () => {
   const genres = ['Pop', 'Rock', 'Hip Hop', 'R&B', 'Electronic', 'Indie', 'Jazz', 'Classical', 'Country', 'Folk', 'Metal', 'Punk', 'Reggae', 'Blues', 'Soul', 'Funk', 'Disco', 'House', 'Techno', 'Trance', 'Ambient', 'Soundtrack', 'Other'];
 
   useEffect(() => { ensureLoaded(); }, [ensureLoaded]);
-
-  const filteredSongs = useMemo(() => allSongs.filter(s =>
-    (s.title || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
-    (s.artist || '').toLowerCase().includes(searchQuery.toLowerCase())
-  ), [allSongs, searchQuery]);
 
   const handleCoverChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -167,92 +161,13 @@ export const CreateAlbumPage: React.FC = () => {
         </div>
 
         {/* Song Selection */}
-        <div className="border-t border-white/5 pt-6">
-          <div className="flex items-center justify-between mb-4">
-            <label className="block text-sm font-medium text-gray-300 flex items-center gap-2">
-              <Music2 size={16} className="text-orange-400" />
-              Songs ({selectedSongs.length} selected)
-            </label>
-            <button
-              type="button"
-              onClick={() => setShowSongPicker(!showSongPicker)}
-              className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-sm text-gray-300 hover:text-white transition-colors flex items-center gap-1"
-            >
-              {showSongPicker ? (
-                <>Hide <ChevronUp size={14} /></>
-              ) : (
-                <>Select Songs <ChevronDown size={14} /></>
-              )}
-            </button>
-          </div>
-
-          {showSongPicker && (
-            <div className="space-y-3 max-h-96 overflow-y-auto">
-              <input
-                type="text"
-                placeholder="Search songs..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full px-4 py-2 rounded-xl bg-white/5 border border-white/5 text-white focus:outline-none focus:ring-2 focus:ring-purple-500"
-              />
-              <div className="grid gap-2 max-h-64 overflow-y-auto">
-                {filteredSongs.slice(0, 50).map(song => (
-                  <label
-                    key={song.id}
-                    className={`flex items-center gap-3 p-2 rounded-xl transition-colors ${
-                      selectedSongs.includes(song.id)
-                        ? 'bg-violet-500/20 border border-violet-500/30'
-                        : 'hover:bg-white/5'
-                    }`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={selectedSongs.includes(song.id)}
-                      onChange={() => handleSongToggle(song.id)}
-                      className="w-4 h-4 accent-violet-500"
-                    />
-                    <img src={song.coverArt} alt={song.title} className="w-10 h-10 rounded-lg object-cover" loading="lazy" />
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-white truncate">{song.title}</p>
-                      <p className="text-xs text-gray-400 truncate">{song.artist}</p>
-                    </div>
-                    {selectedSongs.includes(song.id) && (
-                      <Check size={16} className="text-violet-400 flex-shrink-0" />
-                    )}
-                  </label>
-                ))}
-              </div>
-              {filteredSongs.length === 0 && (
-                <p className="text-center text-gray-500 py-4">No songs found</p>
-              )}
-            </div>
-          )}
-
-          {!showSongPicker && selectedSongs.length > 0 && (
-            <div className="flex flex-wrap gap-2">
-              {selectedSongs.slice(0, 10).map(id => {
-                const song = allSongs.find(s => s.id === id);
-                return song ? (
-                  <span key={song.id} className="px-2 py-1 bg-white/5 rounded-full text-xs text-gray-300 flex items-center gap-1">
-                    {song.title}
-                    <button type="button" onClick={() => handleSongToggle(id)} className="text-red-400 hover:text-red-300">
-                      <X size={12} />
-                    </button>
-                  </span>
-                ) : null;
-              })}
-              {selectedSongs.length > 10 && (
-                <span className="px-2 py-1 bg-white/5 rounded-full text-xs text-gray-400">
-                  +{selectedSongs.length - 10} more
-                </span>
-              )}
-            </div>
-          )}
-
-          {!showSongPicker && selectedSongs.length === 0 && (
-            <p className="text-center text-gray-500 py-4">Click "Select Songs" to add tracks to your album</p>
-          )}
-        </div>
+        <SongPicker
+          songs={allSongs}
+          selected={selectedSongs}
+          onToggle={handleSongToggle}
+          tone="violet"
+          emptyText={'Click "Select Songs" to add tracks to your album'}
+        />
 
         {/* Submit */}
         <button type="submit" disabled={!title.trim() || !artist.trim() || selectedSongs.length === 0}

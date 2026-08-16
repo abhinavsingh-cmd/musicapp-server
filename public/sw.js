@@ -1,4 +1,4 @@
-const CACHE_NAME = 'musicapp-v3';
+const CACHE_NAME = 'musicapp-v4';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
@@ -56,8 +56,14 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(request.url);
   if (url.origin !== location.origin) return;
 
-  // Never cache audio streams or downloads — those go to IndexedDB
-  if (url.pathname.startsWith('/api/stream') || url.pathname.startsWith('/api/download')) return;
+  // Never cache audio streams, downloads, or trending data: streams and
+  // downloads go to IndexedDB, and trending has its own honest cache layer
+  // (a cached empty/fallback trending response must never resurface offline).
+  if (
+    url.pathname.startsWith('/api/stream') ||
+    url.pathname.startsWith('/api/download') ||
+    url.pathname.includes('/trending')
+  ) return;
 
   // API routes: network-first with cache fallback (for offline catalogue)
   if (url.pathname.startsWith('/api/')) {

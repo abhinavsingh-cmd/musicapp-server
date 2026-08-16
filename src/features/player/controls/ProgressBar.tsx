@@ -41,8 +41,12 @@ export const ProgressBar: React.FC<ProgressBarProps> = memo(({ className }) => {
   const pctRef = useRef(0);
   const [, forceUpdate] = useState(0);
 
-  // Subscribe to progress via interval to avoid 4x/sec re-renders
+  // Subscribe to progress via rAF to avoid 4x/sec re-renders — but ONLY
+  // while a track exists. With no song there is no playback to measure, so
+  // the timer must not run at all (it would keep the bar re-rendering and
+  // burn a frame every tick for nothing).
   useEffect(() => {
+    if (!hasSong) return;
     let rafId: number;
     const tick = () => {
       const { progress, duration } = useAudioStore.getState();
@@ -55,7 +59,7 @@ export const ProgressBar: React.FC<ProgressBarProps> = memo(({ className }) => {
     };
     rafId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafId);
-  }, []);
+  }, [hasSong]);
 
   const handleSeek = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (!barRef.current) return;
@@ -78,6 +82,10 @@ export const ProgressBar: React.FC<ProgressBarProps> = memo(({ className }) => {
   const pct = pctRef.current;
   const progress = useAudioStore((s) => s.progress);
   const duration = useAudioStore((s) => s.duration);
+
+  // No track — hide the progress area entirely. A 0:00 / 0:00 readout and an
+  // empty seek track imply playback that does not exist.
+  if (!hasSong) return null;
 
   return (
     <div className={cn("px-4", className)}>

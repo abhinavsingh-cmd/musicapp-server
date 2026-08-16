@@ -3,6 +3,7 @@ import { Song } from '../types/music';
 import { fetchSongs } from '../services/musicApi';
 import { getAllCachedMetadata } from '../utils/downloadManager';
 import { logger } from '../utils/logger';
+import { deferIdle } from '../utils/idle';
 
 interface SongsState {
   songs: Song[];
@@ -11,10 +12,17 @@ interface SongsState {
   fetched: boolean;
   lastSuccessfulFetch: number;
   ensureLoaded: () => Promise<void>;
-  hydrate: () => Promise<void>;
 }
 
 const SONGS_CACHE_KEY = 'songs_catalog_v1';
+
+/**
+ * The library catalog is refetched when the last successful fetch is older
+ * than this — the cache is a performance optimization, never a permanent
+ * freeze of the server's catalog. Existing songs stay visible during the
+ * refresh; a failed/empty refresh keeps the catalog the user already has.
+ */
+export const LIBRARY_STALE_MS = 60 * 60 * 1000; // 1 hour
 
 interface SongsCacheEntry {
   songs: Song[];
@@ -137,15 +145,38 @@ async function hydrateSongsStore(): Promise<void> {
   await initSongsStore();
 
   const state = useSongsStore.getState();
-  if (state.fetched && state.songs.length > 0) {
-    logger.debug('[songsStore] Library already hydrated with', state.songs.length, 'songs, skipping fetch');
-    return;
-  }
 
-  // If we have songs but fetched is false (shouldn't happen now), don't overwrite
   if (state.songs.length > 0) {
-    logger.debug('[songsStore] Has', state.songs.length, 'songs but fetched=false, marking as fetched');
-    useSongsStore.setState({ fetched: true, error: false });
+    const fresh = state.fetched && Date.now() - state.lastSuccessfulFetch < LIBRARY_STALE_MS;
+    if (fresh) {
+      logger.debug('[songsStore] Library is fresh — skipping fetch');
+      return;
+    }
+
+    // Stale cache (or a lost fetched flag) — refresh in the background. The
+    // visible catalog is kept until the fetch settles: a failed or empty
+    // refresh must never wipe songs the user already has.
+    logger.debug('[songsStore] Library cache is stale — refreshing in background');
+    useSongsStore.setState({ loading: true, error: false });
+    try {
+      const songs = await fetchWithTimeout();
+      if (songs.length > 0) {
+        useSongsStore.setState({
+          songs,
+          loading: false,
+          fetched: true,
+          error: false,
+          lastSuccessfulFetch: Date.now(),
+        });
+        saveCachedSongs(songs);
+      } else {
+        logger.debug('[songsStore] Stale refresh returned empty — keeping existing catalog');
+        useSongsStore.setState({ loading: false, fetched: true, error: false });
+      }
+    } catch (error) {
+      logger.error('[songsStore] Stale refresh failed — keeping existing catalog:', error);
+      useSongsStore.setState({ loading: false, fetched: true, error: false });
+    }
     return;
   }
 
@@ -199,15 +230,8 @@ export const useSongsStore = create<SongsState>(() => ({
   ensureLoaded: async () => {
     await hydrateSongsStore();
   },
-
-  hydrate: async () => {
-    await hydrateSongsStore();
-  },
 }));
 
 if (typeof window !== 'undefined') {
-  const deferInit = typeof requestIdleCallback === 'function'
-    ? requestIdleCallback
-    : (cb: IdleRequestCallback) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 } as IdleDeadline), 0);
-  deferInit(() => { hydrateSongsStore().catch(() => {}); });
+  deferIdle(() => { hydrateSongsStore().catch(() => {}); });
 }

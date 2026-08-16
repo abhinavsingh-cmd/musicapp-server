@@ -3,6 +3,7 @@ import { Song } from '../types/music';
 import { preloadNextSongs as preload } from '../services/preloadService';
 import { isDownloadedSong } from '../services/musicSource';
 import { logger } from '../utils/logger';
+import { deferIdle } from '../utils/idle';
 
 const QUEUE_KEY = 'playback-queue';
 const MAX_RECENT = 50;
@@ -87,7 +88,13 @@ export interface QueueState {
   /** Fade window in seconds, clamped to [2, 12]. */
   crossfadeDurationSec: number;
 
-  setQueue: (songs: Song[], startIndex?: number) => void;
+  /**
+   * Replace the queue. `preserveShuffle` keeps the current shuffle mode and
+   * original order — used when jumping to a row INSIDE the existing queue
+   * (queue panel), where the displayed order is already the shuffled order
+   * and the mode must not silently turn off.
+   */
+  setQueue: (songs: Song[], startIndex?: number, preserveShuffle?: boolean) => void;
   restoreQueue: (saved: { queue: Song[]; currentIndex: number; repeatMode: RepeatMode; isShuffled: boolean; originalQueue: Song[]; autoplayEnabled: boolean }) => void;
   playAtIndex: (index: number) => void;
   /**
@@ -191,7 +198,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
     await initQueueStore();
   },
 
-  setQueue: (songs, startIndex = 0) => {
+  setQueue: (songs, startIndex = 0, preserveShuffle = false) => {
     // Sanitize at the boundary: malformed entries (missing/blank id) must
     // never become queue items or reach persistence.
     const raw = Array.isArray(songs) ? songs : [];
@@ -206,8 +213,10 @@ export const useQueueStore = create<QueueState>((set, get) => ({
     set({
       queue: valid,
       currentIndex: safeIndex,
-      isShuffled: false,
-      originalQueue: [],
+      // A fresh list (song click from a page) starts unshuffled; a jump
+      // within the existing queue keeps the mode the user is in.
+      isShuffled: preserveShuffle ? get().isShuffled : false,
+      originalQueue: preserveShuffle ? get().originalQueue : [],
     });
     schedulePersist(get());
     if (song) get().addRecent(song);
@@ -231,7 +240,9 @@ export const useQueueStore = create<QueueState>((set, get) => ({
     if (index < 0 || index >= queue.length) return;
     const song = queue[index];
     const { useAudioStore } = await import('./audioStore');
-    useAudioStore.getState().loadSong(song, queue, index);
+    // Jumping to a row INSIDE the existing queue must keep the shuffle mode
+    // the user is in — the displayed order already IS the shuffled order.
+    useAudioStore.getState().loadSong(song, queue, index, true);
   },
 
   nextSong: async (target?) => {
@@ -416,8 +427,25 @@ export const useQueueStore = create<QueueState>((set, get) => ({
         void (async () => {
           const { useAudioStore } = await import('./audioStore');
           const audioStore = useAudioStore.getState();
-          if (audioStore.currentSong?.id === removedSong.id && audioStore.isPlaying) {
-            audioStore.loadSong(newCurrent, newQueue, Math.max(0, newIndex));
+          if (audioStore.currentSong?.id === removedSong.id) {
+            if (audioStore.isPlaying) {
+              audioStore.loadSong(newCurrent, newQueue, Math.max(0, newIndex));
+            } else {
+              // Paused (or still loading): the removed track must not linger
+              // as the "current" song. Stop its engine session so a later
+              // play cannot resume the REMOVED track, then point the player
+              // at the new current WITHOUT starting playback.
+              const { audioService } = await import('../services/audioServiceInstance');
+              audioService.stop();
+              useAudioStore.setState({
+                currentSong: newCurrent,
+                progress: 0,
+                duration: Number.isFinite(newCurrent.duration) ? newCurrent.duration : 0,
+                error: null,
+                isPlaying: false,
+                isLoading: false,
+              });
+            }
           }
         })();
       }
@@ -622,8 +650,5 @@ export const useQueueStore = create<QueueState>((set, get) => ({
 }));
 
 if (typeof window !== 'undefined') {
-  const deferInit = typeof requestIdleCallback === 'function'
-    ? requestIdleCallback
-    : (cb: IdleRequestCallback) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 } as IdleDeadline), 0);
-  deferInit(() => { initQueueStore().catch(() => {}); });
+  deferIdle(() => { initQueueStore().catch(() => {}); });
 }

@@ -250,7 +250,13 @@ class MetricsCollector {
   // ---- Helpers ----
 
   private emit() {
-    for (const l of this.listeners) l();
+    // A subscriber (e.g. the dev dashboard) must never be able to break the
+    // emitter's caller — metrics pushes happen inside search/request flows,
+    // and a throwing listener would turn a SUCCESSFUL search into an error
+    // state. One bad listener is isolated, never propagated.
+    for (const l of this.listeners) {
+      try { l(); } catch { /* listener errors are isolated */ }
+    }
   }
 
   private getMemoryUsageMB(): number {

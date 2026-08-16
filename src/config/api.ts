@@ -63,6 +63,31 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/**
+ * Hard settlement guarantee for a promise that must never hang its caller.
+ *
+ * Races `promise` against a deadline timer and rejects with a TimeoutError
+ * when the deadline fires — even if the wrapped operation (for example a
+ * fetch that ignored its AbortController abort) never settles on its own.
+ * `onTimeout` runs first so the caller can cancel the underlying operation
+ * best-effort.
+ */
+export function raceWithDeadline<T>(
+  promise: Promise<T>,
+  ms: number,
+  url: string,
+  onTimeout?: () => void,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      onTimeout?.();
+      reject(new TimeoutError(url));
+    }, ms);
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
+
 function isOnline(): boolean {
   return typeof navigator !== 'undefined' ? navigator.onLine : true;
 }
@@ -130,16 +155,35 @@ function getCachedResponse(url: string): Response | null {
   });
 }
 
-async function setCachedResponse(url: string, response: Response): Promise<void> {
-  const text = await response.text();
-  const ttl = getCacheTTL(url);
-  responseCache.set(url, {
-    bodyText: text,
-    status: response.status,
-    ok: response.ok,
-    headers: response.headers,
-    expiresAt: Date.now() + ttl,
-  });
+async function setCachedResponse(url: string, response: Response, timeout: number): Promise<void> {
+  // Clone BEFORE reading the body. Consuming the original response here
+  // made every first request's json()/text() fail with "Body is unusable",
+  // and broke the dedup-join clone with "Body has already been consumed" —
+  // which silently emptied YouTube search results the server DID return.
+  let copy: Response;
+  try {
+    copy = response.clone();
+  } catch {
+    return; // body already locked elsewhere — skip caching, caller keeps it
+  }
+  try {
+    // Bounded body read: a server that stalls MID-BODY (headers arrived,
+    // stream never completes) must NOT hang apiFetch — callers like the
+    // search pipeline bound their own body reads, so a wedged cache read
+    // would leave their await pending forever. On any read failure the
+    // response is simply not cached; the caller still gets the response.
+    const text = await raceWithDeadline(copy.text(), timeout, url);
+    const ttl = getCacheTTL(url);
+    responseCache.set(url, {
+      bodyText: text,
+      status: response.status,
+      ok: response.ok,
+      headers: response.headers,
+      expiresAt: Date.now() + ttl,
+    });
+  } catch {
+    return; // stalled/unreadable body — never block the caller on caching
+  }
 }
 
 /** Clear all cached responses. Call after mutations that invalidate data. */
@@ -151,6 +195,30 @@ export function clearResponseCache(pattern?: string): void {
   for (const key of responseCache.keys()) {
     if (key.includes(pattern)) responseCache.delete(key);
   }
+}
+
+/**
+ * Item counts of the in-memory response cache, bucketed by URL pattern for
+ * the dev dashboard. This is the ONE place cache stats are read from — the
+ * old standalone cacheManager held a parallel LRU cache that nothing wrote
+ * to, so its counters were always zero.
+ */
+export function getResponseCacheStats(): Record<string, number> {
+  const stats: Record<string, number> = {
+    search: 0,
+    trending: 0,
+    lyrics: 0,
+    stream: 0,
+    metadata: 0,
+  };
+  for (const key of responseCache.keys()) {
+    if (key.includes('/search')) stats.search++;
+    else if (key.includes('/charts') || key.includes('/youtube')) stats.trending++;
+    else if (key.includes('/lyrics')) stats.lyrics++;
+    else if (key.includes('/proxy-audio') || key.includes('/stream')) stats.stream++;
+    else stats.metadata++;
+  }
+  return stats;
 }
 
 // ---------------------------------------------------------------------------
@@ -219,9 +287,10 @@ export async function apiFetch(
     ok: response.ok,
   });
 
-  // Cache successful GET responses
+  // Cache successful GET responses (best-effort — a stalled body read never
+  // blocks the caller; the request has already succeeded at this point).
   if (method === 'GET' && response.ok && cacheTTL !== 0) {
-    await setCachedResponse(url, response);
+    await setCachedResponse(url, response, timeout);
   }
 
   return response;
@@ -243,17 +312,26 @@ async function _doFetch(
     const controller = new AbortController();
     let timedOut = false;
     const abortFromCaller = () => controller.abort(callerSignal?.reason);
-    const timer = setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, timeout);
     callerSignal?.addEventListener('abort', abortFromCaller, { once: true });
 
     try {
-      const res = await fetch(url, {
-        ...fetchOptions,
-        signal: controller.signal,
-      });
+      // Hard deadline: the fetch MUST settle within `timeout`. A platform
+      // that ignores the AbortController abort (wedged network stack, mobile
+      // WebView) would otherwise leave this request — and every caller
+      // awaiting it (search, charts, playback) — pending forever. The
+      // deadline rejects with a TimeoutError no matter what the fetch does.
+      const res = await raceWithDeadline(
+        fetch(url, {
+          ...fetchOptions,
+          signal: controller.signal,
+        }),
+        timeout,
+        url,
+        () => {
+          timedOut = true;
+          controller.abort();
+        },
+      );
 
       if (res.ok) return res;
 
@@ -273,13 +351,16 @@ async function _doFetch(
         url,
       );
     } catch (err: any) {
-      if (err instanceof ApiError) throw err;
+      if (err instanceof ApiError && !(err instanceof TimeoutError)) throw err;
 
       // Cancellation belongs to the caller (for example, an outdated search),
       // not to the retry policy. Let the caller discard it immediately.
       if (callerSignal?.aborted) throw err;
 
-      if (err.name === 'AbortError' && timedOut) {
+      // The hard deadline fires with a TimeoutError; the abort timer used to
+      // surface as an AbortError with timedOut set. Both mean the same thing:
+      // this attempt exceeded its budget — record it and let retry policy run.
+      if (err instanceof TimeoutError || (err.name === 'AbortError' && timedOut)) {
         lastError = new TimeoutError(url);
       } else if (!isOnline()) {
         throw new OfflineError();
@@ -287,7 +368,6 @@ async function _doFetch(
         lastError = new NetworkError(url, err);
       }
     } finally {
-      clearTimeout(timer);
       callerSignal?.removeEventListener('abort', abortFromCaller);
     }
 

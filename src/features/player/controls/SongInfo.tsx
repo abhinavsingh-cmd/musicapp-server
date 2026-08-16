@@ -49,7 +49,7 @@ export const SongInfo: React.FC<SongInfoProps> = React.memo(({ className }) => {
 
       <div className="min-w-0 flex-1">
         <p className="text-sm font-semibold text-white truncate">
-          {title || 'No song selected'}
+          {title || 'Nothing playing'}
         </p>
         <div className="flex items-center gap-1.5 text-xs text-gray-400 truncate">
           <span className="truncate">{artist || 'Select a song to play'}</span>

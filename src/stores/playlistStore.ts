@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { Playlist, Song } from '../types/music';
+import { deferIdle } from '../utils/idle';
 
 const STORAGE_KEY = 'playlists';
 
@@ -270,8 +271,5 @@ export const usePlaylistStore = create<PlaylistStore>((set, get) => ({
 }));
 
 if (typeof window !== 'undefined') {
-  const deferInit = typeof requestIdleCallback === 'function'
-    ? requestIdleCallback
-    : (cb: IdleRequestCallback) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 } as IdleDeadline), 0);
-  deferInit(() => { initPlaylistStore().catch(() => {}); });
+  deferIdle(() => { initPlaylistStore().catch(() => {}); });
 }

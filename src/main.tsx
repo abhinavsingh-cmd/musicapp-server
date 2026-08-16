@@ -6,6 +6,7 @@ import { ErrorBoundary } from './components/ErrorBoundary'
 import { metricsCollector } from './services/metricsCollector'
 import App from './App.tsx'
 import { logger } from './utils/logger'
+import { deferIdle } from './utils/idle'
 import './index.css'
 
 // --- Startup performance measurement ---
@@ -48,12 +49,8 @@ initialRender();
 
 // Preload critical resources in background
 if (typeof window !== 'undefined') {
-  const defer = typeof requestIdleCallback === 'function'
-    ? requestIdleCallback
-    : (cb: IdleRequestCallback) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 } as IdleDeadline), 0);
-  
   import('./services/preloadService').then(module => {
-    defer(() => module.preloadCriticalResources().catch(() => {}));
+    deferIdle(() => module.preloadCriticalResources().catch(() => {}));
   }).catch(() => {});
 }
 

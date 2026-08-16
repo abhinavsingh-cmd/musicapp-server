@@ -20,6 +20,7 @@ import {
 } from '../utils/downloadManager';
 import { metricsCollector } from '../services/metricsCollector';
 import { logger } from '../utils/logger';
+import { deferIdle } from '../utils/idle';
 
 export type DownloadError = {
   song: Song;
@@ -533,10 +534,7 @@ function sendDownloadNotification(message: string) {
 // Wire up online/offline event listeners (deferred)
 // ---------------------------------------------------------------------------
 if (typeof window !== 'undefined') {
-  const deferInit = typeof requestIdleCallback === 'function'
-    ? requestIdleCallback
-    : (cb: IdleRequestCallback) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 } as IdleDeadline), 0);
-  deferInit(() => {
+  deferIdle(() => {
     window.addEventListener('online', () => {
       useDownloadsStore.getState().setOnline(true);
       // Resume queued downloads when coming back online
@@ -545,10 +543,5 @@ if (typeof window !== 'undefined') {
     window.addEventListener('offline', () => {
       useDownloadsStore.getState().setOnline(false);
     });
-
-    // Request notification permission
-    if ('Notification' in window && Notification.permission === 'default') {
-      // Don't request immediately — wait for user interaction
-    }
   });
 }

@@ -1,4 +1,5 @@
 import { test, expect, Page } from '@playwright/test';
+import { BASE, player, songRow, login, waitForPlayerIcon } from './helpers';
 
 /**
  * "Human user" deep-interaction checks: click things the way a user does and
@@ -7,12 +8,7 @@ import { test, expect, Page } from '@playwright/test';
  * Requires the dev server running (`npm run dev`).
  */
 
-const BASE = 'http://localhost:3000';
-
-const player = (page: Page) => page.locator('.fixed.bottom-0');
 const playerTitle = (page: Page) => player(page).locator('p.text-sm.font-semibold.text-white.truncate').first();
-
-const songRow = (page: Page) => page.locator('.song-row');
 
 // Search results render as library SongTable rows (.song-row) when the local
 // library matches, otherwise as YouTube result cards.
@@ -22,16 +18,6 @@ const queueRow = (page: Page) => page.locator('[role="dialog"][aria-label="Queue
 // Table rows render the title as a div, queue/chart rows as a p
 const rowTitle = (row: import('@playwright/test').Locator) => row.locator('div.font-medium, p.font-medium').first();
 
-async function waitForPlayerIcon(page: Page, name: 'play' | 'pause', timeout = 60_000) {
-  const deadline = Date.now() + timeout;
-  for (;;) {
-    const n = await player(page).locator(`svg.lucide-${name}`).count();
-    if (n > 0) return;
-    if (Date.now() > deadline) throw new Error(`player icon '${name}' never appeared in ${timeout}ms`);
-    await page.waitForTimeout(400);
-  }
-}
-
 // Poll until the player's song title matches the clicked track. Smart-replace
 // may swap an unplayable video for a similar one, so a change to ANY other
 // track also counts as the interaction succeeding.
@@ -40,21 +26,12 @@ async function waitForPlayerTitle(page: Page, expected: string, timeout = 60_000
   for (;;) {
     const t = await playerTitle(page).textContent().catch(() => '');
     if (t && (t === expected || t.includes(expected) || expected.includes(t as string))) return;
-    if (previousTitle && t && t !== previousTitle && !t.includes('No song selected')) return;
+    if (previousTitle && t && t !== previousTitle && !t.includes('Nothing playing')) return;
     if (Date.now() > deadline) {
       throw new Error(`player title never became '${expected}' (last: '${t}')`);
     }
     await page.waitForTimeout(400);
   }
-}
-
-async function login(page: Page) {
-  await page.goto(`${BASE}/login`);
-  await page.fill('input#email', 'e2e-user@example.com');
-  await page.fill('input#password', 'password123');
-  await page.click('button[type="submit"]');
-  await page.waitForURL(`${BASE}/`);
-  await expect(songRow(page).first()).toBeVisible({ timeout: 30_000 });
 }
 
 function normalized(s: string) {
@@ -245,6 +222,10 @@ page.on('requestfailed', (r) => {
   await test.step('13. downloads: page renders queue sections without crashing', async () => {
     await page.goto(`${BASE}/downloads`);
     await expect(page.getByRole('heading', { name: /Downloads/ })).toBeVisible();
+    // Downloads load asynchronously (IndexedDB) — wait for the settled state
+    // before reading page text, or the "Loading downloads..." placeholder
+    // races the assertion.
+    await expect(page.getByText(/No downloads yet|Downloaded songs|Downloading|Download Queue/)).toBeVisible();
     const text = normalized(await page.locator('main, body').last().textContent() ?? '');
     expect(/(Downloading|Download Queue|Downloaded|No downloads)/.test(text)).toBeTruthy();
     console.log('[Downloads] page renders');

@@ -4,7 +4,7 @@ import { OfflineError, NetworkError, TimeoutError } from '../config/api';
 import { searchProviders } from '../providers/search';
 import type { Track } from '../providers/types';
 import { metricsCollector } from '../services/metricsCollector';
-import { librarySearchIndex, initLibrarySearchIndex } from '../services/librarySearchIndex';
+import { librarySearchIndex, initLibrarySearchIndex, type IndexedSearchHit } from '../services/librarySearchIndex';
 
 // ---- Types ----
 
@@ -12,7 +12,35 @@ export type FilterType = 'all' | 'songs' | 'artists' | 'albums' | 'playlists' | 
 export type SortMode = 'relevance' | 'newest' | 'popular' | 'alpha';
 export type DurationFilter = 'any' | 'short' | 'medium' | 'long';
 
-export type SearchStatus = 'idle' | 'loading' | 'success' | 'empty' | 'error' | 'offline' | 'cancelled';
+/**
+ * Explicit search lifecycle. Every terminal outcome is distinct so the UI
+ * can never conflate "no results" with a failure, and loading states are
+ * always followed by one of: success / empty / error / timeout / network /
+ * offline / cancelled.
+ */
+export type SearchStatus =
+  | 'idle'
+  | 'loading'
+  /** A re-request fired after a previous failure — spinner with "Retrying". */
+  | 'retrying'
+  | 'success'
+  | 'empty'
+  /** Server answered, but with an error (5xx etc.). */
+  | 'error'
+  /** OfflineError / navigator offline. */
+  | 'offline'
+  /** NetworkError — could not reach the backend at all. */
+  | 'network'
+  /** TimeoutError — the backend did not answer in time. */
+  | 'timeout'
+  | 'cancelled';
+
+/** States that represent a completed FAILURE (retryable, never a result). */
+const FAILURE_STATUSES: ReadonlySet<SearchStatus> = new Set(['error', 'offline', 'network', 'timeout']);
+
+export function isFailureStatus(status: SearchStatus): boolean {
+  return FAILURE_STATUSES.has(status);
+}
 
 interface SearchState {
   query: string;
@@ -24,6 +52,8 @@ interface SearchState {
 
   libraryResults: Song[];
   ytResults: YTSong[];
+  /** The query the current ytResults belong to (stale-result protection). */
+  ytQuery: string;
 
   suggestions: Song[];
   status: SearchStatus;
@@ -40,6 +70,8 @@ interface SearchState {
   setDurationFilter: (d: DurationFilter) => void;
   setGenreFilter: (g: string) => void;
   search: (query: string) => Promise<void>;
+  /** Load a specific page of YouTube results for a query (shared paging core). */
+  loadYtPage: (query: string, page: number) => Promise<void>;
   searchYouTube: (query: string, page?: number) => Promise<void>;
   loadMore: () => Promise<void>;
   setSuggestions: (s: Song[]) => void;
@@ -96,6 +128,18 @@ function getErrorMessage(err: unknown): string {
   if (err instanceof NetworkError) return 'Network error. Check your connection.';
   if (err instanceof Error && err.message) return err.message;
   return 'Search failed. Please try again.';
+}
+
+/**
+ * Map an error to its explicit search state. Server errors (ApiError) stay
+ * 'error'; transport-level failures get their own distinct states so the UI
+ * can render a specific banner for each.
+ */
+function classifyError(err: unknown): SearchStatus {
+  if (err instanceof OfflineError) return 'offline';
+  if (err instanceof TimeoutError) return 'timeout';
+  if (err instanceof NetworkError) return 'network';
+  return 'error';
 }
 
 /** True when the error is a request cancellation, not a real failure. */
@@ -188,6 +232,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
 
   libraryResults: [],
   ytResults: [],
+  ytQuery: '',
 
   suggestions: [],
   status: 'idle',
@@ -206,7 +251,12 @@ export const useSearchStore = create<SearchState>((set, get) => ({
 
   cancelSearch: () => {
     searchGeneration++;
+    ytGeneration++;
     if (searchAbortController) searchAbortController.abort();
+    // A paging request (loadMore) can be in flight too — cancel it as well
+    // or its fetch would keep burning a connection (and deadlines) after
+    // the search UI is gone.
+    if (ytAbortController) ytAbortController.abort();
     // A cancel without a follow-up search must end the loading state —
     // otherwise the in-flight search's catch is generation-guarded and the
     // spinner would spin forever.
@@ -215,9 +265,15 @@ export const useSearchStore = create<SearchState>((set, get) => ({
 
   search: async (query: string) => {
     if (!query || !query.trim()) {
+      // A blank query supersedes whatever is in flight: bump the generation
+      // and abort so a late response from a previous search can never land
+      // after the UI already reset to idle.
+      searchGeneration++;
+      if (searchAbortController) searchAbortController.abort();
       set({
         libraryResults: [],
         ytResults: [],
+        ytQuery: '',
         suggestions: [],
         status: 'idle',
         ytStatus: 'idle',
@@ -229,25 +285,72 @@ export const useSearchStore = create<SearchState>((set, get) => ({
     }
 
     const trimmed = query.trim();
+
+    // Duplicate-request protection: an identical search that is already in
+    // flight must not be re-fired (the suggestions UI re-triggers search()
+    // for the same debounced query; re-running would duplicate network
+    // requests and briefly flash the spinner).
+    const current = get();
+    if (current.debouncedQuery === trimmed &&
+        (current.ytStatus === 'loading' || current.ytStatus === 'retrying')) {
+      return;
+    }
+
     const gen = ++searchGeneration;
 
-    // Cancel previous search
+    // Cancel previous search — including an in-flight PAGING request (a
+    // loadMore from the previous query). Without this, the stale page fetch
+    // keeps running (and re-applying its deadlines) until it settles, even
+    // though its response is generation-guarded away. Bump ytGeneration so
+    // the paging path's own guard discards it deterministically.
     if (searchAbortController) searchAbortController.abort();
+    if (ytAbortController) ytAbortController.abort();
+    ytGeneration++;
     searchAbortController = new AbortController();
     const { signal } = searchAbortController;
 
     const shouldCancel = () => gen !== searchGeneration;
+
+    // A NEW query must never show the previous query's results: clear them
+    // the moment the new search starts.
+    if (current.ytQuery !== trimmed) {
+      set({ ytResults: [], ytQuery: trimmed });
+    }
 
     // Start both searches in parallel — library is instant (in-memory index),
     // YouTube is a network fetch.
     const libraryPromise = librarySearchIndex.search(trimmed, { limit: 15, shouldCancel });
     const suggestionsPromise = librarySearchIndex.suggest(trimmed, { limit: 5, shouldCancel });
 
-    // Show library results the instant they're ready (usually < 1ms)
-    const [libraryHits, instantSuggestions] = await Promise.all([
-      libraryPromise,
-      suggestionsPromise,
-    ]);
+    // Show library results the instant they're ready (usually < 1ms). The
+    // library index is in-memory, but an unexpected failure must still be
+    // surfaced as a real error state — never swallowed into a stuck spinner
+    // or an unhandled promise rejection.
+    let libraryHits!: IndexedSearchHit[];
+    let instantSuggestions!: IndexedSearchHit[];
+    try {
+      [libraryHits, instantSuggestions] = await Promise.all([
+        libraryPromise,
+        suggestionsPromise,
+      ]);
+    } catch (err) {
+      if (shouldCancel()) return;
+      const status = classifyError(err);
+      set({
+        debouncedQuery: trimmed,
+        libraryResults: [],
+        ytResults: [],
+        ytQuery: trimmed,
+        suggestions: [],
+        status,
+        ytStatus: status,
+        page: 1,
+        hasMore: true,
+        error: getErrorMessage(err),
+        isCancelled: false,
+      });
+      return;
+    }
     if (shouldCancel()) return;
 
     set({
@@ -255,7 +358,8 @@ export const useSearchStore = create<SearchState>((set, get) => ({
       libraryResults: libraryHits.map((h) => h.song),
       suggestions: instantSuggestions.map((h) => h.song),
       status: libraryHits.length > 0 ? 'success' : 'loading',
-      ytStatus: 'loading',
+      // A re-request after a failure is a RETRY, not a first load.
+      ytStatus: isFailureStatus(get().ytStatus) ? 'retrying' : 'loading',
       page: 1,
       hasMore: true,
       error: null,
@@ -293,6 +397,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
 
       set({
         ytResults: yt,
+        ytQuery: trimmed,
         status: yt.length > 0 || libraryHits.length > 0 ? 'success' : 'empty',
         ytStatus: yt.length > 0 ? 'success' : 'empty',
       });
@@ -303,33 +408,46 @@ export const useSearchStore = create<SearchState>((set, get) => ({
         set({ ytStatus: 'cancelled', isCancelled: true });
         return;
       }
+      const status = classifyError(err);
       const msg = getErrorMessage(err);
-      const isOffline = err instanceof OfflineError;
       // CRITICAL: Only clear ytResults, NOT libraryResults.
       // Library results were already successfully fetched and should be preserved.
-      // CRITICAL: surface the failure (ytStatus 'error' + message) instead of
-      // silently resetting to idle — swallowing it made a dead YouTube backend
-      // look identical to "no results found".
+      // Keep YouTube rows only when they belong to THIS query (a refresh of
+      // the same query stays visible under the error banner); results from a
+      // previous query must never survive under a new one.
+      const keep = get().ytQuery === trimmed;
       set({
-        status: libraryHits.length > 0 ? 'success' : (isOffline ? 'offline' : 'error'),
-        ytStatus: isOffline ? 'offline' : 'error',
+        status: libraryHits.length > 0 ? 'success' : status,
+        ytStatus: status,
         error: msg,
-        ytResults: [],
+        ytResults: keep ? get().ytResults : [],
       });
     }
   },
 
-  searchYouTube: async (query: string, page = 1) => {
+  /**
+   * Load a page of YouTube results for `query`. Shared by searchYouTube
+   * (explicit page) and loadMore (next page of the debounced query).
+   * Stale-response protection: a response that arrives after a NEWER
+   * top-level search started (or after a newer paging request superseded
+   * this one) is discarded — it can never overwrite newer results.
+   */
+  loadYtPage: async (query: string, page: number) => {
+    // Duplicate-request protection: overlapping paging requests for the
+    // same query (observer re-fires before state settles) must not each hit
+    // the network — the in-flight one owns the state.
+    const prev = get();
+    if ((prev.ytStatus === 'loading' || prev.ytStatus === 'retrying') && prev.debouncedQuery === query) {
+      return;
+    }
+
     if (ytAbortController) ytAbortController.abort();
     ytAbortController = new AbortController();
     const { signal } = ytAbortController;
     const gen = ++ytGeneration;
-    // Stale-response protection: if a NEW top-level search starts while this
-    // paging request is in flight, its response must never overwrite the new
-    // search's results.
     const owningSearchGen = searchGeneration;
 
-    set({ ytStatus: 'loading', error: null });
+    set({ ytStatus: isFailureStatus(get().ytStatus) ? 'retrying' : 'loading', error: null });
     try {
       let full = getYtCache(query);
       if (!full) {
@@ -342,6 +460,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
       const sliced = full.slice(0, page * 15);
       set({
         ytResults: sliced,
+        ytQuery: query,
         ytStatus: sliced.length > 0 ? 'success' : 'empty',
         page,
         hasMore: full.length > page * 15,
@@ -352,48 +471,18 @@ export const useSearchStore = create<SearchState>((set, get) => ({
         set({ ytStatus: 'cancelled' });
         return;
       }
-      set({ ytStatus: 'error', error: getErrorMessage(err) });
+      set({ ytStatus: classifyError(err), error: getErrorMessage(err) });
     }
+  },
+
+  searchYouTube: async (query: string, page = 1) => {
+    await get().loadYtPage(query, page);
   },
 
   loadMore: async () => {
     const { debouncedQuery, page, hasMore } = get();
     if (!hasMore || !debouncedQuery) return;
-
-    if (ytAbortController) ytAbortController.abort();
-    ytAbortController = new AbortController();
-    const { signal } = ytAbortController;
-    const gen = ++ytGeneration;
-    // Stale-response protection: same as searchYouTube — a paging response
-    // that arrives after the user started a new search is discarded.
-    const owningSearchGen = searchGeneration;
-
-    set({ ytStatus: 'loading', error: null });
-    try {
-      let full = getYtCache(debouncedQuery);
-      if (!full) {
-        const results = await fetchYouTubeSearch(debouncedQuery, signal);
-        if (gen !== ytGeneration || owningSearchGen !== searchGeneration) return;
-        full = results || [];
-        setYtCache(debouncedQuery, full);
-      }
-      if (gen !== ytGeneration || owningSearchGen !== searchGeneration) return;
-      const nextPage = page + 1;
-      const sliced = full.slice(0, nextPage * 15);
-      set({
-        ytResults: sliced,
-        ytStatus: sliced.length > 0 ? 'success' : 'empty',
-        page: nextPage,
-        hasMore: full.length > nextPage * 15,
-      });
-    } catch (err) {
-      if (gen !== ytGeneration || owningSearchGen !== searchGeneration) return;
-      if (isAbortError(err)) {
-        set({ ytStatus: 'cancelled' });
-        return;
-      }
-      set({ ytStatus: 'error', error: getErrorMessage(err) });
-    }
+    await get().loadYtPage(debouncedQuery, page + 1);
   },
 
     clear: () => {
@@ -407,6 +496,7 @@ export const useSearchStore = create<SearchState>((set, get) => ({
       debouncedQuery: '',
       libraryResults: [],
       ytResults: [],
+      ytQuery: '',
       suggestions: [],
       status: 'idle',
       ytStatus: 'idle',

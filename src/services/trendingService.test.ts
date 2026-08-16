@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   apiFetch: vi.fn(),
   librarySongs: [] as any[],
   loggerWarn: vi.fn(),
+  loggerDebug: vi.fn(),
 }));
 
 vi.mock('../config/api', () => ({
@@ -18,7 +19,7 @@ vi.mock('../stores/songsStore', () => ({
 }));
 
 vi.mock('../utils/logger', () => ({
-  logger: { debug: vi.fn(), info: vi.fn(), warn: mocks.loggerWarn, error: vi.fn() },
+  logger: { debug: mocks.loggerDebug, info: vi.fn(), warn: mocks.loggerWarn, error: vi.fn() },
 }));
 
 const CACHE_KEY = 'trending_unified_v1';
@@ -68,6 +69,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   mocks.apiFetch.mockReset();
   mocks.loggerWarn.mockReset();
+  mocks.loggerDebug.mockReset();
   mocks.librarySongs = [];
   localStorage.clear();
 });
@@ -347,6 +349,19 @@ describe('cached live data', () => {
     expect(result.source).toBe('CACHED');
     expect(result.songs[0].id).toBe('trending-vid001');
   });
+
+  it('never labels first-paint disk data as LIVE', async () => {
+    mocks.apiFetch.mockResolvedValueOnce(jsonResponse(livePayload()));
+    const first = await loadService();
+    await first.getTrending();
+
+    // Brand-new singleton: first paint shows disk data before any fetch.
+    // That data is stale by definition — it must read CACHED, never LIVE.
+    const second = await loadService();
+
+    expect(second.getState().source).toBe('CACHED');
+    expect(second.getState().songs[0].id).toBe('trending-vid001');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -476,6 +491,55 @@ describe('fallback transition logging', () => {
         expect(result.origin === 'youtube_music' || result.origin === 'charts').toBe(false);
       }
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Dev logging markers — every resolution is observable for the operator
+// ---------------------------------------------------------------------------
+
+describe('dev logging markers', () => {
+  it('logs LIVE_YOUTUBE when serving genuinely live data', async () => {
+    mocks.apiFetch.mockResolvedValue(jsonResponse(livePayload()));
+    const svc = await loadService();
+
+    const result = await svc.getTrending();
+
+    expect(result.source).toBe('LIVE');
+    expect(mocks.loggerDebug.mock.calls.some(c => String(c[0]).includes('LIVE_YOUTUBE'))).toBe(true);
+  });
+
+  it('logs CACHED_YOUTUBE for server-stale live data', async () => {
+    mocks.apiFetch.mockResolvedValue(jsonResponse(livePayload({ fresh: false })));
+    const svc = await loadService();
+
+    const result = await svc.getTrending();
+
+    expect(result.source).toBe('CACHED');
+    expect(mocks.loggerDebug.mock.calls.some(c => String(c[0]).includes('CACHED_YOUTUBE'))).toBe(true);
+  });
+
+  it('logs LIBRARY_FALLBACK when falling back to the library', async () => {
+    mocks.librarySongs = [
+      { id: 'lib-1', youtubeId: 'yt-abc', title: 'My Song', artist: 'Me', duration: 180, coverArt: 'c.jpg' },
+    ];
+    mocks.apiFetch.mockRejectedValue(new Error('offline'));
+    const svc = await loadService();
+
+    const result = await settle(svc.getTrending());
+
+    expect(result.source).toBe('LIBRARY');
+    expect(mocks.loggerWarn.mock.calls.some(c => String(c[0]).includes('LIBRARY_FALLBACK'))).toBe(true);
+  });
+
+  it('logs BUILT_IN_FALLBACK when nothing else is available', async () => {
+    mocks.apiFetch.mockRejectedValue(new Error('offline'));
+    const svc = await loadService();
+
+    const result = await settle(svc.getTrending());
+
+    expect(result.source).toBe('BUILT_IN');
+    expect(mocks.loggerWarn.mock.calls.some(c => String(c[0]).includes('BUILT_IN_FALLBACK'))).toBe(true);
   });
 });
 

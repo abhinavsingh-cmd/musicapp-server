@@ -1,6 +1,7 @@
 import { Song } from '../types/music';
 import { api, apiFetch } from '../config/api';
 import { cacheMetadata } from '../utils/downloadManager';
+import { deferIdle } from '../utils/idle';
 
 interface ApiSong {
   id: string;
@@ -57,10 +58,7 @@ export async function fetchSongs(): Promise<Song[]> {
     if (deduped.length > 0) {
       cachedSongs = deduped;
 
-      const defer = typeof requestIdleCallback === 'function'
-        ? requestIdleCallback
-        : (cb: IdleRequestCallback) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 } as IdleDeadline), 0);
-      defer(() => {
+      deferIdle(() => {
         for (const song of cachedSongs!) {
           cacheMetadata({
             id: song.id, title: song.title, artist: song.artist,

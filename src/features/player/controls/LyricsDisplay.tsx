@@ -44,8 +44,11 @@ export const LyricsDisplay: React.FC = memo(() => {
     lineRefs.current.clear();
   }, [lyrics]);
 
-  // Throttled progress sync — reads from store directly to avoid re-renders
+  // Throttled progress sync — reads from store directly to avoid re-renders.
+  // Runs only while a track exists: with no song there is no progress to
+  // follow, so the loop must not spin.
   useEffect(() => {
+    if (!currentSong) return;
     let rafId: number;
     const tick = () => {
       const now = Date.now();
@@ -58,7 +61,7 @@ export const LyricsDisplay: React.FC = memo(() => {
     };
     rafId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafId);
-  }, []);
+  }, [currentSong]);
 
   useEffect(() => {
     if (currentLine >= 0 && lineRefs.current.has(currentLine)) {

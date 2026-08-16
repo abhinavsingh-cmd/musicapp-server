@@ -12,7 +12,7 @@
  */
 
 import { YTSong } from '../stores/searchStore';
-import { api, apiFetch } from '../config/api';
+import { api, apiFetch, raceWithDeadline } from '../config/api';
 
 const INVIDIOUS_INSTANCES = [
   'https://yewtu.be',
@@ -20,7 +20,7 @@ const INVIDIOUS_INSTANCES = [
   'https://invidious.io.lol',
 ];
 
-const SEARCH_TIMEOUT_MS = 8000;
+export const SEARCH_TIMEOUT_MS = 8000;
 
 // ── Non-music keyword blacklist ──────────────────────────────────
 // Titles matching these are almost certainly NOT music.
@@ -234,28 +234,41 @@ async function searchViaInstance(
   const url = `${instance}/api/v1/search?q=${encodeURIComponent(query)}&type=music&sort_by=relevance`;
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
-
-  if (signal) {
-    signal.addEventListener('abort', () => controller.abort(), { once: true });
-  }
+  const onCallerAbort = () => controller.abort();
+  if (signal) signal.addEventListener('abort', onCallerAbort, { once: true });
 
   try {
-    const res = await fetch(url, {
-      signal: controller.signal,
-      headers: { 'Accept': 'application/json' },
-    });
+    // Hard deadlines on both the fetch and the body read: an instance that
+    // wedges (fetch ignoring its abort) or stalls mid-body must reject within
+    // SEARCH_TIMEOUT_MS so Promise.any — and therefore the whole search —
+    // can never stay pending forever.
+    const res = await raceWithDeadline(
+      fetch(url, {
+        signal: controller.signal,
+        headers: { 'Accept': 'application/json' },
+      }),
+      SEARCH_TIMEOUT_MS,
+      url,
+      () => controller.abort(),
+    );
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
+    const data = await raceWithDeadline(res.json(), SEARCH_TIMEOUT_MS, url);
     return parseResults(data);
   } finally {
-    clearTimeout(timeout);
+    if (signal) signal.removeEventListener('abort', onCallerAbort);
   }
 }
 
 /**
  * Search YouTube, racing all Invidious instances simultaneously.
  * Returns results from the fastest responding instance.
+ *
+ * Error contract: the search NEVER returns an error disguised as empty
+ * results. A definitive "no results" answer (server replied with a valid
+ * envelope containing no usable rows) resolves with []; a genuine failure
+ * (server unreachable/timed out/errored AND every fallback instance
+ * failed) REJECTS with the server-side error so callers can surface an
+ * explicit network/server/timeout state instead of a fake "no results".
  */
 export async function youtubeSearch(
   query: string,
@@ -266,6 +279,13 @@ export async function youtubeSearch(
   // Enhance query for better music-only results
   const hasMusicTerm = /\b(song|music|audio|video|singer|artist|album|playlist)\b/i.test(query);
   const musicQuery = hasMusicTerm ? `${query} official` : `${query} official audio song`;
+
+  // Why the primary path failed. Non-null => the search is in an error
+  // state and MUST reject once every fallback also fails.
+  let serverError: Error | null = null;
+  // True when the server answered authoritatively with zero usable rows.
+  // That is a legitimate "no results" — never an error.
+  let serverDefinitive = false;
 
   // PRIMARY: Use server endpoint (yt-dlp YouTube search).
   // NOTE: must go through api() — a hardcoded relative URL silently 404s
@@ -278,58 +298,70 @@ export async function youtubeSearch(
     // Malformed-response protection: a body that isn't valid JSON, or isn't
     // the expected shape, falls through to the Invidious fallback — it can
     // never produce garbage rows or throw into the caller.
+    // Bounded body read: apiFetch's timeout stops when the headers arrive, so
+    // a server that stalls mid-body would otherwise hang the search forever.
+    // A stalled body is treated exactly like a parse failure.
     let data: any = null;
     try {
-      data = await result.json();
+      data = await raceWithDeadline(result.json(), 12_000, url);
     } catch (parseErr) {
+      serverError = parseErr instanceof Error ? parseErr : new Error('Malformed search response');
       logError('Server search returned malformed JSON:', parseErr);
     }
 
-    const wrapped = data?.details?.results || data?.results || [];
-    if (Array.isArray(wrapped)) {
-      // Normalize at the boundary: every emitted row MUST have a non-empty
-      // playable id, a finite duration, and a usable thumbnail. Rows that
-      // cannot satisfy this are dropped — a result with no id can never be
-      // played and would produce a broken queue item if clicked.
-      const seen = new Set<string>();
-      const normalized = wrapped
-        .map((r: any): YTSong | null => {
-          const id = typeof r?.id === 'string' && r.id.trim()
-            ? r.id.trim()
-            : typeof r?.youtubeId === 'string' && r.youtubeId.trim()
-              ? r.youtubeId.trim()
-              : '';
-          if (!id) return null;
-          // Duplicate-result protection: providers occasionally return the
-          // same video twice — duplicates break React keys and confuse users.
-          if (seen.has(id)) return null;
-          seen.add(id);
-          const artist = typeof r?.artist === 'string' && r.artist.trim()
-            ? r.artist.trim()
-            : typeof r?.channel === 'string' && r.channel.trim()
-              ? r.channel.trim()
-              : 'Unknown';
-          const thumbnail = typeof r?.thumbnail === 'string' && /^https?:\/\//.test(r.thumbnail)
-            ? r.thumbnail
-            : `https://img.youtube.com/vi/${id}/mqdefault.jpg`;
-          return {
-            id,
-            title: cleanTitle(typeof r.title === 'string' ? r.title : '') || 'Unknown',
-            artist,
-            duration: toSafeNumber(r.duration),
-            thumbnail,
-            viewCount: toSafeNumber(r.viewCount),
-            album: '',
-          };
-        })
-        .filter((r: YTSong | null): r is YTSong => r !== null);
-      if (normalized.length > 0) {
-        log(`Server search returned ${normalized.length} results`);
-        return normalized;
+    if (data !== null && typeof data === 'object') {
+      const wrapped = (data as any)?.details?.results ?? (data as any)?.results;
+      if (Array.isArray(wrapped)) {
+        // Normalize at the boundary: every emitted row MUST have a non-empty
+        // playable id, a finite duration, and a usable thumbnail. Rows that
+        // cannot satisfy this are dropped — a result with no id can never be
+        // played and would produce a broken queue item if clicked.
+        const seen = new Set<string>();
+        const normalized = wrapped
+          .map((r: any): YTSong | null => {
+            const id = typeof r?.id === 'string' && r.id.trim()
+              ? r.id.trim()
+              : typeof r?.youtubeId === 'string' && r.youtubeId.trim()
+                ? r.youtubeId.trim()
+                : '';
+            if (!id) return null;
+            // Duplicate-result protection: providers occasionally return the
+            // same video twice — duplicates break React keys and confuse users.
+            if (seen.has(id)) return null;
+            seen.add(id);
+            const artist = typeof r?.artist === 'string' && r.artist.trim()
+              ? r.artist.trim()
+              : typeof r?.channel === 'string' && r.channel.trim()
+                ? r.channel.trim()
+                : 'Unknown';
+            const thumbnail = typeof r?.thumbnail === 'string' && /^https?:\/\//.test(r.thumbnail)
+              ? r.thumbnail
+              : `https://img.youtube.com/vi/${id}/mqdefault.jpg`;
+            return {
+              id,
+              title: cleanTitle(typeof r.title === 'string' ? r.title : '') || 'Unknown',
+              artist,
+              duration: toSafeNumber(r.duration),
+              thumbnail,
+              viewCount: toSafeNumber(r.viewCount),
+              album: '',
+            };
+          })
+          .filter((r: YTSong | null): r is YTSong => r !== null);
+        if (normalized.length > 0) {
+          log(`Server search returned ${normalized.length} results`);
+          return normalized;
+        }
+        // Valid envelope, zero usable rows — the server answered
+        // authoritatively. Only the Invidious fallback can still help.
+        serverDefinitive = true;
+      } else {
+        serverError ??= new Error('Malformed search response');
       }
     }
   } catch (err) {
     if (signal?.aborted) return [];
+    serverError = err instanceof Error ? err : new Error(String(err));
     logError('Server search failed, falling back to Invidious:', err);
   }
 
@@ -348,7 +380,10 @@ export async function youtubeSearch(
   } catch (err) {
     if (signal?.aborted) return [];
     logError('All Invidious instances failed:', err);
-    return [];
+    // Only a definitive server answer makes this a real "no results" state.
+    // Everything else is a genuine failure and must surface as an error.
+    if (serverDefinitive) return [];
+    throw serverError ?? new Error('YouTube search unavailable');
   }
 }
 
