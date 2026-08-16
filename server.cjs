@@ -74,11 +74,49 @@ function probeWarpProxy() {
 
 // Retry for up to ~30s at startup — wireproxy binds :1080 shortly after
 // the container boots, and the WARP tunnel handshake takes a few seconds.
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// Growing backoff between yt-dlp retries: the first WARP request after a
+// cold start pays the WireGuard handshake latency, so give the second and
+// third attempts a real chance instead of a fixed 1s nudge.
+const RETRY_DELAYS_MS = [1500, 3000, 5000];
+const retryDelayMs = (attempt) => RETRY_DELAYS_MS[Math.min(attempt - 1, RETRY_DELAYS_MS.length - 1)];
+
+// Force real traffic through the tunnel so the WireGuard handshake completes
+// NOW, not on the user's first song. Without this, the very first yt-dlp
+// request through :1080 stalls/fails while the handshake happens.
+async function warmWarpTunnel() {
+  return new Promise((resolve) => {
+    execFile("curl", [
+      "-s", "-o", "/dev/null", "-m", "25",
+      "--proxy", "socks5://127.0.0.1:1080",
+      // Cloudflare's own edge — the WARP tunnel terminates there, so this
+      // cannot be blocked the way google/youtube can be from some networks.
+      "https://1.1.1.1/cdn-cgi/trace",
+    ], (err) => {
+      console.log("[WARP] warm-up " + (err ? "FAILED (" + err.message + ")" : "OK — tunnel ready for first request"));
+      resolve(!err);
+    });
+  });
+}
+
+// Re-probe the proxy before a retry: if wireproxy died mid-flight, drop the
+// proxy args so the retry goes direct instead of burning attempts through a
+// dead tunnel.
+async function refreshProxyBeforeRetry() {
+  if (YT_PROXY_ARGS.length === 0) return;
+  const up = await probeWarpProxy();
+  console.log("[WARP] re-probe before retry:", up ? "UP" : "DOWN — retrying direct");
+}
+
 (async () => {
   for (let attempt = 1; attempt <= 15; attempt++) {
     const up = await probeWarpProxy();
-    if (up) return;
-    if (attempt < 15) await new Promise(r => setTimeout(r, 2000));
+    if (up) {
+      warmWarpTunnel();
+      return;
+    }
+    if (attempt < 15) await sleep(2000);
   }
   console.log("[WARP] Giving up after 15 probes — direct connections only");
 })();
@@ -344,7 +382,7 @@ app.get("/api/youtube/search", (req, res) => {
   const musicQuery = hasSongWord ? q : q + " music";
 
   const attemptSearch = (attempt = 1) => {
-    const maxAttempts = 2;
+    const maxAttempts = 3;
 
     execFile("yt-dlp", [
       "ytsearch25:" + musicQuery,
@@ -361,7 +399,10 @@ app.get("/api/youtube/search", (req, res) => {
       if (err) {
         console.error("[YT Search] Error:", err.message, "attempt", attempt);
         if (attempt < maxAttempts) {
-          return setTimeout(() => attemptSearch(attempt + 1), 1000);
+          return setTimeout(async () => {
+            await refreshProxyBeforeRetry();
+            attemptSearch(attempt + 1);
+          }, retryDelayMs(attempt));
         }
         return fail(res, 502, "YT_DLP_ERROR", "YouTube search failed", { detail: err.message, stderr: stderr?.slice(0, 500) });
       }
@@ -752,7 +793,7 @@ app.get("/api/stream/:videoId", (req, res) => {
   console.log("[Stream] Starting stream for:", videoId);
 
   const attemptStream = (attempt = 1) => {
-    const maxAttempts = 2;
+    const maxAttempts = 3;
 
     const ytArgs = [
       "-f", "bestaudio/best",
@@ -770,14 +811,20 @@ app.get("/api/stream/:videoId", (req, res) => {
     const yt = spawn("yt-dlp", ytArgs, { stdio: ["ignore", "pipe", "pipe"] });
 
     let headersSent = false;
+    const retryStream = (delayMs) => {
+      console.log("[Stream] Retrying with different clients... attempt", attempt + 1, "for:", videoId);
+      setTimeout(async () => {
+        await refreshProxyBeforeRetry();
+        attemptStream(attempt + 1);
+      }, delayMs);
+    };
     let startupTimeout = setTimeout(() => {
       if (!headersSent) {
         yt.kill("SIGTERM");
         if (!res.headersSent) {
           console.error("[Stream] Timed out after 30s for:", videoId, "attempt", attempt);
           if (attempt < maxAttempts) {
-            console.log("[Stream] Retrying with different clients... attempt", attempt + 1);
-            setTimeout(() => attemptStream(attempt + 1), 2000);
+            retryStream(retryDelayMs(attempt));
           } else {
             fail(res, 504, "STREAM_TIMEOUT", "Stream timed out after retries", { videoId, attempts: maxAttempts });
           }
@@ -822,8 +869,7 @@ app.get("/api/stream/:videoId", (req, res) => {
       console.error("[Stream] Process error:", err.message, "attempt", attempt);
       if (!res.headersSent) {
         if (attempt < maxAttempts) {
-          console.log("[Stream] Retrying with different clients... attempt", attempt + 1);
-          setTimeout(() => attemptStream(attempt + 1), 1500);
+          retryStream(retryDelayMs(attempt));
         } else {
           fail(res, 500, "STREAM_ERROR", "Stream process failed after retries", { videoId, detail: err.message, attempts: maxAttempts });
         }
@@ -882,7 +928,7 @@ app.get("/api/download/:videoId", (req, res) => {
   const audioUrl = "https://www.youtube.com/watch?v=" + videoId;
 
   let attempt = 1;
-  const maxAttempts = 2;
+  const maxAttempts = 3;
   const MIN_BYTES = 10240;
 
   // Only one yt-dlp process may be in flight for this request at a time. The
@@ -939,7 +985,10 @@ app.get("/api/download/:videoId", (req, res) => {
       if (attempt < maxAttempts) {
         attempt++;
         console.log("[Download] Retrying... attempt", attempt, "for:", videoId);
-        setTimeout(() => attemptDownload(), 1000);
+        setTimeout(async () => {
+          await refreshProxyBeforeRetry();
+          attemptDownload();
+        }, retryDelayMs(attempt));
       } else if (!res.headersSent && !res.destroyed) {
         fail(res, status, code, message, details);
       } else {
@@ -1099,7 +1148,7 @@ app.get("/api/audio-info/:videoId", (req, res) => {
   console.log("[AudioInfo] Getting info for:", videoId);
 
   const attemptInfo = (attempt = 1) => {
-    const maxAttempts = 2;
+    const maxAttempts = 3;
     execFile("yt-dlp", [
       "-f", "bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio/best",
       "--dump-json",
@@ -1114,7 +1163,10 @@ app.get("/api/audio-info/:videoId", (req, res) => {
       if (err) {
         console.error("[AudioInfo] Error for:", videoId, "attempt", attempt, err.message);
         if (attempt < maxAttempts) {
-          return setTimeout(() => attemptInfo(attempt + 1), 1000);
+          return setTimeout(async () => {
+            await refreshProxyBeforeRetry();
+            attemptInfo(attempt + 1);
+          }, retryDelayMs(attempt));
         }
         return fail(res, 502, "YT_DLP_ERROR", "Failed to get audio info", { videoId, detail: err.message });
       }
