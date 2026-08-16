@@ -42,6 +42,31 @@ const YT_COOKIES_ARGS = (() => {
   catch { return []; }
 })();
 
+// Cloudflare WARP SOCKS5 proxy (wireproxy sidecar, see Dockerfile).
+// YouTube bot-blocks raw datacenter IPs even with PO tokens, but not
+// Cloudflare's network — routing yt-dlp through :1080 is what actually
+// defeats the "Sign in to confirm you're not a bot" block from Render.
+// Probed at startup; falls back to direct connections if the proxy is
+// not reachable (e.g. local dev).
+let YT_PROXY_ARGS = [];
+try {
+  const net = require("net");
+  const probe = net.connect({ port: 1080, host: "127.0.0.1" });
+  probe.setTimeout(1500);
+  probe.on("connect", () => {
+    YT_PROXY_ARGS = ["--proxy", "socks5://127.0.0.1:1080"];
+    console.log("[WARP] SOCKS5 proxy detected on :1080 — yt-dlp routes via Cloudflare WARP");
+    probe.destroy();
+  });
+  probe.on("error", () => {
+    console.log("[WARP] No SOCKS5 proxy on :1080 — yt-dlp connects directly");
+    probe.destroy();
+  });
+  probe.on("timeout", () => probe.destroy());
+} catch (e) {
+  console.log("[WARP] Proxy probe unavailable:", e.message);
+}
+
 // Standard API response helpers
 function ok(res, data, message = "OK") {
   return res.json({ success: true, message, code: "OK", details: data });
@@ -314,6 +339,7 @@ app.get("/api/youtube/search", (req, res) => {
       "--age-limit", "18",
       ...YT_EXTRACTOR_ARGS,
       ...YT_COOKIES_ARGS,
+      ...YT_PROXY_ARGS,
       "--match-filters", "!is_live & !was_live & duration>?60 & duration<?600",
     ], { timeout: 20000, maxBuffer: 2 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) {
@@ -400,6 +426,7 @@ function runYtDlpSearch(query, maxResults = 8) {
       "--age-limit", "18",
       ...YT_EXTRACTOR_ARGS,
       ...YT_COOKIES_ARGS,
+      ...YT_PROXY_ARGS,
       "--match-filters", "!is_live & !was_live & duration>?60 & duration<?600",
     ], { timeout: 15000, maxBuffer: 2 * 1024 * 1024 }, (err, stdout) => {
       if (err || !stdout) return resolve([]);
@@ -713,6 +740,7 @@ app.get("/api/stream/:videoId", (req, res) => {
       "--age-limit", "18",
       ...YT_EXTRACTOR_ARGS,
       ...YT_COOKIES_ARGS,
+      ...YT_PROXY_ARGS,
       "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
       audioUrl
     ];
@@ -865,6 +893,7 @@ app.get("/api/download/:videoId", (req, res) => {
       "--age-limit", "18",
       ...YT_EXTRACTOR_ARGS,
       ...YT_COOKIES_ARGS,
+      ...YT_PROXY_ARGS,
       "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
       audioUrl
     ];
@@ -1026,6 +1055,7 @@ function getFreshAudioUrl(videoId) {
       "--age-limit", "18",
       ...YT_EXTRACTOR_ARGS,
       ...YT_COOKIES_ARGS,
+      ...YT_PROXY_ARGS,
       "https://www.youtube.com/watch?v=" + videoId
     ], { timeout: 15000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
       if (err) return resolve(null);
@@ -1057,6 +1087,7 @@ app.get("/api/audio-info/:videoId", (req, res) => {
       "--age-limit", "18",
       ...YT_EXTRACTOR_ARGS,
       ...YT_COOKIES_ARGS,
+      ...YT_PROXY_ARGS,
       "https://www.youtube.com/watch?v=" + videoId
     ], { timeout: 15000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
       if (err) {
