@@ -1,12 +1,29 @@
 import { metricsCollector } from '../services/metricsCollector';
 
-const API_BASE = import.meta.env.VITE_API_URL || '';
+/**
+ * The production API server. Used as a runtime fallback inside the Capacitor
+ * APK when the build did not bake in VITE_API_URL (e.g. a shell that exports
+ * an empty VITE_API_URL, which Vite lets override .env.production). The web
+ * build keeps the same-origin default — server.cjs serves the API on the
+ * same host — so only the APK ever needs this fallback.
+ */
+const DEFAULT_API_URL = 'https://musicapp-server-alkf.onrender.com';
+
+function isCapacitor(): boolean {
+  try {
+    return typeof window !== 'undefined' && !!(window as any).Capacitor;
+  } catch {
+    return false;
+  }
+}
+
+const API_BASE = import.meta.env.VITE_API_URL || (isCapacitor() ? DEFAULT_API_URL : '');
 
 export function api(path: string): string {
   return `${API_BASE}/api${path}`;
 }
 
-export { API_BASE };
+export { API_BASE, DEFAULT_API_URL };
 
 // ---------------------------------------------------------------------------
 // Error types

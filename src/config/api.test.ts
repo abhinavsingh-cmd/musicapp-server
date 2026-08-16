@@ -7,7 +7,7 @@
  * with it the store's loading state. These tests prove apiFetch now settles
  * within its deadline no matter what the underlying fetch does.
  */
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { apiFetch, TimeoutError, raceWithDeadline } from './api';
 
 vi.mock('../services/metricsCollector', () => ({
@@ -171,5 +171,36 @@ describe('apiFetch body readability', () => {
     const res = await apiFetch(URL, { retries: 0, deduplicate: false });
     const data = await res.json();
     expect(data.results).toHaveLength(3);
+  });
+});
+
+// ---- Capacitor API-base fallback (the APK must never ship with a dead base) ----
+
+/**
+ * The APK used to ship with an EMPTY API base whenever the build shell
+ * exported an empty VITE_API_URL (Vite lets process.env override .env
+ * files), so every request went to https://localhost/api/... and failed —
+ * library, downloads, streaming, trending. Inside Capacitor the base must
+ * fall back to the production server at RUNTIME, regardless of what the
+ * build baked in.
+ */
+describe('Capacitor API-base fallback', () => {
+  const PROD = 'https://musicapp-server-alkf.onrender.com';
+
+  beforeEach(() => {
+    vi.resetModules();
+    delete (window as any).Capacitor;
+  });
+
+  it('api() returns a same-origin path outside Capacitor (web build)', async () => {
+    const { api } = await import('./api');
+    expect(api('/songs')).toBe('/api/songs');
+  });
+
+  it('api() falls back to the production server inside Capacitor', async () => {
+    (window as any).Capacitor = { isNativePlatform: () => true };
+    const { api, DEFAULT_API_URL } = await import('./api');
+    expect(DEFAULT_API_URL).toBe(PROD);
+    expect(api('/songs')).toBe(`${PROD}/api/songs`);
   });
 });
