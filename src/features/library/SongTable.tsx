@@ -1,4 +1,4 @@
-import React, { memo, useCallback, useRef, useState, useEffect, useMemo } from 'react';
+import React, { memo, useCallback, useRef, useState, useEffect, useLayoutEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAudioStore } from '../../stores/audioStore';
 import { useDownloadsStore } from '../../stores/downloadsStore';
@@ -18,6 +18,89 @@ interface SongTableProps {
 }
 
 const ROW_HEIGHT = 56;
+const OVERSCAN = 6;
+// Rows mounted before the first layout measure — never the full list. The
+// layout effect recomputes the real window immediately after first paint.
+const INITIAL_RENDER = 40;
+
+/**
+ * Nearest scrollable ancestor of the list (the page's inner overflow-y-auto
+ * container), falling back to the document root. Rows are fixed-height, so
+ * the visible window is pure arithmetic over the scroll position.
+ */
+function findScrollParent(el: HTMLElement): HTMLElement {
+  let node = el.parentElement;
+  while (node) {
+    const { overflowY } = window.getComputedStyle(node);
+    if ((overflowY === 'auto' || overflowY === 'scroll') && node.scrollHeight > node.clientHeight) {
+      return node;
+    }
+    node = node.parentElement;
+  }
+  return document.documentElement;
+}
+
+interface VirtualWindow {
+  start: number;
+  end: number;
+  totalHeight: number;
+}
+
+/**
+ * Fixed-height windowing for the song list. The library renders 647+ rows;
+ * on low-end Android WebViews mounting all of them at once (each with a
+ * CachedImage + buttons) is a real OOM / crash source. Only the rows inside
+ * the scroll viewport (±OVERSCAN) are mounted; a spacer div preserves the
+ * full scroll height. Page-level scrolling is untouched.
+ */
+function useVirtualWindow(
+  count: number,
+  rowHeight: number,
+  containerRef: React.RefObject<HTMLDivElement | null>,
+): VirtualWindow {
+  const [win, setWin] = useState<VirtualWindow>(() => ({
+    start: 0,
+    end: Math.min(count, INITIAL_RENDER),
+    totalHeight: count * rowHeight,
+  }));
+
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    const compute = () => {
+      const parent = findScrollParent(el);
+      // The scroller's viewport top edge in window coords. For the root
+      // scroller (document/body) the viewport is anchored at 0 and its own
+      // rect moves with scroll; for a nested scroller the box is fixed and
+      // only the content moves — the rect difference handles both.
+      const parentRect = parent.getBoundingClientRect();
+      const viewportTop = parent === document.documentElement || parent === document.body ? 0 : parentRect.top;
+      const visibleStart = viewportTop - el.getBoundingClientRect().top;
+      const viewport = parent.clientHeight || window.innerHeight;
+      const start = Math.max(0, Math.floor(visibleStart / rowHeight) - OVERSCAN);
+      const end = Math.min(count, Math.ceil((visibleStart + viewport) / rowHeight) + OVERSCAN);
+      setWin({ start, end, totalHeight: count * rowHeight });
+    };
+
+    compute();
+    // Scroll events don't bubble — a capture-phase window listener catches
+    // the page's inner scroller (MainContent's overflow-y-auto div).
+    window.addEventListener('scroll', compute, { capture: true, passive: true });
+    window.addEventListener('resize', compute);
+    const ro = new ResizeObserver(compute);
+    ro.observe(el);
+    const parent = findScrollParent(el);
+    if (parent !== document.documentElement && parent !== document.body) ro.observe(parent);
+    return () => {
+      window.removeEventListener('scroll', compute, true);
+      window.removeEventListener('resize', compute);
+      ro.disconnect();
+    };
+  }, [containerRef, rowHeight, count]);
+
+  return win;
+}
 
 const Equalizer: React.FC = memo(() => (
   <div className="playing-indicator text-violet-400 flex items-end gap-[2px] h-4">
@@ -38,7 +121,9 @@ const SongRow = memo(({ song, index, isActive, isCurrentlyPlaying, isLoading, on
   return (
     <div
       className={cn("flex items-center gap-3 sm:gap-4 px-4 sm:px-6 py-2 text-sm cursor-pointer song-row", isActive && "bg-violet-500/10", "group transition-colors duration-100")}
-      style={{ height: ROW_HEIGHT }}
+      // Windowed rows are absolutely positioned inside the spacer container
+      // at index * ROW_HEIGHT so they stay at the correct scroll position.
+      style={{ height: ROW_HEIGHT, position: 'absolute', top: index * ROW_HEIGHT, left: 0, right: 0 }}
       onClick={onClick}
       onContextMenu={onContextMenu}
       onTouchStart={onTouchStart}
@@ -104,6 +189,7 @@ export const SongTable: React.FC<SongTableProps> = memo(({ songs, className }) =
   })));
   const downloads = useDownloadsStore((s) => s.downloads);
   const containerRef = useRef<HTMLDivElement>(null);
+  const win = useVirtualWindow(songs.length, ROW_HEIGHT, containerRef);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [retryState, setRetryState] = useState<RetryState>({
     lastRetryTime: 0,
@@ -259,12 +345,13 @@ const shouldShowRetry = useMemo(() => {
         <div className="hidden sm:flex w-20 flex-shrink-0">DURATION</div>
         <div className="flex-shrink-0"><Download size={14} /></div>
       </div>
-      <div ref={containerRef}>
-        {songs.map((song, i) => {
+      <div ref={containerRef} style={{ position: 'relative', height: win.totalHeight }}>
+        {songs.slice(win.start, win.end).map((song, i) => {
+          const index = win.start + i;
           const isActive = currentSongId === song.id;
           return (
-            <SongRow key={song.id} song={song} index={i} isActive={isActive} isCurrentlyPlaying={isActive && isPlaying} isLoading={isActive && isLoading}
-              onClick={() => handleRowClick(song, i)} onFavToggle={() => toggleFavorite(favoriteKey(song))} isFav={favSet.has(favoriteKey(song))}
+            <SongRow key={song.id} song={song} index={index} isActive={isActive} isCurrentlyPlaying={isActive && isPlaying} isLoading={isActive && isLoading}
+              onClick={() => handleRowClick(song, index)} onFavToggle={() => toggleFavorite(favoriteKey(song))} isFav={favSet.has(favoriteKey(song))}
               onContextMenu={(e) => handleContextMenu(e, song)} onTouchStart={(e) => handleLongPress(e, song)} />
           );
         })}
