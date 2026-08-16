@@ -2,6 +2,7 @@ import { vi, describe, it, expect, beforeEach } from 'vitest';
 
 vi.mock('../services/musicApi', () => ({
   fetchSongs: vi.fn(),
+  invalidateSongsCache: vi.fn(),
 }));
 
 vi.mock('../utils/downloadManager', () => ({

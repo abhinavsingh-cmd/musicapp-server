@@ -51,7 +51,11 @@ export function invalidateSongsCache(): void {
 export async function fetchSongs(): Promise<Song[]> {
   if (cachedSongs && cachedSongs.length > 0) return cachedSongs;
   try {
-    const res = await apiFetch(api('/songs'));
+    // Longer timeout than the 15s default: the deployed server can take
+    // 30-60s to cold-start (Render free tier), and a too-tight timeout
+    // makes the library look permanently broken. The response cache is
+    // skipped — the songsStore owns catalog caching/freshness semantics.
+    const res = await apiFetch(api('/songs'), { timeout: 45_000, retries: 1, cacheTTL: 0 });
     const data = await res.json();
     const serverSongs = (data.details?.songs || data.songs || []).map(mapSong);
     const deduped = dedupe(serverSongs);

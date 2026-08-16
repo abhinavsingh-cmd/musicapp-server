@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { Song } from '../types/music';
-import { fetchSongs } from '../services/musicApi';
+import { fetchSongs, invalidateSongsCache } from '../services/musicApi';
 import { getAllCachedMetadata } from '../utils/downloadManager';
 import { logger } from '../utils/logger';
 import { deferIdle } from '../utils/idle';
@@ -29,7 +29,7 @@ interface SongsCacheEntry {
   cachedAt: number;
 }
 
-function loadCachedSongs(): Song[] | null {
+function loadCachedSongs(): SongsCacheEntry | null {
   try {
     const raw = localStorage.getItem(SONGS_CACHE_KEY);
     if (!raw) return null;
@@ -38,7 +38,7 @@ function loadCachedSongs(): Song[] | null {
     }
     const entry: SongsCacheEntry = JSON.parse(raw);
     if (!Array.isArray(entry.songs)) return null;
-    return entry.songs;
+    return entry;
   } catch {
     return null;
   }
@@ -79,6 +79,13 @@ function fetchWithTimeout(): Promise<Song[]> {
   inflightFetch = new Promise<Song[]>((resolve) => {
     let settled = false;
 
+    // The musicApi module cache pins the catalog for the whole session
+    // (and is otherwise never invalidated). Every store-driven fetch must
+    // see the server's CURRENT catalog — otherwise today's rotation would
+    // never reach the UI. Callers who want the session cache (search,
+    // track lookup) still benefit from it being repopulated by this fetch.
+    invalidateSongsCache();
+
     fetchSongs()
       .then(songs => {
         if (!settled) {
@@ -98,7 +105,7 @@ function fetchWithTimeout(): Promise<Song[]> {
         settled = true;
         resolve([]);
       }
-    }, 20_000);
+    }, 60_000);
   }).finally(() => {
     inflightFetch = null;
   });
@@ -111,14 +118,19 @@ async function initSongsStore(): Promise<void> {
   if (typeof window === 'undefined') return;
 
   const cached = loadCachedSongs();
-  if (cached && cached.length > 0) {
-    useSongsStore.setState({ 
-      songs: cached, 
-      lastSuccessfulFetch: Date.now(),
+  if (cached && cached.songs.length > 0) {
+    // Freshness is judged by the cache's OWN timestamp, not the app-start
+    // time: marking the cache as freshly-fetched at every launch meant the
+    // library never re-fetched within the first hour of each session — the
+    // exact "songs never change" experience. A next-day launch sees a stale
+    // cachedAt and refreshes the catalog in the background.
+    useSongsStore.setState({
+      songs: cached.songs,
+      lastSuccessfulFetch: cached.cachedAt || Date.now(),
       fetched: true,
       error: false,
     });
-    logger.debug('[songsStore] Loaded', cached.length, 'songs from localStorage cache');
+    logger.debug('[songsStore] Loaded', cached.songs.length, 'songs from localStorage cache');
   }
 
   try {

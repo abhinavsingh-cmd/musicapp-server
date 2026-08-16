@@ -96,6 +96,42 @@ describe('stream resolution — success', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('prefers m4a even when an opus/webm format has a higher bitrate', async () => {
+    // YouTube's default bestaudio is opus/webm — the Android native
+    // MediaPlayer cannot decode it. m4a must win the selection or playback
+    // silently falls back to the WebView engine (no background playback).
+    mockFetch(() =>
+      Promise.resolve(
+        jsonResponse(
+          successBody([
+            { url: 'https://rr3.googlevideo.com/opus', quality: 'high', ext: 'webm', bitrate: 160 },
+            { url: GOOGLE_URL, quality: 'medium', ext: 'm4a', bitrate: 128 },
+          ]),
+        ),
+      ),
+    );
+
+    const url = await extractAudioUrl(VIDEO_ID);
+    expect(url).toContain(encodeURIComponent(GOOGLE_URL));
+  });
+
+  it('falls back to webm when no m4a format exists', async () => {
+    const opusUrl = 'https://rr3.googlevideo.com/opus';
+    mockFetch(() =>
+      Promise.resolve(
+        jsonResponse(
+          successBody([
+            { url: opusUrl, quality: 'high', ext: 'webm', bitrate: 160 },
+            { url: 'https://rr3.googlevideo.com/low', quality: 'low', ext: 'webm', bitrate: 64 },
+          ]),
+        ),
+      ),
+    );
+
+    const url = await extractAudioUrl(VIDEO_ID);
+    expect(url).toContain(encodeURIComponent(opusUrl));
+  });
+
   it('prefers the highest-bitrate format with a usable URL', async () => {
     mockFetch(() =>
       Promise.resolve(
@@ -161,7 +197,7 @@ describe('stream resolution — invalid response', () => {
 // ── timeout ──────────────────────────────────────────────────────────────────
 
 describe('stream resolution — timeout', () => {
-  it('aborts after the 4s timeout, retries once, and gives up (bounded)', async () => {
+  it('aborts after the 15s timeout, retries once, and gives up (bounded)', async () => {
     // A fetch that only ever settles via the AbortController timeout.
     mockFetch((_url: string, init?: RequestInit) => {
       return new Promise((_resolve, reject) => {
@@ -172,7 +208,8 @@ describe('stream resolution — timeout', () => {
     });
 
     const promise = extractAudioUrl(VIDEO_ID);
-    await flush(30);
+    // Two full timeouts + the 400ms backoff between them (15s + 15s + 0.4s).
+    await flush(35);
     await expect(promise).resolves.toBeNull();
 
     // Never retries infinitely: exactly two server attempts total.

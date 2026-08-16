@@ -35,7 +35,11 @@ export const LibraryPage: React.FC = () => {
   const goBack = useGoBack();
 
   const maxRetries = 3;
-  const retryTimeout = 30000;
+  // Matches the store's fetch deadline (60s): the deployed server can take
+  // 30-60s to cold-start, and a shorter page-level kill-switch showed a
+  // false "Failed to load library" while the fetch was still legitimately
+  // in flight.
+  const retryTimeout = 60000;
   const now = Date.now();
   
   const shouldRetryFetch = useMemo(() => {

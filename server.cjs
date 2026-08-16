@@ -96,21 +96,54 @@ const seen2 = new Set();
 let songs = SONGS.filter(s => { if (seen2.has(s[0])) return false; seen2.add(s[0]); return true; })
   .map((s, i) => ({ id: "yt-" + i, youtubeId: s[0], title: s[1], artist: s[2], genre: s[3], duration: s[4], coverArt: "https://img.youtube.com/vi/" + s[0] + "/mqdefault.jpg" }));
 
+// ── Daily catalog rotation ──────────────────────────────────────────────
+// server-songs.json is a static file — without rotation the library would
+// show the exact same list every day forever. Each UTC day gets a
+// deterministic seeded shuffle of the full catalog: stable within the day
+// (safe to cache), different every day (fresh library), every song retained.
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function mulberry32(seed) {
+  let t = seed >>> 0;
+  return function () {
+    t = (t + 0x6d2b79f5) >>> 0;
+    let r = Math.imul(t ^ (t >>> 15), 1 | t);
+    r = (r + Math.imul(r ^ (r >>> 7), 61 | r)) ^ r;
+    return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function dailyShuffledSongs() {
+  const dayIndex = Math.floor(Date.now() / DAY_MS);
+  const rand = mulberry32(dayIndex);
+  const shuffled = songs.slice();
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    const tmp = shuffled[i];
+    shuffled[i] = shuffled[j];
+    shuffled[j] = tmp;
+  }
+  return shuffled;
+}
+
 app.get("/api/songs", (_req, res) => {
+  const catalog = dailyShuffledSongs();
   res.setHeader("Cache-Control", "public, max-age=300, stale-while-revalidate=600");
-  console.log("[API] GET /api/songs - returning", songs.length, "songs");
-  return ok(res, { songs, total: songs.length }, "Songs retrieved successfully");
+  console.log("[API] GET /api/songs - returning", catalog.length, "songs");
+  return ok(res, { songs: catalog, total: catalog.length }, "Songs retrieved successfully");
 });
 app.get("/api/search", (req, res) => {
   const q = (req.query.q || "").toString().replace(/[^\w\s'!&.+-]/g, "").trim().toLowerCase().slice(0, 100);
-  if (!q) return ok(res, { songs }, "All songs returned (empty query)");
-  const results = songs.filter(s => s.title.toLowerCase().includes(q) || s.artist.toLowerCase().includes(q) || s.genre.toLowerCase().includes(q));
+  const catalog = dailyShuffledSongs();
+  if (!q) return ok(res, { songs: catalog }, "All songs returned (empty query)");
+  const results = catalog.filter(s => s.title.toLowerCase().includes(q) || s.artist.toLowerCase().includes(q) || s.genre.toLowerCase().includes(q));
   console.log("[API] GET /api/search?q=" + q, "- found", results.length, "results");
   return ok(res, { songs: results }, `Found ${results.length} results for "${q}"`);
 });
 app.get("/api/genre/:genre", (req, res) => {
   const genre = req.params.genre.toString().replace(/[^\w\s-]/g, "").slice(0, 50);
-  const results = songs.filter(s => s.genre.toLowerCase() === genre.toLowerCase());
+  const catalog = dailyShuffledSongs();
+  const results = catalog.filter(s => s.genre.toLowerCase() === genre.toLowerCase());
   console.log("[API] GET /api/genre/" + genre, "- found", results.length, "songs");
   return ok(res, { songs: results }, `Found ${results.length} songs in genre "${genre}"`);
 });

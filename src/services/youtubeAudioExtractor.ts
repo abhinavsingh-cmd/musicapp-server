@@ -20,7 +20,12 @@ import { logger } from '../utils/logger';
 
 const INVIDIOUS_INSTANCES: string[] = [];
 
-const SERVER_TIMEOUT_MS = 4_000;
+// yt-dlp extraction on the server routinely takes longer than 4s — Render
+// cold starts alone can stall the first request for many seconds. A too-tight
+// timeout aborts every attempt, extraction "fails", and playback silently
+// falls back to the YouTube IFrame engine — which dies the moment the app is
+// backgrounded (the exact "stops when backgrounded" symptom on Android).
+const SERVER_TIMEOUT_MS = 15_000;
 const INVIDIOUS_TIMEOUT_MS = 3_000;
 
 // Bounded retry policy — extraction NEVER retries infinitely:
@@ -198,10 +203,26 @@ async function fetchFromServer(youtubeId: string): Promise<ServerResult> {
       return { failure: { kind: 'permanent', reason: 'no_audio' } };
     }
 
-    // Pick the best audio format with a URL
+    // Pick the best audio format with a URL. Container FIRST, then bitrate:
+    // YouTube's highest-bitrate "bestaudio" streams are almost always
+    // opus/webm, which the Android native MediaPlayer cannot decode — handing
+    // it one fails onError and playback falls back to the WebView engine
+    // (no background playback). m4a decodes everywhere (native + HTML <audio>),
+    // so prefer it unconditionally and only fall back to webm/opus when no
+    // m4a/mp4 format exists at all.
+    const containerRank = (f: any): number => {
+      const ext = String(f.ext || '').toLowerCase();
+      const type = String(f.type || '').toLowerCase();
+      if (ext.includes('m4a') || ext.includes('mp4') || type.includes('mp4')) return 0;
+      return 1;
+    };
     const best = data.details.formats
       .filter((f: any) => f.url && f.url.startsWith('http'))
-      .sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+      .sort((a: any, b: any) => {
+        const rankDiff = containerRank(a) - containerRank(b);
+        if (rankDiff !== 0) return rankDiff;
+        return (b.bitrate || 0) - (a.bitrate || 0);
+      })[0];
 
     // Formats arrived without any usable URL — rare, and worth one retry.
     if (!best?.url) {
