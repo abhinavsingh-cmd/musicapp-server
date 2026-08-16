@@ -121,6 +121,34 @@ async function refreshProxyBeforeRetry() {
   console.log("[WARP] Giving up after 15 probes — direct connections only");
 })();
 
+// ── yt-dlp concurrency gate ──────────────────────────────────────────────
+// Render free tier runs 1 CPU / ~512MB. Under parallel load (observed:
+// 8 concurrent audio-info requests) yt-dlp processes starve each other and
+// all hit their execFile timeout, while the same calls succeed sequentially
+// in ~6s. Serialize the quick metadata calls with a small concurrency limit;
+// long-running stream/download spawns are unaffected (they have their own
+// larger timeouts and are naturally user-paced).
+const YT_DLP_MAX_CONCURRENCY = 2;
+let ytDlpActive = 0;
+const ytDlpQueue = [];
+
+function runYtDlp(args, options, callback) {
+  const job = () => {
+    ytDlpActive++;
+    execFile("yt-dlp", args, options, (err, stdout, stderr) => {
+      ytDlpActive--;
+      const next = ytDlpQueue.shift();
+      if (next) next();
+      callback(err, stdout, stderr);
+    });
+  };
+  if (ytDlpActive >= YT_DLP_MAX_CONCURRENCY) {
+    ytDlpQueue.push(job);
+  } else {
+    job();
+  }
+}
+
 // Standard API response helpers
 function ok(res, data, message = "OK") {
   return res.json({ success: true, message, code: "OK", details: data });
@@ -384,7 +412,7 @@ app.get("/api/youtube/search", (req, res) => {
   const attemptSearch = (attempt = 1) => {
     const maxAttempts = 3;
 
-    execFile("yt-dlp", [
+    runYtDlp([
       "ytsearch25:" + musicQuery,
       "--flat-playlist",
       "--dump-json",
@@ -395,7 +423,7 @@ app.get("/api/youtube/search", (req, res) => {
       ...YT_COOKIES_ARGS,
       ...YT_PROXY_ARGS,
       "--match-filters", "!is_live & !was_live & duration>?60 & duration<?600",
-    ], { timeout: 20000, maxBuffer: 2 * 1024 * 1024 }, (err, stdout, stderr) => {
+    ], { timeout: 30000, maxBuffer: 2 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) {
         console.error("[YT Search] Error:", err.message, "attempt", attempt);
         if (attempt < maxAttempts) {
@@ -474,7 +502,7 @@ const CHARTS_CACHE_TTL = 30 * 60 * 1000;
 
 function runYtDlpSearch(query, maxResults = 8) {
   return new Promise((resolve) => {
-    execFile("yt-dlp", [
+    runYtDlp([
       `ytsearch${maxResults}:${query}`,
       "--flat-playlist",
       "--dump-json",
@@ -485,7 +513,7 @@ function runYtDlpSearch(query, maxResults = 8) {
       ...YT_COOKIES_ARGS,
       ...YT_PROXY_ARGS,
       "--match-filters", "!is_live & !was_live & duration>?60 & duration<?600",
-    ], { timeout: 15000, maxBuffer: 2 * 1024 * 1024 }, (err, stdout) => {
+    ], { timeout: 25000, maxBuffer: 2 * 1024 * 1024 }, (err, stdout) => {
       if (err || !stdout) return resolve([]);
       try {
         const lines = stdout.trim().split("\n").filter(Boolean);
@@ -1117,7 +1145,7 @@ function getFreshAudioUrl(videoId) {
     if (cached && Date.now() - cached.at < FRESH_URL_TTL_MS) {
       return resolve(cached.url);
     }
-    execFile("yt-dlp", [
+    runYtDlp([
       "-f", "bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio/best",
       "--get-url",
       "--no-warnings",
@@ -1127,7 +1155,7 @@ function getFreshAudioUrl(videoId) {
       ...YT_COOKIES_ARGS,
       ...YT_PROXY_ARGS,
       "https://www.youtube.com/watch?v=" + videoId
-    ], { timeout: 15000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+    ], { timeout: 25000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
       if (err) return resolve(null);
       const url = String(stdout || "").trim();
       if (!url || !url.startsWith("http")) return resolve(null);
@@ -1149,7 +1177,7 @@ app.get("/api/audio-info/:videoId", (req, res) => {
 
   const attemptInfo = (attempt = 1) => {
     const maxAttempts = 3;
-    execFile("yt-dlp", [
+    runYtDlp([
       "-f", "bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio/best",
       "--dump-json",
       "--no-warnings",
@@ -1159,7 +1187,7 @@ app.get("/api/audio-info/:videoId", (req, res) => {
       ...YT_COOKIES_ARGS,
       ...YT_PROXY_ARGS,
       "https://www.youtube.com/watch?v=" + videoId
-    ], { timeout: 15000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+    ], { timeout: 30000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
       if (err) {
         console.error("[AudioInfo] Error for:", videoId, "attempt", attempt, err.message);
         if (attempt < maxAttempts) {
