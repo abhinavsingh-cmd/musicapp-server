@@ -22,7 +22,10 @@ const app = express();
 // If a cookies.txt is present on the server (exported from a logged-in
 // browser via the "Get cookies.txt" extension / `--cookies-from-browser`),
 // it is used automatically.
-const YT_EXTRACTOR_ARGS = "--extractor-args youtube:player_client=android,ios,web_safari,web";
+// Two separate argv entries — execFile does NOT shell-parse, so a single
+// string like "--extractor-args youtube:player_client=..." would reach
+// yt-dlp as one unknown option ("no such option"). Must be spread.
+const YT_EXTRACTOR_ARGS = ["--extractor-args", "youtube:player_client=android,ios,web_safari,web"];
 const YT_COOKIES_ARGS = (() => {
   try { return fs.existsSync("/app/cookies.txt") ? ["--cookies", "/app/cookies.txt"] : []; }
   catch { return []; }
@@ -298,7 +301,7 @@ app.get("/api/youtube/search", (req, res) => {
       "--no-warnings",
       "--no-check-certificates",
       "--age-limit", "18",
-      YT_EXTRACTOR_ARGS,
+      ...YT_EXTRACTOR_ARGS,
       ...YT_COOKIES_ARGS,
       "--match-filters", "!is_live & !was_live & duration>?60 & duration<?600",
     ], { timeout: 20000, maxBuffer: 2 * 1024 * 1024 }, (err, stdout, stderr) => {
@@ -384,7 +387,7 @@ function runYtDlpSearch(query, maxResults = 8) {
       "--no-warnings",
       "--no-check-certificates",
       "--age-limit", "18",
-      YT_EXTRACTOR_ARGS,
+      ...YT_EXTRACTOR_ARGS,
       ...YT_COOKIES_ARGS,
       "--match-filters", "!is_live & !was_live & duration>?60 & duration<?600",
     ], { timeout: 15000, maxBuffer: 2 * 1024 * 1024 }, (err, stdout) => {
@@ -697,7 +700,7 @@ app.get("/api/stream/:videoId", (req, res) => {
       "-o", "-",
       "--no-check-certificates",
       "--age-limit", "18",
-      YT_EXTRACTOR_ARGS,
+      ...YT_EXTRACTOR_ARGS,
       ...YT_COOKIES_ARGS,
       "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
       audioUrl
@@ -849,7 +852,7 @@ app.get("/api/download/:videoId", (req, res) => {
       "-o", "-",
       "--no-check-certificates",
       "--age-limit", "18",
-      YT_EXTRACTOR_ARGS,
+      ...YT_EXTRACTOR_ARGS,
       ...YT_COOKIES_ARGS,
       "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
       audioUrl
@@ -1010,7 +1013,7 @@ function getFreshAudioUrl(videoId) {
       "--no-warnings",
       "--no-check-certificates",
       "--age-limit", "18",
-      YT_EXTRACTOR_ARGS,
+      ...YT_EXTRACTOR_ARGS,
       ...YT_COOKIES_ARGS,
       "https://www.youtube.com/watch?v=" + videoId
     ], { timeout: 15000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
@@ -1041,7 +1044,7 @@ app.get("/api/audio-info/:videoId", (req, res) => {
       "--no-warnings",
       "--no-check-certificates",
       "--age-limit", "18",
-      YT_EXTRACTOR_ARGS,
+      ...YT_EXTRACTOR_ARGS,
       ...YT_COOKIES_ARGS,
       "https://www.youtube.com/watch?v=" + videoId
     ], { timeout: 15000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
