@@ -502,7 +502,11 @@ const CHARTS_CACHE_TTL = 30 * 60 * 1000;
 
 function runYtDlpSearch(query, maxResults = 8) {
   return new Promise((resolve) => {
-    runYtDlp([
+    // Deliberately NOT through the user-facing concurrency gate: trending
+    // runs batches of parallel searches inside a 45-60s budget, and the
+    // gate (max 2) serialized them past the deadline, forcing the builtin
+    // fallback. Background trending is allowed to run in parallel.
+    execFile("yt-dlp", [
       `ytsearch${maxResults}:${query}`,
       "--flat-playlist",
       "--dump-json",
@@ -618,7 +622,9 @@ function getBuiltInFallback() {
 
 async function doFetchTrending() {
   const startMs = Date.now();
-  const OVERALL_TIMEOUT_MS = 45_000;
+  // 60s: trending searches run in parallel (not gated), and WARP adds
+  // latency — 45s was too tight after the WARP switch.
+  const OVERALL_TIMEOUT_MS = 60_000;
   console.log("[Trending] Starting live fetch...");
 
   const withTimeout = (promise, ms) => Promise.race([
