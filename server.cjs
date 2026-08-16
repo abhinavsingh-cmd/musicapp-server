@@ -11,7 +11,22 @@ const compression = require("compression");
 const { execFile, spawn } = require("child_process");
 const path = require("path");
 const os = require("os");
+const fs = require("fs");
 const app = express();
+
+// ── YouTube bot-detection mitigation ─────────────────────────────────────
+// YouTube blocks datacenter IPs (Render, AWS, …) with "Sign in to confirm
+// you're not a bot". The default `web` player client is the most
+// aggressively blocked; the mobile/Safari clients have a much higher success
+// rate from datacenter IPs and newer yt-dlp versions rotate through them.
+// If a cookies.txt is present on the server (exported from a logged-in
+// browser via the "Get cookies.txt" extension / `--cookies-from-browser`),
+// it is used automatically.
+const YT_EXTRACTOR_ARGS = "--extractor-args youtube:player_client=android,ios,web_safari,web";
+const YT_COOKIES_ARGS = (() => {
+  try { return fs.existsSync("/app/cookies.txt") ? ["--cookies", "/app/cookies.txt"] : []; }
+  catch { return []; }
+})();
 
 // Standard API response helpers
 function ok(res, data, message = "OK") {
@@ -283,6 +298,8 @@ app.get("/api/youtube/search", (req, res) => {
       "--no-warnings",
       "--no-check-certificates",
       "--age-limit", "18",
+      YT_EXTRACTOR_ARGS,
+      ...YT_COOKIES_ARGS,
       "--match-filters", "!is_live & !was_live & duration>?60 & duration<?600",
     ], { timeout: 20000, maxBuffer: 2 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) {
@@ -367,6 +384,8 @@ function runYtDlpSearch(query, maxResults = 8) {
       "--no-warnings",
       "--no-check-certificates",
       "--age-limit", "18",
+      YT_EXTRACTOR_ARGS,
+      ...YT_COOKIES_ARGS,
       "--match-filters", "!is_live & !was_live & duration>?60 & duration<?600",
     ], { timeout: 15000, maxBuffer: 2 * 1024 * 1024 }, (err, stdout) => {
       if (err || !stdout) return resolve([]);
@@ -678,6 +697,8 @@ app.get("/api/stream/:videoId", (req, res) => {
       "-o", "-",
       "--no-check-certificates",
       "--age-limit", "18",
+      YT_EXTRACTOR_ARGS,
+      ...YT_COOKIES_ARGS,
       "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
       audioUrl
     ];
@@ -828,6 +849,8 @@ app.get("/api/download/:videoId", (req, res) => {
       "-o", "-",
       "--no-check-certificates",
       "--age-limit", "18",
+      YT_EXTRACTOR_ARGS,
+      ...YT_COOKIES_ARGS,
       "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
       audioUrl
     ];
@@ -982,11 +1005,13 @@ function getFreshAudioUrl(videoId) {
       return resolve(cached.url);
     }
     execFile("yt-dlp", [
-      "-f", "bestaudio[ext=m4a]/bestaudio",
+      "-f", "bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio/best",
       "--get-url",
       "--no-warnings",
       "--no-check-certificates",
       "--age-limit", "18",
+      YT_EXTRACTOR_ARGS,
+      ...YT_COOKIES_ARGS,
       "https://www.youtube.com/watch?v=" + videoId
     ], { timeout: 15000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
       if (err) return resolve(null);
@@ -1011,11 +1036,13 @@ app.get("/api/audio-info/:videoId", (req, res) => {
   const attemptInfo = (attempt = 1) => {
     const maxAttempts = 2;
     execFile("yt-dlp", [
-      "-f", "bestaudio[ext=m4a]/bestaudio",
+      "-f", "bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio/best",
       "--dump-json",
       "--no-warnings",
       "--no-check-certificates",
       "--age-limit", "18",
+      YT_EXTRACTOR_ARGS,
+      ...YT_COOKIES_ARGS,
       "https://www.youtube.com/watch?v=" + videoId
     ], { timeout: 15000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
       if (err) {

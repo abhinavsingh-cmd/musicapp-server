@@ -216,8 +216,13 @@ async function fetchFromServer(youtubeId: string): Promise<ServerResult> {
       if (ext.includes('m4a') || ext.includes('mp4') || type.includes('mp4')) return 0;
       return 1;
     };
+    // HLS manifest URLs (manifest.googlevideo.com …/hls_playlist/…) are
+    // playlist TEXT, not audio — the proxy would stream the playlist and the
+    // player would fail (or worse, a download would save an HTML-ish file).
+    // Only direct media URLs are playable through the proxy.
+    const IS_HLS_MANIFEST = /manifest\.googlevideo\.com|\/api\/manifest\/hls_playlist\//i;
     const best = data.details.formats
-      .filter((f: any) => f.url && f.url.startsWith('http'))
+      .filter((f: any) => f.url && f.url.startsWith('http') && !IS_HLS_MANIFEST.test(f.url))
       .sort((a: any, b: any) => {
         const rankDiff = containerRank(a) - containerRank(b);
         if (rankDiff !== 0) return rankDiff;
