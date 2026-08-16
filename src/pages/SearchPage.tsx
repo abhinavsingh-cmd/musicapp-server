@@ -12,6 +12,7 @@ import { ErrorBoundary } from '../components/ErrorBoundary';
 import { Song } from '../types/music';
 import { useAudioStore } from '../stores/audioStore';
 import { useDebounce } from '../hooks/useDebounce';
+import { useVirtualList } from '../hooks/useVirtualList';
 import {
   useSearchStore,
   selectFilteredLibrary,
@@ -53,6 +54,11 @@ const DURATION_FILTERS: { value: DurationFilter; label: string }[] = [
 
 const GENRES = ['Pop', 'Rock', 'Hip Hop', 'Indian', 'K-Pop', 'Latin', 'R&B', 'Electronic', 'Indie', 'Afrobeats'];
 
+// YouTube result cards can grow unboundedly via loadMore pagination — window
+// them like the library list. 80px fits the tallest card (thumb 48 + p-2 +
+// title/artist/album/views lines all truncate to single lines).
+const YT_ROW_HEIGHT = 80;
+
 function safeStr(v: unknown, fallback = ''): string {
   return typeof v === 'string' ? v : fallback;
 }
@@ -81,6 +87,7 @@ export const SearchPage: React.FC = memo(() => {
   const goBack = useGoBack();
   const inputRef = useRef<HTMLInputElement>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
+  const ytListRef = useRef<HTMLDivElement>(null);
   // The last query actually sent to the store. The effect below re-runs when
   // `showSuggestions` flips (input focus), which would otherwise re-fire an
   // identical completed search — a duplicate request. Only a query CHANGE
@@ -131,6 +138,8 @@ export const SearchPage: React.FC = memo(() => {
     () => selectFilteredLibrary({ libraryResults, filter, sort, durationFilter, genreFilter } as any),
     [libraryResults, filter, sort, durationFilter, genreFilter],
   );
+  const ytRows = useMemo(() => (ytResults || []).filter((r) => r && r.id), [ytResults]);
+  const ytWin = useVirtualList(ytRows.length, YT_ROW_HEIGHT, ytListRef);
   const uniqueArtists = useMemo(() => selectUniqueArtists({ libraryResults } as any), [libraryResults]);
   const uniqueAlbums = useMemo(() => selectUniqueAlbums({ libraryResults } as any), [libraryResults]);
   const uniqueGenres = useMemo(() => selectUniqueGenres({ libraryResults } as any), [libraryResults]);
@@ -505,9 +514,11 @@ export const SearchPage: React.FC = memo(() => {
             </div>
           )}
 
-          {ytResults.length > 0 && (
-            <div className="space-y-2">
-              {ytResults.filter((r) => r && r.id).map((r) => {
+          {ytRows.length > 0 && (
+            <div>
+              <div ref={ytListRef} style={{ position: 'relative', height: ytWin.totalHeight }}>
+              {ytRows.slice(ytWin.start, ytWin.end).map((r, i) => {
+                const index = ytWin.start + i;
                 const ytSong: Song = {
                   id: 'yt-' + r.id, title: safeStr(r.title, 'Unknown'), artist: safeStr(r.artist, 'Unknown'),
                   album: safeStr(r.album, ''), duration: r.duration || 0, genre: 'YouTube',
@@ -518,7 +529,8 @@ export const SearchPage: React.FC = memo(() => {
                 <div key={r.id} onClick={() => handlePlayYT(r)}
                   onContextMenu={(e) => handleContextMenu(e, ytSong)}
                   onTouchStart={(e) => handleLongPress(e, ytSong)}
-                  className="flex items-center gap-3 p-2 rounded-xl hover:bg-white/5 transition-colors group cursor-pointer">
+                  className="flex items-center gap-3 p-2 rounded-xl hover:bg-white/5 transition-colors group cursor-pointer"
+                  style={{ position: 'absolute', top: index * YT_ROW_HEIGHT, left: 0, right: 0, height: YT_ROW_HEIGHT }}>
                   <div className="relative w-16 h-12 rounded-lg overflow-hidden flex-shrink-0 bg-[#1a1a2e]">
                     {r.thumbnail ? (
                       <img src={r.thumbnail} alt={r.title || ''} className="w-full h-full object-cover" loading="lazy" />
@@ -548,6 +560,7 @@ export const SearchPage: React.FC = memo(() => {
                 </div>
                 );
               })}
+              </div>
 
               <div ref={sentinelRef} className="h-4" />
               {(ytStatus === 'loading' || ytStatus === 'retrying') && (

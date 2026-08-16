@@ -1,5 +1,6 @@
-import React, { useEffect, useMemo, useCallback, useState } from 'react';
+import React, { useEffect, useMemo, useCallback, useState, useRef } from 'react';
 import { useGoBack } from '../hooks/useGoBack';
+import { useVirtualList } from '../hooks/useVirtualList';
 import { useDownloadsStore } from '../stores/downloadsStore';
 import { useAudioStore } from '../stores/audioStore';
 import { downloadEntryToSong } from '../services/musicSource';
@@ -23,6 +24,13 @@ function formatDuration(s: number): string {
 const EMPTY_DOWNLOADS: never[] = [];
 const EMPTY_MAP: Record<string, unknown> = {};
 const EMPTY_SET = new Set<string>();
+
+// Downloaded-song rows: 48px thumb + p-3 padding = 72px tall, 4px gap → 76px
+// stride. The list grows with every download, so it is windowed like the
+// library — downloading many songs must not remount every row on each
+// progress tick.
+const DL_ROW_HEIGHT = 72;
+const DL_STRIDE = 76;
 
 const DownloadsPage: React.FC = () => {
   const goBack = useGoBack();
@@ -52,6 +60,8 @@ const DownloadsPage: React.FC = () => {
 
   const [showStorage, setShowStorage] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
+  const dlListRef = useRef<HTMLDivElement>(null);
+  const dlWin = useVirtualList(downloads.length, DL_STRIDE, dlListRef);
 
   useEffect(() => {
     loadDownloads();
@@ -309,15 +319,18 @@ const DownloadsPage: React.FC = () => {
           </p>
         </div>
       ) : (
-        <div className="space-y-2">
-          <div className="text-xs font-medium text-gray-500">
+        <div>
+          <div className="text-xs font-medium text-gray-500 mb-2">
             {downloads.length} downloaded songs
           </div>
-          {downloads.map((d) => {
+          <div ref={dlListRef} style={{ position: 'relative', height: dlWin.totalHeight }}>
+          {downloads.slice(dlWin.start, dlWin.end).map((d, i) => {
+            const index = dlWin.start + i;
             const isActive = currentSongId === d.id;
             return (
               <div
                 key={d.id}
+                style={{ position: 'absolute', top: index * DL_STRIDE, left: 0, right: 0, height: DL_ROW_HEIGHT }}
                 className={`flex items-center gap-3 p-3 rounded-xl transition-colors group cursor-pointer ${isActive ? 'bg-violet-500/10' : 'hover:bg-white/5'}`}
                 onClick={() => handlePlay(d)}
               >
@@ -353,6 +366,7 @@ const DownloadsPage: React.FC = () => {
               </div>
             );
           })}
+          </div>
         </div>
       )}
     </div>

@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback, memo } from 'react';
+import React, { useState, useMemo, useCallback, memo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQueueStore } from '../../stores/queueStore';
 import { useAudioStore } from '../../stores/audioStore';
@@ -7,6 +7,7 @@ import { useShallow } from 'zustand/react/shallow';
 import { useSongContextMenu } from '../../components/SongContextMenu';
 import { cn } from '../../utils/cn';
 import { ErrorBoundary } from '../../components/ErrorBoundary';
+import { useVirtualList } from '../../hooks/useVirtualList';
 import {
   DndContext,
   closestCenter,
@@ -15,6 +16,7 @@ import {
   useSensor,
   useSensors,
   DragEndEvent,
+  DragStartEvent,
 } from '@dnd-kit/core';
 import {
   SortableContext,
@@ -42,9 +44,18 @@ const formatDuration = (sec: number) => {
   return `${m}:${s.toString().padStart(2, '0')}`;
 };
 
+// Queue rows: 36px thumb + py-2 padding = 52px tall, 4px visual gap (the
+// old space-y-1) → 56px stride. The Up Next list can be the whole library
+// (647 rows) when played from there, so it is windowed like every other
+// long list; the row being drag-reordered stays mounted via includeIndex.
+const QUEUE_ROW_HEIGHT = 52;
+const QUEUE_STRIDE = 56;
+
 interface SortableSongRowProps {
   song: import('../../types/music').Song;
   index: number;
+  /** Position within the windowed Up Next list (absolute rows). Undefined for the in-flow "Now Playing" row. */
+  localIndex?: number;
   isCurrent: boolean;
   isPlaying: boolean;
   section: 'current' | 'upcoming' | 'recent';
@@ -52,17 +63,20 @@ interface SortableSongRowProps {
   onTouchStart?: (e: React.TouchEvent, song: import('../../types/music').Song) => void;
 }
 
-const SortableSongRow = memo(({ song, index, isCurrent, isPlaying, section, onContextMenu, onTouchStart }: SortableSongRowProps) => {
+const SortableSongRow = memo(({ song, index, localIndex, isCurrent, isPlaying, section, onContextMenu, onTouchStart }: SortableSongRowProps) => {
   const playAtIndex = useQueueStore((s) => s.playAtIndex);
   const removeFromQueue = useQueueStore((s) => s.removeFromQueue);
 
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: song.id + '-' + index });
 
-  const style = {
+  const style: React.CSSProperties = {
     transform: CSS.Transform.toString(transform),
     transition,
     zIndex: isDragging ? 50 : undefined,
     opacity: isDragging ? 0.8 : 1,
+    ...(localIndex != null
+      ? { position: 'absolute' as const, top: localIndex * QUEUE_STRIDE, left: 0, right: 0, height: QUEUE_ROW_HEIGHT }
+      : {}),
   };
 
   return (
@@ -149,6 +163,7 @@ const SortableSongRow = memo(({ song, index, isCurrent, isPlaying, section, onCo
 }, (prev, next) => {
   return prev.song.id === next.song.id
     && prev.index === next.index
+    && prev.localIndex === next.localIndex
     && prev.isCurrent === next.isCurrent
     && prev.isPlaying === next.isPlaying
     && prev.section === next.section;
@@ -172,6 +187,10 @@ export const QueuePanel: React.FC = memo(() => {
   const currentSongId = useAudioStore((s) => s.currentSong?.id ?? null);
   const isPlaying = useAudioStore((s) => s.isPlaying);
   const [tab, setTab] = useState<'queue' | 'recent'>('queue');
+  const [dragLocalIndex, setDragLocalIndex] = useState<number | null>(null);
+  const queueListRef = useRef<HTMLDivElement>(null);
+  const upcoming = useMemo(() => queue.slice(currentIndex + 1), [queue, currentIndex]);
+  const queueWin = useVirtualList(upcoming.length, QUEUE_STRIDE, queueListRef, { includeIndex: dragLocalIndex });
 
   const { handleContextMenu, handleLongPress, ContextMenu } = useSongContextMenu(
     (artist) => navigate(`/search?q=${encodeURIComponent(artist)}`),
@@ -183,7 +202,15 @@ export const QueuePanel: React.FC = memo(() => {
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
   );
 
+  const handleDragStart = useCallback((event: DragStartEvent) => {
+    // Sortable ids are `${song.id}-${absoluteIndex}` — the index is always
+    // the final segment, so it survives any '-' inside the song id itself.
+    const idx = parseInt(String(event.active.id).split('-').pop() || '', 10);
+    setDragLocalIndex(Number.isFinite(idx) ? idx - (currentIndex + 1) : null);
+  }, [currentIndex]);
+
   const handleDragEnd = useCallback((event: DragEndEvent) => {
+    setDragLocalIndex(null);
     const { active, over } = event;
     if (!over || active.id === over.id) return;
     const oldIndex = queue.findIndex((s, i) => (s.id + '-' + i) === String(active.id));
@@ -193,7 +220,8 @@ export const QueuePanel: React.FC = memo(() => {
     }
   }, [queue, reorderQueue]);
 
-  const upcoming = useMemo(() => queue.slice(currentIndex + 1), [queue, currentIndex]);
+  const handleDragCancel = useCallback(() => setDragLocalIndex(null), []);
+
   const currentInQueue = useMemo(() => currentIndex >= 0 && currentIndex < queue.length ? queue[currentIndex] : null, [queue, currentIndex]);
 
   const RepeatIcon = repeatMode === 'one' ? Repeat1 : Repeat;
@@ -300,20 +328,27 @@ export const QueuePanel: React.FC = memo(() => {
                     <span className="ml-1 text-gray-700">({upcoming.length})</span>
                   </p>
                   <ErrorBoundary level="section">
-                    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+                    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragStart={handleDragStart} onDragEnd={handleDragEnd} onDragCancel={handleDragCancel}>
                       <SortableContext items={upcoming.map((s, i) => s.id + '-' + (currentIndex + 1 + i))} strategy={verticalListSortingStrategy}>
-                        {upcoming.map((song, i) => (
-                          <SortableSongRow
-                            key={song.id + '-' + (currentIndex + 1 + i)}
-                            song={song}
-                            index={currentIndex + 1 + i}
-                            isCurrent={false}
-                            isPlaying={false}
-                            section="upcoming"
-                            onContextMenu={handleContextMenu}
-                            onTouchStart={handleLongPress}
-                          />
-                        ))}
+                        <div ref={queueListRef} style={{ position: 'relative', height: queueWin.totalHeight }}>
+                          {upcoming.slice(queueWin.start, queueWin.end).map((song, i) => {
+                            const localIndex = queueWin.start + i;
+                            const absoluteIndex = currentIndex + 1 + localIndex;
+                            return (
+                              <SortableSongRow
+                                key={song.id + '-' + absoluteIndex}
+                                song={song}
+                                index={absoluteIndex}
+                                localIndex={localIndex}
+                                isCurrent={false}
+                                isPlaying={false}
+                                section="upcoming"
+                                onContextMenu={handleContextMenu}
+                                onTouchStart={handleLongPress}
+                              />
+                            );
+                          })}
+                        </div>
                       </SortableContext>
                     </DndContext>
                   </ErrorBoundary>

@@ -10,6 +10,10 @@ import { DownloadButton } from '../components/DownloadButton';
 import { deferIdle } from '../utils/idle';
 import { useSongContextMenu } from '../components/SongContextMenu';
 import { Song } from '../types/music';
+import { useVirtualList } from '../hooks/useVirtualList';
+import { useRef } from 'react';
+
+const CHART_ROW_HEIGHT = 60;
 
 const chartSongToSong = (song: ChartSong): Song => ({
   id: song.id,
@@ -51,7 +55,7 @@ const ChartRow = memo(({ song, index, onPlay, getTrendIcon, onContextMenu, onTou
     onContextMenu={onContextMenu}
     onTouchStart={onTouchStart}
     className="flex items-center gap-4 p-3 rounded-xl bg-white/5 hover:bg-white/10 cursor-pointer transition-colors group"
-    style={{ height: 60 }}
+    style={{ height: CHART_ROW_HEIGHT, position: 'absolute', top: index * CHART_ROW_HEIGHT, left: 0, right: 0 }}
   >
     <div className="w-8 text-center flex-shrink-0">
       <span className={`text-lg font-bold ${
@@ -105,6 +109,7 @@ export const ChartsPage: React.FC = () => {
   const fetchCharts = useChartsStore((s) => s.fetchCharts);
   const loadSong = useAudioStore((s) => s.loadSong);
   const [activeTab, setActiveTab] = React.useState<'top' | 'global' | 'bollywood'>('top');
+  const chartListRef = useRef<HTMLDivElement>(null);
 
   const { handleContextMenu, handleLongPress, ContextMenu } = useSongContextMenu(
     (artist) => navigate(`/search?q=${encodeURIComponent(artist)}`),
@@ -124,6 +129,7 @@ export const ChartsPage: React.FC = () => {
     (activeTab === 'top' ? topCharts : activeTab === 'global' ? globalCharts : bollywoodCharts) || [],
     [activeTab, topCharts, globalCharts, bollywoodCharts]
   );
+  const chartWin = useVirtualList(charts.length, CHART_ROW_HEIGHT, chartListRef);
 
   const handlePlay = useCallback((song: ChartSong, index: number) => {
     const clicked = charts[index]?.id === song.id ? charts[index] : charts.find((c) => c.id === song.id);
@@ -243,15 +249,16 @@ export const ChartsPage: React.FC = () => {
       )}
 
       {charts.length > 0 && (
-        <div>
-          {charts.map((song, i) => {
+        <div ref={chartListRef} style={{ position: 'relative', height: chartWin.totalHeight }}>
+          {charts.slice(chartWin.start, chartWin.end).map((song, i) => {
+            const index = chartWin.start + i;
             const downloadableSong = chartSongToSong(song);
             return (
               <ChartRow
                 key={song.id}
                 song={song}
-                index={i}
-                onPlay={() => handlePlay(song, i)}
+                index={index}
+                onPlay={() => handlePlay(song, index)}
                 getTrendIcon={getTrendIcon}
                 onContextMenu={(e) => handleContextMenu(e, downloadableSong)}
                 onTouchStart={(e) => handleLongPress(e, downloadableSong)}
