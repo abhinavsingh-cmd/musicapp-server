@@ -46,26 +46,42 @@ const YT_COOKIES_ARGS = (() => {
 // YouTube bot-blocks raw datacenter IPs even with PO tokens, but not
 // Cloudflare's network — routing yt-dlp through :1080 is what actually
 // defeats the "Sign in to confirm you're not a bot" block from Render.
-// Probed at startup; falls back to direct connections if the proxy is
-// not reachable (e.g. local dev).
+// Probed at startup with retries (wireproxy can take a few seconds to
+// bind :1080 after the container starts); falls back to direct
+// connections if the proxy never comes up (e.g. local dev).
 let YT_PROXY_ARGS = [];
-try {
-  const net = require("net");
-  const probe = net.connect({ port: 1080, host: "127.0.0.1" });
-  probe.setTimeout(1500);
-  probe.on("connect", () => {
-    YT_PROXY_ARGS = ["--proxy", "socks5://127.0.0.1:1080"];
-    console.log("[WARP] SOCKS5 proxy detected on :1080 — yt-dlp routes via Cloudflare WARP");
-    probe.destroy();
+let YT_PROXY_LAST_CHECK = null;
+
+function probeWarpProxy() {
+  return new Promise((resolve) => {
+    const net = require("net");
+    let settled = false;
+    const finish = (up) => {
+      if (settled) return;
+      settled = true;
+      YT_PROXY_LAST_CHECK = Date.now();
+      YT_PROXY_ARGS = up ? ["--proxy", "socks5://127.0.0.1:1080"] : [];
+      console.log("[WARP] probe result: " + (up ? "UP — yt-dlp routes via Cloudflare WARP" : "DOWN — yt-dlp connects directly"));
+      resolve(up);
+    };
+    const sock = net.connect({ port: 1080, host: "127.0.0.1" });
+    sock.setTimeout(2000);
+    sock.on("connect", () => { try { sock.destroy(); } catch {} finish(true); });
+    sock.on("error", () => { try { sock.destroy(); } catch {} finish(false); });
+    sock.on("timeout", () => { try { sock.destroy(); } catch {} finish(false); });
   });
-  probe.on("error", () => {
-    console.log("[WARP] No SOCKS5 proxy on :1080 — yt-dlp connects directly");
-    probe.destroy();
-  });
-  probe.on("timeout", () => probe.destroy());
-} catch (e) {
-  console.log("[WARP] Proxy probe unavailable:", e.message);
 }
+
+// Retry for up to ~30s at startup — wireproxy binds :1080 shortly after
+// the container boots, and the WARP tunnel handshake takes a few seconds.
+(async () => {
+  for (let attempt = 1; attempt <= 15; attempt++) {
+    const up = await probeWarpProxy();
+    if (up) return;
+    if (attempt < 15) await new Promise(r => setTimeout(r, 2000));
+  }
+  console.log("[WARP] Giving up after 15 probes — direct connections only");
+})();
 
 // Standard API response helpers
 function ok(res, data, message = "OK") {
@@ -691,6 +707,11 @@ app.get("/api/health", (req, res) => {
       services: {
         ytDlp: { available: ytDlpHealthy, version: ytDlpVersion },
         express: { available: true, version: require("express/package.json").version },
+      },
+      warp: {
+        enabled: YT_PROXY_ARGS.length > 0,
+        proxyArgs: YT_PROXY_ARGS,
+        lastCheck: YT_PROXY_LAST_CHECK ? new Date(YT_PROXY_LAST_CHECK).toISOString() : null,
       },
       trending: {
         cached: !!(trendingCache && trendingCache.length > 0),
