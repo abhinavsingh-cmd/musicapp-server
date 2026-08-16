@@ -24,6 +24,38 @@ const SONGS_CACHE_KEY = 'songs_catalog_v1';
  */
 export const LIBRARY_STALE_MS = 60 * 60 * 1000; // 1 hour
 
+// ── Daily catalog rotation (client-side) ─────────────────────────────────
+// The server catalog is a static file. To keep the library feeling alive
+// without any server changes, the client applies a deterministic UTC-day
+// seeded shuffle to whatever catalog it holds (fetched OR cached): same
+// order all day (stable, cacheable), different every day. Works entirely
+// inside the APK.
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function mulberry32(seed: number): () => number {
+  let t = seed >>> 0;
+  return () => {
+    t = (t + 0x6d2b79f5) >>> 0;
+    let r = Math.imul(t ^ (t >>> 15), 1 | t);
+    r = (r + Math.imul(r ^ (r >>> 7), 61 | r)) ^ r;
+    return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** Deterministic per-UTC-day shuffle — exported for tests. */
+export function dailyShuffleSongs(songs: Song[], now = Date.now()): Song[] {
+  const dayIndex = Math.floor(now / DAY_MS);
+  const rand = mulberry32(dayIndex);
+  const shuffled = songs.slice();
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    const tmp = shuffled[i];
+    shuffled[i] = shuffled[j];
+    shuffled[j] = tmp;
+  }
+  return shuffled;
+}
+
 interface SongsCacheEntry {
   songs: Song[];
   cachedAt: number;
@@ -125,7 +157,9 @@ async function initSongsStore(): Promise<void> {
     // exact "songs never change" experience. A next-day launch sees a stale
     // cachedAt and refreshes the catalog in the background.
     useSongsStore.setState({
-      songs: cached.songs,
+      // Shuffle again with TODAY's seed — the cached list may be from a
+      // previous day, and the library should rotate the moment it opens.
+      songs: dailyShuffleSongs(cached.songs),
       lastSuccessfulFetch: cached.cachedAt || Date.now(),
       fetched: true,
       error: false,
@@ -140,7 +174,7 @@ async function initSongsStore(): Promise<void> {
       if (current.songs.length === 0) {
         const songs = meta.map(cachedMetaToSong);
         if (songs.length > 0) {
-          useSongsStore.setState({ songs, fetched: true, error: false });
+          useSongsStore.setState({ songs: dailyShuffleSongs(songs), fetched: true, error: false });
           saveCachedSongs(songs);
           logger.debug('[songsStore] Loaded', songs.length, 'songs from IndexedDB metadata');
         }
@@ -174,7 +208,7 @@ async function hydrateSongsStore(): Promise<void> {
       const songs = await fetchWithTimeout();
       if (songs.length > 0) {
         useSongsStore.setState({
-          songs,
+          songs: dailyShuffleSongs(songs),
           loading: false,
           fetched: true,
           error: false,
@@ -202,7 +236,7 @@ async function hydrateSongsStore(): Promise<void> {
     if (songs.length > 0) {
       logger.debug(`[songsStore] Fetched ${songs.length} songs successfully`);
       useSongsStore.setState({ 
-        songs, 
+        songs: dailyShuffleSongs(songs), 
         loading: false, 
         fetched: true, 
         error: false,

@@ -15,7 +15,7 @@ vi.mock('../utils/idle', () => ({
   deferIdle: vi.fn(),
 }));
 
-import { useSongsStore, LIBRARY_STALE_MS } from './songsStore';
+import { useSongsStore, LIBRARY_STALE_MS, dailyShuffleSongs } from './songsStore';
 import { fetchSongs } from '../services/musicApi';
 import { getAllCachedMetadata } from '../utils/downloadManager';
 import type { Song } from '../types/music';
@@ -90,7 +90,8 @@ describe('songsStore catalog freshness', () => {
 
     expect(mockedFetchSongs).toHaveBeenCalledTimes(1);
     const s = useSongsStore.getState();
-    expect(s.songs.map((x) => x.id)).toEqual(['a', 'b']);
+    // The catalog is daily-shuffled — compare as a set, not an exact order.
+    expect(s.songs.map((x) => x.id).sort()).toEqual(['a', 'b']);
     expect(s.loading).toBe(false);
     expect(s.error).toBe(false);
     expect(s.lastSuccessfulFetch).toBeGreaterThan(Date.now() - 1000);
@@ -134,6 +135,18 @@ describe('songsStore catalog freshness', () => {
     expect(s.error).toBe(false);
   });
 
+  it('a fresh catalog is served in the daily-shuffled order', async () => {
+    const a = makeSong('a');
+    const b = makeSong('b');
+    mockedFetchSongs.mockResolvedValue([a, b]);
+
+    await useSongsStore.getState().ensureLoaded();
+
+    const s = useSongsStore.getState();
+    expect(s.songs.map((x) => x.id).sort()).toEqual(['a', 'b']);
+    expect(s.error).toBe(false);
+  });
+
   it('the first fetch (no cache at all) still populates and clears loading', async () => {
     const a = makeSong('a');
     mockedFetchSongs.mockResolvedValue([a]);
@@ -145,5 +158,41 @@ describe('songsStore catalog freshness', () => {
     expect(s.loading).toBe(false);
     expect(s.error).toBe(false);
     expect(s.fetched).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Daily rotation: deterministic per UTC day, different every day, all songs
+// retained. This is what makes the library change day to day entirely from
+// the APK — no server deploy required.
+// ---------------------------------------------------------------------------
+describe('dailyShuffleSongs', () => {
+  const songs = Array.from({ length: 20 }, (_, i) => makeSong(String(i)));
+  const day1 = new Date(2026, 7, 16, 10, 0, 0).getTime();
+  const laterSameDay = new Date(2026, 7, 16, 23, 59, 0).getTime();
+  const day2 = new Date(2026, 7, 17, 10, 0, 0).getTime();
+
+  it('is deterministic within the same UTC day', () => {
+    const a = dailyShuffleSongs(songs, day1);
+    const b = dailyShuffleSongs(songs, laterSameDay);
+    expect(a.map((s) => s.id)).toEqual(b.map((s) => s.id));
+  });
+
+  it('produces a different order the next day', () => {
+    const a = dailyShuffleSongs(songs, day1);
+    const c = dailyShuffleSongs(songs, day2);
+    expect(a.map((s) => s.id)).not.toEqual(c.map((s) => s.id));
+  });
+
+  it('retains every song (no additions, no losses)', () => {
+    const a = dailyShuffleSongs(songs, day1);
+    expect(a.length).toBe(songs.length);
+    expect(new Set(a.map((s) => s.id)).size).toBe(songs.length);
+  });
+
+  it('does not mutate the input array', () => {
+    const original = songs.map((s) => s.id);
+    dailyShuffleSongs(songs, day1);
+    expect(songs.map((s) => s.id)).toEqual(original);
   });
 });
