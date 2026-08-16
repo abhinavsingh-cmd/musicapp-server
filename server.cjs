@@ -25,7 +25,18 @@ const app = express();
 // Two separate argv entries — execFile does NOT shell-parse, so a single
 // string like "--extractor-args youtube:player_client=..." would reach
 // yt-dlp as one unknown option ("no such option"). Must be spread.
-const YT_EXTRACTOR_ARGS = ["--extractor-args", "youtube:player_client=android,ios,web_safari,web"];
+//
+// Client combo: tv_downgraded/web_embedded/android_vr are the most
+// reliable from datacenter IPs (the mobile android/ios clients get
+// bot-blocked alongside the default web client). player_skip=webpage cuts
+// HTTP requests (less rate limiting) and --force-ipv4 avoids IPv6 routing
+// issues on cloud hosts. PO tokens come from the bgutil sidecar server
+// (see Dockerfile) — the plugin auto-connects to 127.0.0.1:4416.
+const YT_EXTRACTOR_ARGS = [
+  "--extractor-args",
+  "youtube:player_client=tv_downgraded,web_embedded,android_vr;player_skip=webpage",
+  "--force-ipv4",
+];
 const YT_COOKIES_ARGS = (() => {
   try { return fs.existsSync("/app/cookies.txt") ? ["--cookies", "/app/cookies.txt"] : []; }
   catch { return []; }
