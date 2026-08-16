@@ -15,7 +15,7 @@ RUN yt-dlp --version
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm install --omit=dev
-COPY server.cjs ./
+COPY server.cjs server-songs.json ./
 
 EXPOSE 3001
 CMD ["node", "server.cjs"]
