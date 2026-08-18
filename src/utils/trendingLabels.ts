@@ -7,17 +7,17 @@ import type { TrendingSourceLabel } from '../services/trendingService';
  */
 export const TRENDING_SOURCE_LABELS: Record<TrendingSourceLabel, string> = {
   LIVE: 'Live from YouTube',
-  CACHED: 'Cached live data',
-  LIBRARY: 'From your library',
-  BUILT_IN: 'Built-in catalog',
+  CACHED: 'Cached YouTube data',
+  LIBRARY: 'Library fallback',
+  BUILT_IN: 'Emergency fallback',
 };
 
 /** Hero-style one-liners that only ever claim "live YouTube" for LIVE data. */
 const TRENDING_TAGLINES: Record<TrendingSourceLabel, (songCount: number) => string> = {
   LIVE: (n) => `${n} songs + live YouTube trending`,
-  CACHED: (n) => `${n} songs + cached YouTube trending`,
-  LIBRARY: (n) => `${n} songs · trending from your library`,
-  BUILT_IN: (n) => `${n} songs · offline trending (built-in)`,
+  CACHED: (n) => `${n} songs + cached YouTube data`,
+  LIBRARY: (n) => `${n} songs · library fallback`,
+  BUILT_IN: (n) => `${n} songs · emergency fallback`,
 };
 
 /** Neutral phrasing used before any source is known. */

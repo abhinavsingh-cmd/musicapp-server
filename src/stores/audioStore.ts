@@ -11,7 +11,7 @@ import { useHistoryStore } from './historyStore';
 import { preloadNextSongs, prewarmOnFirstInteraction } from '../services/preloadService';
 import { registerLocalCopyResolver } from '../providers/resolve';
 import { findVerifiedReplacement } from '../services/smartReplaceService';
-import { resolvePlayableSong, sourceKey, stripStaleBlobUrl } from '../services/musicSource';
+import { resolvePlayableSong, sourceKey, stripStaleBlobUrl, ensureYouTubeArtwork } from '../services/musicSource';
 import { showToast } from '../utils/toast';
 import { logger } from '../utils/logger';
 import { deferIdle } from '../utils/idle';
@@ -28,26 +28,78 @@ registerLocalCopyResolver((track) => {
   }
 });
 
-const LOADING_TIMEOUT_MS = 30_000;
+// ────────────────────── Playback Phase State Machine ──────────────────────
+// Every phase has a guaranteed timeout exit — the UI can never be stuck
+// showing a spinner indefinitely.
+//
+// Phase transitions:
+//   idle → loading  (song clicked / retry / restore)
+//   loading → loading  (source resolution in progress)
+//   loading → buffering  (canplay fired — audio element loading data)
+//   buffering → playing  (playing event — audio genuinely playing)
+//   playing → paused  (user pause)
+//   paused → playing  (user resume)
+//   playing → ended  (song complete)
+//   any non-error → error  (timeout or unrecoverable failure)
+//   error → loading  (user retry)
+//
+// Timeout guarantees:
+//   loading phase:   LOADING_TIMEOUT_MS (15s) — covers source resolution
+//   buffering phase: BUFFERING_TIMEOUT_MS (20s) — covers audio element stall
+//   total ceiling:   PLAY_CEILING_MS (45s) — absolute backstop from click
+export type PlaybackPhase = 'idle' | 'loading' | 'buffering' | 'playing' | 'paused' | 'ended' | 'error';
+
+/** Maximum time the initial source-resolution + audio-setup phase may take. */
+const LOADING_TIMEOUT_MS = 15_000;
+/**
+ * Maximum time the audio element may spend buffering after canplay.
+ * Covers: stalled proxy URLs, throttled CDN, broken seeking.
+ * Started ONLY on the first 'waiting' event AFTER canplay fired.
+ * Repeated 'waiting' events do NOT restart this timer — that is what
+ * caused the old loading timeout to never fire.
+ */
+const BUFFERING_TIMEOUT_MS = 20_000;
 // Hard ceiling: the entire play() promise MUST settle within this time.
-// The loading timeout can be reset by event handlers (canplay clears it,
-// etc.), but this absolute ceiling guarantees the UI is never stuck
-// showing a spinner when the audio engine is deadlocked.
-const PLAY_CEILING_MS = 60_000;
+// Every other timeout is reset/cleared by event handlers; this ceiling is
+// *never* reset once started — it fires once and guarantees the UI is
+// never stuck showing a spinner when the audio engine is deadlocked.
+const PLAY_CEILING_MS = 45_000;
+
 let loadingTimeoutId: ReturnType<typeof setTimeout> | null = null;
 let playCeilingId: ReturnType<typeof setTimeout> | null = null;
+let bufferingTimeoutId: ReturnType<typeof setTimeout> | null = null;
 let initPromise: Promise<void> | null = null;
+
+/** Force the store out of any loading/buffering phase with an error. */
+function forceErrorState(msg: string): void {
+  const s = useAudioStore.getState();
+  if (s.isPlaying) return; // already playing — don't clobber
+  logger.error('[AudioStore]', msg);
+  useAudioStore.setState({ isLoading: false, isPlaying: false, error: msg, playbackPhase: 'error' });
+}
 
 function startLoadingTimeout() {
   if (loadingTimeoutId) clearTimeout(loadingTimeoutId);
   loadingTimeoutId = setTimeout(() => {
-    const { isLoading } = useAudioStore.getState();
-    if (isLoading) {
-      logger.warn('[AudioStore] Loading timeout — forcing isLoading=false');
-      useAudioStore.setState({ isLoading: false, isPlaying: false, error: 'Loading timed out' });
-    }
+    forceErrorState('Loading timed out — check your connection');
     loadingTimeoutId = null;
   }, LOADING_TIMEOUT_MS);
+}
+
+/**
+ * Start the buffering timeout — but ONLY if one is not already running.
+ * This is critical: the old code restarted the loading timeout on every
+ * 'waiting' event, which pushed the fire time forward indefinitely and
+ * left the spinner stuck on broken streams.  By starting once and
+ * refusing to restart, we guarantee this timer fires within
+ * BUFFERING_TIMEOUT_MS of the FIRST stall event.
+ */
+function startBufferingTimeout() {
+  if (bufferingTimeoutId) return; // ONE timer per buffering episode
+  bufferingTimeoutId = setTimeout(() => {
+    bufferingTimeoutId = null;
+    forceErrorState('Stream buffering timed out — tap retry');
+  }, BUFFERING_TIMEOUT_MS);
 }
 
 /**
@@ -59,12 +111,8 @@ function startLoadingTimeout() {
 function startPlayCeiling() {
   if (playCeilingId) clearTimeout(playCeilingId);
   playCeilingId = setTimeout(() => {
-    const state = useAudioStore.getState();
-    if (state.isLoading && !state.isPlaying) {
-      logger.error('[AudioStore] Play ceiling hit — play() did not settle within', PLAY_CEILING_MS, 'ms');
-      useAudioStore.setState({ isLoading: false, isPlaying: false, error: 'Playback timed out — tap retry' });
-    }
     playCeilingId = null;
+    forceErrorState('Playback timed out — tap retry');
   }, PLAY_CEILING_MS);
 }
 
@@ -82,6 +130,20 @@ function clearLoadingTimeout() {
   }
 }
 
+function clearBufferingTimeout() {
+  if (bufferingTimeoutId) {
+    clearTimeout(bufferingTimeoutId);
+    bufferingTimeoutId = null;
+  }
+}
+
+/** Clear every playback timer — called on song end, error, and user stop. */
+function clearAllPlaybackTimers() {
+  clearLoadingTimeout();
+  clearBufferingTimeout();
+  clearPlayCeiling();
+}
+
 export interface AudioStore {
   currentSong: Song | null;
   isPlaying: boolean;
@@ -91,6 +153,9 @@ export interface AudioStore {
   progress: number;
   duration: number;
   favorites: string[];
+  /** Explicit phase of the playback state machine. Consumers that need
+   *  more detail than isLoading/isPlaying can inspect this. */
+  playbackPhase: PlaybackPhase;
 
   loadSong: (song: Song, playlist: Song[], index: number, preserveShuffle?: boolean) => void;
   retry: () => void;
@@ -141,7 +206,7 @@ function saveVolume(vol: number) {
  * their local blob, stale blob: URLs are dropped, online songs pass through.
  */
 function resolveDownloadUrl(song: Song): Song {
-  return resolvePlayableSong(song);
+  return ensureYouTubeArtwork(resolvePlayableSong(song));
 }
 
 /**
@@ -160,22 +225,22 @@ function resolveQueueDownloads(queue: Song[]): Song[] {
     const cached = resolvedMap.get(key);
     if (cached) {
       resolved = true;
-      return { ...song, audioUrl: cached };
+      return ensureYouTubeArtwork({ ...song, audioUrl: cached });
     }
     // getBlobUrl() creates the ObjectURL on-demand from IndexedDB blob data
     const blobUrl = downloadsStore.getBlobUrl(key);
     if (blobUrl) {
       resolvedMap.set(key, blobUrl);
       resolved = true;
-      return { ...song, audioUrl: blobUrl };
+      return ensureYouTubeArtwork({ ...song, audioUrl: blobUrl });
     }
     // Stale blob: URL with no backing download — drop it (see resolvePlayableSong).
     const stripped = stripStaleBlobUrl(song);
     if (stripped !== song) {
       resolved = true;
-      return stripped;
+      return ensureYouTubeArtwork(stripped);
     }
-    return song;
+    return ensureYouTubeArtwork(song);
   });
   return resolved ? result : queue;
 }
@@ -341,7 +406,7 @@ function initAudioServiceHandler() {
           // (an old track) must never rewrite the current track's state.
           if (data?.playbackId != null && data.playbackId !== audioService.getCurrentPlaybackId()) break;
           clearNextSongRetry();
-          clearPlayCeiling();
+          clearAllPlaybackTimers();
           if (data?.song) {
             consecutivePlayFailures = 0;
           }
@@ -349,6 +414,7 @@ function initAudioServiceHandler() {
           useAudioStore.setState({
             isPlaying: true,
             isLoading: false,
+            playbackPhase: 'playing',
             currentSong: newSong,
             duration: audioService.getDuration(),
             error: null,
@@ -382,18 +448,18 @@ function initAudioServiceHandler() {
         }
         case 'playing': {
           clearNextSongRetry();
-          clearPlayCeiling();
+          clearAllPlaybackTimers();
           consecutivePlayFailures = 0;
-          useAudioStore.setState({ isPlaying: true, isLoading: false });
+          useAudioStore.setState({ isPlaying: true, isLoading: false, playbackPhase: 'playing' });
           break;
         }
         case 'pause':
-          clearLoadingTimeout();
-          clearPlayCeiling();
-          useAudioStore.setState({ isPlaying: false, isLoading: false });
+          clearAllPlaybackTimers();
+          useAudioStore.setState({ isPlaying: false, isLoading: false, playbackPhase: 'paused' });
           try { mediaSessionService.updatePlaybackState(false, audioService.getCurrentTime(), audioService.getDuration()); } catch {}
           break;
         case 'ended': {
+          clearAllPlaybackTimers();
           // Each playback session's 'ended' is consumed EXACTLY once — an
           // ended track can never trigger two next-transitions, and an old
           // track ending after a newer one started is ignored entirely.
@@ -425,9 +491,8 @@ function initAudioServiceHandler() {
               const idx = useQueueStore.getState().currentIndex;
               audioService.play(currentSong, queue, idx).catch((err) => {
                 logger.error('[AudioStore] repeat-one play() failed:', err);
-                clearLoadingTimeout();
-                clearPlayCeiling();
-                useAudioStore.setState({ isLoading: false, isPlaying: false, error: 'Playback failed' });
+                clearAllPlaybackTimers();
+                useAudioStore.setState({ isLoading: false, isPlaying: false, playbackPhase: 'error', error: 'Playback failed' });
                 autoSkipNextSong();
               });
             }
@@ -481,28 +546,34 @@ function initAudioServiceHandler() {
         }
         case 'error':
           logger.error('[AudioStore] Playback error:', data);
-          clearLoadingTimeout();
-          clearPlayCeiling();
+          clearAllPlaybackTimers();
           useAudioStore.setState({
             error: typeof data === 'string' ? data : 'Playback error',
             isLoading: false,
             // Playback has failed — never leave the UI showing a fake PLAYING
             // state. The 'play'/'playing' events will restore it on recovery.
             isPlaying: false,
+            playbackPhase: 'error',
           });
           break;
-        case 'waiting':
-          // Only set isLoading — do NOT restart the loading timeout here.
-          // The loading timeout fires exactly once per play command (set in
-          // loadSong/retry/chainQueueTransition). Resetting it on every
-          // 'waiting' event (which the audio element fires repeatedly while
-          // buffering) caused the timeout to never fire, leaving the spinner
-          // stuck forever on broken streams.
-          useAudioStore.setState({ isLoading: true });
+        case 'waiting': {
+          // Set isLoading and start the buffering timeout, but do NOT restart
+          // either the loading timeout or the buffering timeout on repeated
+          // 'waiting' events. The buffering timeout fires exactly once from
+          // the FIRST stall event — this is the critical fix that prevents
+          // the permanent spinner: the old code restarted timers on every
+          // waiting event, pushing the fire time forward indefinitely.
+          useAudioStore.setState({ isLoading: true, playbackPhase: 'buffering' });
+          startBufferingTimeout();
           break;
+        }
         case 'canplay':
           clearLoadingTimeout();
-          useAudioStore.setState({ isLoading: false });
+          clearBufferingTimeout();
+          // canplay means the audio element has enough data to start, but
+          // playback hasn't begun yet. Transition to buffering so the UI
+          // knows we're past source resolution and waiting for play().
+          useAudioStore.setState({ isLoading: false, playbackPhase: 'buffering' });
           break;
       }
     });
@@ -692,14 +763,15 @@ function maybeSmartReplaceThenSkip(): void {
       if (seq !== commandSeq) return; // superseded by a user command
       if (result.status === 'replaced' && result.replacement) {
         const qs = useQueueStore.getState();
-        const resolvedQueue = resolveQueueDownloads(qs.queue);          clearLoadingTimeout();
-          clearPlayCeiling();
+        const resolvedQueue = resolveQueueDownloads(qs.queue);
+        clearAllPlaybackTimers();
         // Same queue slot — only the stream source changed; title/artist/
         // album are preserved by the replacement service.
         useAudioStore.setState({
           currentSong: result.replacement,
           progress: 0,
           isLoading: true,
+          playbackPhase: 'loading',
           error: null,
         });
         startLoadingTimeout();
@@ -709,8 +781,8 @@ function maybeSmartReplaceThenSkip(): void {
           if (seq !== commandSeq) return; // superseded by a newer command
           const msg = err instanceof Error ? err.message : 'Playback failed';
           logger.error('[AudioStore] smart-replace play() failed:', msg);
-          clearLoadingTimeout();
-          useAudioStore.setState({ error: msg, isLoading: false, isPlaying: false });
+          clearAllPlaybackTimers();
+          useAudioStore.setState({ error: msg, isLoading: false, isPlaying: false, playbackPhase: 'error' });
           autoSkipNextSong();
         });
         return;
@@ -797,18 +869,19 @@ function chainQueueTransition(opts: {
           currentSong: resolved,
           progress: 0,
           isLoading: true,
+          playbackPhase: 'loading',
           duration: resolved.duration,
           error: null,
         });
+        clearAllPlaybackTimers();
         startLoadingTimeout();
         startPlayCeiling();
         audioService.play(resolved, resolvedQueue, qs.currentIndex).catch(err => {
           if (seq !== commandSeq) return; // superseded by a newer command
           const msg = err instanceof Error ? err.message : 'Playback failed';
           logger.error(`[AudioStore] ${label} play() failed:`, msg);
-          clearLoadingTimeout();
-          clearPlayCeiling();
-          useAudioStore.setState({ error: msg, isLoading: false, isPlaying: false });
+          clearAllPlaybackTimers();
+          useAudioStore.setState({ error: msg, isLoading: false, isPlaying: false, playbackPhase: 'error' });
           autoSkipNextSong();
         });
       } else {
@@ -906,18 +979,19 @@ async function runCrossfade(target: Song, session: number, fade: number): Promis
           currentSong: resolved,
           progress: 0,
           isLoading: true,
+          playbackPhase: 'loading',
           duration: resolved.duration,
           error: null,
         });
+        clearAllPlaybackTimers();
         startLoadingTimeout();
         startPlayCeiling();
         audioService.play(resolved, resolveQueueDownloads(queueState.queue), queueState.currentIndex).catch(err => {
           if (seq !== commandSeq) return;
           const msg = err instanceof Error ? err.message : 'Playback failed';
           logger.error('[AudioStore] crossfade fallback play() failed:', msg);
-          clearLoadingTimeout();
-          clearPlayCeiling();
-          useAudioStore.setState({ error: msg, isLoading: false, isPlaying: false });
+          clearAllPlaybackTimers();
+          useAudioStore.setState({ error: msg, isLoading: false, isPlaying: false, playbackPhase: 'error' });
           autoSkipNextSong();
         });
         return;
@@ -938,6 +1012,7 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
   progress: 0,
   duration: 0,
   favorites: [],
+  playbackPhase: 'idle',
 
   loadSong: (song: Song, playlist: Song[], index: number, preserveShuffle = false) => {
     clearNextSongRetry();
@@ -946,9 +1021,8 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
     // error — never a crash, a broken queue item, or a fake PLAYING state.
     if (!song || typeof song.id !== 'string' || !song.id.trim()) {
       logger.error('[AudioStore] loadSong rejected a track with no playable id:', song);
-      clearLoadingTimeout();
-      clearPlayCeiling();
-      set({ error: 'This track cannot be played — it has no playable id', isLoading: false, isPlaying: false });
+      clearAllPlaybackTimers();
+      set({ error: 'This track cannot be played — it has no playable id', isLoading: false, isPlaying: false, playbackPhase: 'error' });
       return;
     }
 
@@ -1000,10 +1074,12 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
     set({
       currentSong: resolvedSong,
       isLoading: true,
+      playbackPhase: 'loading',
       error: null,
       duration: Number.isFinite(resolvedSong.duration) ? resolvedSong.duration : 0,
       progress: 0,
     });
+    clearAllPlaybackTimers();
     startLoadingTimeout();
     startPlayCeiling();
     
@@ -1011,9 +1087,8 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
       if (seq !== commandSeq) return; // a newer command owns the player now
       const msg = err instanceof Error ? err.message : 'Playback failed';
       logger.error('[AudioStore] loadSong play() failed:', msg);
-      clearLoadingTimeout();
-      clearPlayCeiling();
-      set({ error: msg, isLoading: false, isPlaying: false });
+      clearAllPlaybackTimers();
+      set({ error: msg, isLoading: false, isPlaying: false, playbackPhase: 'error' });
       // A REJECTED play() never emits 'ended', so the bounded auto-skip must
       // happen here — otherwise the queue stalls on the failed track.
       autoSkipNextSong();
@@ -1032,16 +1107,17 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
     const resolvedQueue = resolveQueueDownloads(queue);
     const song = resolvedQueue[index] || resolveDownloadUrl(currentSong);
     if (!song) return;
-    set({ currentSong: song, isLoading: true, error: null, progress: 0 });
+    set({ currentSong: song, isLoading: true, playbackPhase: 'loading', error: null, progress: 0 });
+    clearAllPlaybackTimers();
     startLoadingTimeout();
     startPlayCeiling();
     audioService.pause();
     audioService.play(song, resolvedQueue, index).catch(err => {
       if (seq !== commandSeq) return; // superseded by a newer command
       const msg = err instanceof Error ? err.message : 'Playback failed';
-      logger.error('[AudioStore] retry play() failed:', msg);      clearLoadingTimeout();
-      clearPlayCeiling();
-      set({ error: msg, isLoading: false, isPlaying: false });
+      logger.error('[AudioStore] retry play() failed:', msg);
+      clearAllPlaybackTimers();
+      set({ error: msg, isLoading: false, isPlaying: false, playbackPhase: 'error' });
       autoSkipNextSong();
     });
   },
@@ -1059,16 +1135,16 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
       const resolvedQueue = resolveQueueDownloads(queue);
       const resumeAt = pendingResumePosition;
       pendingResumePosition = null;
-      set({ isLoading: true, error: null });
+      set({ isLoading: true, playbackPhase: 'loading', error: null });
+      clearAllPlaybackTimers();
       startLoadingTimeout();
       startPlayCeiling();
       audioService.play(resolvedQueue[qs.currentIndex] || currentSong, resolvedQueue, qs.currentIndex, resumeAt ?? undefined).catch(err => {
         if (seq !== commandSeq) return; // superseded by a newer command
         const msg = err instanceof Error ? err.message : 'Playback failed';
         logger.error('[AudioStore] play() restore failed:', msg);
-        clearLoadingTimeout();
-        clearPlayCeiling();
-        set({ error: msg, isLoading: false, isPlaying: false });
+        clearAllPlaybackTimers();
+        set({ error: msg, isLoading: false, isPlaying: false, playbackPhase: 'error' });
         autoSkipNextSong();
       });
       return;
@@ -1102,9 +1178,8 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
     onNoSong: () => {
       // End of queue — stop playback and flush the media session state.
       clearNextSongRetry();
-      clearLoadingTimeout();
-      clearPlayCeiling();
-      useAudioStore.setState({ isPlaying: false, progress: 0, isLoading: false });
+      clearAllPlaybackTimers();
+      useAudioStore.setState({ isPlaying: false, progress: 0, isLoading: false, playbackPhase: 'ended' });
       syncMediaSessionEnded();
     },
   }),
@@ -1116,8 +1191,7 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
     label: 'previousSong',
     onNoSong: () => {
       // Queue boundary — just clear the loading flag; playback keeps going.
-      clearLoadingTimeout();
-      clearPlayCeiling();
+      clearAllPlaybackTimers();
       useAudioStore.setState({ isLoading: false });
     },
   }),
@@ -1190,6 +1264,7 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
       progress: resumeAt ?? 0,
       isPlaying: false,
       isLoading: false,
+      playbackPhase: 'paused',
       error: null,
     });
 
@@ -1256,6 +1331,7 @@ if (import.meta.env.DEV) {
       const changes: string[] = [];
       if (state.isPlaying !== prev.isPlaying) changes.push(`isPlaying: ${prev.isPlaying} → ${state.isPlaying}`);
       if (state.isLoading !== prev.isLoading) changes.push(`isLoading: ${prev.isLoading} → ${state.isLoading}`);
+      if (state.playbackPhase !== prev.playbackPhase) changes.push(`phase: ${prev.playbackPhase} → ${state.playbackPhase}`);
       if (state.error !== prev.error) changes.push(`error: ${state.error || 'null'}`);
       if (state.currentSong?.id !== prev.currentSong?.id) changes.push(`song: ${prev.currentSong?.title || 'none'} → ${state.currentSong?.title || 'none'}`);
       if (changes.length > 0) {

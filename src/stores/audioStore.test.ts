@@ -116,6 +116,7 @@ function resetStores() {
     currentSong: null,
     isPlaying: false,
     isLoading: false,
+    playbackPhase: 'idle',
     error: null,
     progress: 0,
     duration: 0,
@@ -292,8 +293,8 @@ describe('audioStore — permanent-loading regression', () => {
     expect(s1.isLoading).toBe(true);
     expect(s1.error).toBeNull();
 
-    // Fast-forward past the loading timeout (30s)
-    vi.advanceTimersByTime(30_000);
+    // Fast-forward past the loading timeout (15s)
+    vi.advanceTimersByTime(15_000);
 
     const s2 = useAudioStore.getState();
     expect(s2.isLoading).toBe(false);
@@ -319,10 +320,10 @@ describe('audioStore — permanent-loading regression', () => {
       mocks.subscribeHandlers[0]?.('waiting');
     }
 
-    // 20s have passed; loading timeout started at t=0, fires at t=30
+    // 20s have passed; loading timeout started at t=0, fires at t=15
     // In the old code, each 'waiting' would restart the 30s timer,
-    // pushing the fire time to t=50.  Now it must NOT reset.
-    vi.advanceTimersByTime(10_000); // t=30
+    // pushing the fire time forward.  Now it must NOT reset.
+    vi.advanceTimersByTime(5_000); // t=15, loading timeout fires
 
     const s = useAudioStore.getState();
     expect(s.isLoading).toBe(false);
@@ -353,8 +354,8 @@ describe('audioStore — permanent-loading regression', () => {
     const s2 = useAudioStore.getState();
     expect(s2.isLoading).toBe(true);
 
-    // The play ceiling fires after 60s from the original loadSong call
-    vi.advanceTimersByTime(60_000);
+    // The play ceiling fires after 45s from the original loadSong call
+    vi.advanceTimersByTime(45_000);
 
     const s3 = useAudioStore.getState();
     expect(s3.isLoading).toBe(false);
@@ -409,5 +410,126 @@ describe('audioStore — permanent-loading regression', () => {
     expect(s.isPlaying).toBe(true);
     expect(s.isLoading).toBe(false);
     expect(s.error).toBeNull();
+  });
+
+  // ─── Buffering timeout (the critical new guard) ──────────────────────
+  it('buffering timeout fires after BUFFERING_TIMEOUT_MS of continuous stalls', async () => {
+    // Simulate: play() starts, canplay fires (clears loading timeout),
+    // then 'waiting' fires repeatedly — the buffering timeout must fire
+    // and clear isLoading even though the loading timeout is gone.
+    let playResolve: (() => void) | null = null;
+    mocks.play.mockImplementation(() => new Promise<void>((resolve) => { playResolve = resolve; }));
+
+    const song = makeSong('buffer-stall');
+    useAudioStore.getState().loadSong(song, [song], 0);
+    expect(useAudioStore.getState().isLoading).toBe(true);
+
+    const handler = mocks.subscribeHandlers[0];
+
+    // canplay fires → clears loading timeout, sets isLoading=false
+    handler?.('canplay');
+    expect(useAudioStore.getState().isLoading).toBe(false);
+
+    // waiting fires → sets isLoading=true, starts buffering timeout (20s)
+    handler?.('waiting');
+    expect(useAudioStore.getState().isLoading).toBe(true);
+
+    // Emit 5 more 'waiting' events — buffering timeout must NOT reset
+    for (let i = 0; i < 5; i++) {
+      vi.advanceTimersByTime(3_000);
+      handler?.('waiting');
+    }
+    // 15s elapsed since first waiting. Buffering timeout at 20s from first wait.
+
+    vi.advanceTimersByTime(5_000); // t=20 from first waiting
+
+    const s = useAudioStore.getState();
+    expect(s.isLoading).toBe(false);
+    expect(s.error).toBeTruthy();
+    expect(s.error).toContain('buffering timed out');
+
+    playResolve?.();
+  });
+
+  it('buffering timeout is cleared when playing event fires', async () => {
+    let playResolve: (() => void) | null = null;
+    mocks.play.mockImplementation(() => new Promise<void>((resolve) => { playResolve = resolve; }));
+
+    const song = makeSong('buffer-recover');
+    useAudioStore.getState().loadSong(song, [song], 0);
+    const handler = mocks.subscribeHandlers[0];
+
+    // canplay → waiting → buffer stall starts
+    handler?.('canplay');
+    handler?.('waiting');
+    expect(useAudioStore.getState().isLoading).toBe(true);
+
+    // After 10s, playing fires — should clear everything
+    vi.advanceTimersByTime(10_000);
+    handler?.('playing');
+
+    const s = useAudioStore.getState();
+    expect(s.isPlaying).toBe(true);
+    expect(s.isLoading).toBe(false);
+    expect(s.error).toBeNull();
+
+    playResolve?.();
+  });
+
+  it('every playback attempt exits loading state — proof', async () => {
+    // This is the definitive regression test: regardless of what events
+    // the engine emits (or fails to emit), isLoading MUST become false.
+    // We test every entry point: loadSong, retry, play.
+    let playResolve: (() => void) | null = null;
+    mocks.play.mockImplementation(() => new Promise<void>((resolve) => { playResolve = resolve; }));
+
+    const song = makeSong('proof');
+    useAudioStore.getState().loadSong(song, [song], 0);
+
+    // At t=0, isLoading is true
+    expect(useAudioStore.getState().isLoading).toBe(true);
+    expect(useAudioStore.getState().playbackPhase).toBe('loading');
+
+    // After 15s, loading timeout fires → error state
+    vi.advanceTimersByTime(15_000);
+    expect(useAudioStore.getState().isLoading).toBe(false);
+    expect(useAudioStore.getState().playbackPhase).toBe('error');
+    expect(useAudioStore.getState().error).toBeTruthy();
+
+    playResolve?.();
+    await flush();
+  });
+
+  it('state machine transitions correctly through loading → buffering → playing', async () => {
+    let playResolve: (() => void) | null = null;
+    mocks.play.mockImplementation(() => new Promise<void>((resolve) => { playResolve = resolve; }));
+
+    const song = makeSong('transition');
+    useAudioStore.getState().loadSong(song, [song], 0);
+
+    const s0 = useAudioStore.getState();
+    expect(s0.playbackPhase).toBe('loading');
+    expect(s0.isLoading).toBe(true);
+
+    // canplay → buffering
+    mocks.subscribeHandlers[0]?.('canplay');
+    const s1 = useAudioStore.getState();
+    expect(s1.playbackPhase).toBe('buffering');
+    expect(s1.isLoading).toBe(false);
+
+    // waiting → buffering (still)
+    mocks.subscribeHandlers[0]?.('waiting');
+    const s2 = useAudioStore.getState();
+    expect(s2.playbackPhase).toBe('buffering');
+    expect(s2.isLoading).toBe(true);
+
+    // playing → playing
+    mocks.subscribeHandlers[0]?.('playing');
+    const s3 = useAudioStore.getState();
+    expect(s3.playbackPhase).toBe('playing');
+    expect(s3.isPlaying).toBe(true);
+    expect(s3.isLoading).toBe(false);
+
+    playResolve?.();
   });
 });

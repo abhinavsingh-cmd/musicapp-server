@@ -140,6 +140,23 @@ export function resolvePlayableSong(song: Song): Song {
   return stripStaleBlobUrl(song);
 }
 
+const YT_ID_RE = /^[a-zA-Z0-9_-]{11}$/;
+
+/**
+ * Ensure a song has artwork. When `coverArt` is empty but a `youtubeId`
+ * exists, a YouTube thumbnail URL is generated as a fallback. This covers
+ * trending/search songs that carry a video id but whose server response
+ * omitted the thumbnail field — without this guard the UI shows a generic
+ * music icon.
+ */
+export function ensureYouTubeArtwork(song: Song): Song {
+  if (song.coverArt) return song;
+  if (song.youtubeId && YT_ID_RE.test(song.youtubeId)) {
+    return { ...song, coverArt: `https://img.youtube.com/vi/${song.youtubeId}/mqdefault.jpg` };
+  }
+  return song;
+}
+
 /** Full unified view of a song, merging live download state. */
 export function toMusicSource(song: Song): MusicSource {
   const local = localPlayableUri(song);

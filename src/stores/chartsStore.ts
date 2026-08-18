@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { trendingService, TrendingResult, TrendingSourceLabel } from '../services/trendingService';
 import { Song } from '../types/music';
+import { ensureYouTubeArtwork } from '../services/musicSource';
 
 export interface ChartSong {
   id: string;
@@ -54,15 +55,16 @@ function isValidChartSong(song: unknown): song is Song {
 }
 
 function toChartSong(song: Song, rank: number): ChartSong {
+  const artSong = ensureYouTubeArtwork(song);
   return {
-    id: song.id,
-    title: song.title || 'Unknown',
-    artist: song.artist || 'Unknown',
-    thumbnail: song.coverArt || '',
+    id: artSong.id,
+    title: artSong.title || 'Unknown',
+    artist: artSong.artist || 'Unknown',
+    thumbnail: artSong.coverArt || '',
     rank: rank + 1,
     trend: rank < 3 ? 'up' : rank < 10 ? 'same' : 'down',
-    youtubeId: song.youtubeId || song.id,
-    duration: song.duration || 0,
+    youtubeId: artSong.youtubeId || artSong.id,
+    duration: artSong.duration || 0,
     viewCount: 0,
   };
 }

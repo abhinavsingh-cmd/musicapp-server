@@ -523,7 +523,11 @@ export class AudioService {
       // Must await so the service is guaranteed running before audio starts.
       if (isNativePlatform()) {
         try {
-          const result = await backgroundAudio.startService({ title: song.title, artist: song.artist });
+          const result = await withTimeout(
+            backgroundAudio.startService({ title: song.title, artist: song.artist }),
+            10_000,
+            'startService',
+          );
           log('Foreground service started:', result);
         } catch (err) {
           logError('Failed to start foreground service:', err);
