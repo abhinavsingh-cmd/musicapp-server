@@ -50,7 +50,7 @@ registerLocalCopyResolver((track) => {
 export type PlaybackPhase = 'idle' | 'loading' | 'buffering' | 'playing' | 'paused' | 'ended' | 'error';
 
 /** Maximum time the initial source-resolution + audio-setup phase may take. */
-const LOADING_TIMEOUT_MS = 15_000;
+const LOADING_TIMEOUT_MS = 30_000;
 /**
  * Maximum time the audio element may spend buffering after canplay.
  * Covers: stalled proxy URLs, throttled CDN, broken seeking.
@@ -63,7 +63,7 @@ const BUFFERING_TIMEOUT_MS = 20_000;
 // Every other timeout is reset/cleared by event handlers; this ceiling is
 // *never* reset once started — it fires once and guarantees the UI is
 // never stuck showing a spinner when the audio engine is deadlocked.
-const PLAY_CEILING_MS = 45_000;
+const PLAY_CEILING_MS = 60_000;
 
 let loadingTimeoutId: ReturnType<typeof setTimeout> | null = null;
 let playCeilingId: ReturnType<typeof setTimeout> | null = null;

@@ -293,8 +293,8 @@ describe('audioStore — permanent-loading regression', () => {
     expect(s1.isLoading).toBe(true);
     expect(s1.error).toBeNull();
 
-    // Fast-forward past the loading timeout (15s)
-    vi.advanceTimersByTime(15_000);
+    // Fast-forward past the loading timeout (30s)
+    vi.advanceTimersByTime(30_000);
 
     const s2 = useAudioStore.getState();
     expect(s2.isLoading).toBe(false);
@@ -320,10 +320,10 @@ describe('audioStore — permanent-loading regression', () => {
       mocks.subscribeHandlers[0]?.('waiting');
     }
 
-    // 20s have passed; loading timeout started at t=0, fires at t=15
+    // 20s have passed; loading timeout started at t=0, fires at t=30
     // In the old code, each 'waiting' would restart the 30s timer,
     // pushing the fire time forward.  Now it must NOT reset.
-    vi.advanceTimersByTime(5_000); // t=15, loading timeout fires
+    vi.advanceTimersByTime(10_000); // t=30, loading timeout fires
 
     const s = useAudioStore.getState();
     expect(s.isLoading).toBe(false);
@@ -354,8 +354,8 @@ describe('audioStore — permanent-loading regression', () => {
     const s2 = useAudioStore.getState();
     expect(s2.isLoading).toBe(true);
 
-    // The play ceiling fires after 45s from the original loadSong call
-    vi.advanceTimersByTime(45_000);
+    // The play ceiling fires after 60s from the original loadSong call
+    vi.advanceTimersByTime(60_000);
 
     const s3 = useAudioStore.getState();
     expect(s3.isLoading).toBe(false);
@@ -490,8 +490,8 @@ describe('audioStore — permanent-loading regression', () => {
     expect(useAudioStore.getState().isLoading).toBe(true);
     expect(useAudioStore.getState().playbackPhase).toBe('loading');
 
-    // After 15s, loading timeout fires → error state
-    vi.advanceTimersByTime(15_000);
+    // After 30s, loading timeout fires → error state
+    vi.advanceTimersByTime(30_000);
     expect(useAudioStore.getState().isLoading).toBe(false);
     expect(useAudioStore.getState().playbackPhase).toBe('error');
     expect(useAudioStore.getState().error).toBeTruthy();
