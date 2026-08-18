@@ -255,3 +255,159 @@ describe('audioStore.loadSong — song click safety', () => {
     expect(s.error).toBe('Playback error');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Regression: permanent-loading scenarios.
+//
+// Every play attempt MUST exit the loading state. These tests prove it by
+// simulating the exact sequences that previously caused a permanent spinner:
+//
+//   1. Stream resolution hangs → loading timeout must still fire
+//   2. 'waiting' events must NOT reset the loading timeout
+//   3. Play ceiling must force-clear isLoading even if the engine is deadlocked
+// ---------------------------------------------------------------------------
+describe('audioStore — permanent-loading regression', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    mocks.play.mockClear();
+    mocks.play.mockImplementation(() => Promise.resolve());
+    mocks.pause.mockClear();
+    mocks.isLoaded.mockReturnValue(false);
+    resetStores();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('loading timeout fires and clears isLoading even when play() is pending', async () => {
+    // Simulate: play() starts but never resolves (stream resolution hung)
+    let playResolve: (() => void) | null = null;
+    mocks.play.mockImplementation(() => new Promise<void>((resolve) => { playResolve = resolve; }));
+
+    const song = makeSong('hang');
+    useAudioStore.getState().loadSong(song, [song], 0);
+
+    const s1 = useAudioStore.getState();
+    expect(s1.isLoading).toBe(true);
+    expect(s1.error).toBeNull();
+
+    // Fast-forward past the loading timeout (30s)
+    vi.advanceTimersByTime(30_000);
+
+    const s2 = useAudioStore.getState();
+    expect(s2.isLoading).toBe(false);
+    expect(s2.error).toBeTruthy();
+    expect(s2.error).toContain('timed out');
+
+    // Clean up: resolve the hanging play so it doesn't leak
+    playResolve?.();
+  });
+
+  it('"waiting" events do NOT reset the loading timeout', async () => {
+    // Simulate: play() starts, audio fires 'waiting' repeatedly
+    let playResolve: (() => void) | null = null;
+    mocks.play.mockImplementation(() => new Promise<void>((resolve) => { playResolve = resolve; }));
+
+    const song = makeSong('waiting-loop');
+    useAudioStore.getState().loadSong(song, [song], 0);
+    expect(useAudioStore.getState().isLoading).toBe(true);
+
+    // Emit 10 'waiting' events spaced 2s apart (20s total)
+    for (let i = 0; i < 10; i++) {
+      vi.advanceTimersByTime(2_000);
+      mocks.subscribeHandlers[0]?.('waiting');
+    }
+
+    // 20s have passed; loading timeout started at t=0, fires at t=30
+    // In the old code, each 'waiting' would restart the 30s timer,
+    // pushing the fire time to t=50.  Now it must NOT reset.
+    vi.advanceTimersByTime(10_000); // t=30
+
+    const s = useAudioStore.getState();
+    expect(s.isLoading).toBe(false);
+    expect(s.error).toBeTruthy();
+    expect(s.error).toContain('timed out');
+
+    playResolve?.();
+  });
+
+  it('play ceiling fires and clears isLoading after PLAY_CEILING_MS', async () => {
+    // Simulate: play() hangs AND the loading timeout was already consumed
+    let playResolve: (() => void) | null = null;
+    mocks.play.mockImplementation(() => new Promise<void>((resolve) => { playResolve = resolve; }));
+
+    const song = makeSong('ceiling');
+    useAudioStore.getState().loadSong(song, [song], 0);
+
+    // Clear the regular loading timeout (simulate canplay clearing it)
+    const handler = mocks.subscribeHandlers[0];
+    handler?.('canplay');
+
+    const s1 = useAudioStore.getState();
+    expect(s1.isLoading).toBe(false); // canplay cleared it
+    expect(s1.error).toBeNull();
+
+    // The 'waiting' event re-sets isLoading (which is correct)
+    handler?.('waiting');
+    const s2 = useAudioStore.getState();
+    expect(s2.isLoading).toBe(true);
+
+    // The play ceiling fires after 60s from the original loadSong call
+    vi.advanceTimersByTime(60_000);
+
+    const s3 = useAudioStore.getState();
+    expect(s3.isLoading).toBe(false);
+    expect(s3.error).toBeTruthy();
+    expect(s3.error).toContain('timed out');
+
+    playResolve?.();
+  });
+
+  it('loading state is cleared when play() rejects', async () => {
+    mocks.play.mockImplementation(() => Promise.reject(new Error('Stream failed')));
+    const song = makeSong('reject');
+    useAudioStore.getState().loadSong(song, [song], 0);
+    await flush();
+
+    const s = useAudioStore.getState();
+    expect(s.isLoading).toBe(false);
+    expect(s.isPlaying).toBe(false);
+    expect(s.error).toBeTruthy();
+  });
+
+  it('rapid song clicks never leave isLoading stuck on a stale track', async () => {
+    let resolve1: (() => void) | null = null;
+    let resolve2: (() => void) | null = null;
+    let callCount = 0;
+
+    mocks.play.mockImplementation(() => {
+      callCount++;
+      if (callCount === 1) return new Promise<void>((r) => { resolve1 = r; });
+      return new Promise<void>((r) => { resolve2 = r; });
+    });
+
+    const s1 = makeSong('fast1');
+    const s2 = makeSong('fast2');
+
+    useAudioStore.getState().loadSong(s1, [s1], 0);
+    expect(useAudioStore.getState().isLoading).toBe(true);
+
+    // Second click supersedes the first
+    useAudioStore.getState().loadSong(s2, [s2], 0);
+    expect(useAudioStore.getState().currentSong?.id).toBe('fast2');
+
+    // Resolve both hanging plays
+    resolve1?.();
+    resolve2?.();
+    await flush();
+
+    // Simulate the engine emitting 'playing' which clears isLoading
+    mocks.subscribeHandlers[0]?.('playing');
+
+    const s = useAudioStore.getState();
+    expect(s.isPlaying).toBe(true);
+    expect(s.isLoading).toBe(false);
+    expect(s.error).toBeNull();
+  });
+});
