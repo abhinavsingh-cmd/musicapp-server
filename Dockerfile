@@ -48,4 +48,8 @@ EXPOSE 3001
 ENV DENO_INSTALL="/root/.deno"
 ENV PATH="$DENO_INSTALL/bin:$PATH"
 
+# Configure yt-dlp to fetch EJS challenge solver components from GitHub
+# (needed for YouTube n-parameter/signature solving from datacenter IPs).
+RUN mkdir -p /root/.config/yt-dlp && echo '--remote-components ejs:github' > /root/.config/yt-dlp/config
+
 CMD ["sh", "-c", "node /opt/bgutil-pot/server/build/main.js > /tmp/bgutil-pot.log 2>&1 & /usr/local/bin/wireproxy -c /root/wgcf-profile.conf > /tmp/wireproxy.log 2>&1 & sleep 3 && exec node server.cjs"]

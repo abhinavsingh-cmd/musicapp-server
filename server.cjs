@@ -36,6 +36,7 @@ const YT_EXTRACTOR_ARGS = [
   "--extractor-args",
   "youtube:player_client=tv_downgraded,web_embedded,android_vr;player_skip=webpage",
   "--force-ipv4",
+  "--remote-components", "ejs:github",
 ];
 const YT_COOKIES_ARGS = (() => {
   try { return fs.existsSync("/app/cookies.txt") ? ["--cookies", "/app/cookies.txt"] : []; }
