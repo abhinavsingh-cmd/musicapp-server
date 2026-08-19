@@ -61,10 +61,6 @@ export function useVirtualList(
 
     const compute = () => {
       const parent = findScrollParent(el);
-      // The scroller's viewport top edge in window coords. For the root
-      // scroller (document/body) the viewport is anchored at 0 and its own
-      // rect moves with scroll; for a nested scroller the box is fixed and
-      // only the content moves — the rect difference handles both.
       const parentRect = parent.getBoundingClientRect();
       const viewportTop = parent === document.documentElement || parent === document.body ? 0 : parentRect.top;
       const visibleStart = viewportTop - el.getBoundingClientRect().top;
@@ -79,12 +75,8 @@ export function useVirtualList(
     };
 
     compute();
-    // Scroll events don't bubble — a capture-phase window listener catches
-    // the page's inner scroller (MainContent's overflow-y-auto div).
     window.addEventListener('scroll', compute, { capture: true, passive: true });
     window.addEventListener('resize', compute);
-    // ResizeObserver is absent in jsdom (and some very old WebViews) — the
-    // scroll/resize listeners still keep the window fresh there.
     let ro: ResizeObserver | null = null;
     if (typeof ResizeObserver !== 'undefined') {
       ro = new ResizeObserver(compute);

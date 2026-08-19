@@ -647,9 +647,11 @@ export async function getCachedImageUrl(url: string): Promise<string> {
     return getThumbnailObjectUrl({ url, blob, cachedAt: Date.now() });
   } catch {
     return url;
-  } finally {
-    db.close();
   }
+  // Intentionally do NOT close the DB here — getCachedImageUrl is called
+  // for every visible row's image, and open/close per image thrashes the
+  // IndexedDB driver on low-end Android WebViews. The connection is reused
+  // for subsequent calls and garbage-collected when the page unloads.
 }
 
 // ---------------------------------------------------------------------------

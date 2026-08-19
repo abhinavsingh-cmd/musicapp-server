@@ -127,8 +127,6 @@ export const SongTable: React.FC<SongTableProps> = memo(({ songs, className }) =
   const downloadsMap = useMemo(() => {
     const m = new Map<string, string>();
     for (const d of downloads) {
-      // Canonical key derivation — downloaded LIBRARY songs (no youtubeId)
-      // are indexed exactly like YouTube songs, so both play locally.
       m.set(downloadKey(d), d.audioUrl);
     }
     return m;
