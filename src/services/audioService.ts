@@ -751,7 +751,11 @@ export class AudioService {
   ): Promise<void> {
     const MAX_RETRIES = 3;
     // Proxy/extracted URLs need more time to start streaming than local files
-    const CANPLAY_TIMEOUT_MS = (initialParams.src.includes('/proxy-audio') || initialParams.src.includes('/stream/')) ? 10_000 : 8_000;
+    // /stream/ and /proxy-audio/ endpoints run yt-dlp server-side — first
+    // play can take 20-25s on a cold start. The HTML engine must wait long
+    // enough for the server to respond; the native engine doesn't use this
+    // timer, but the fallback path does.
+    const CANPLAY_TIMEOUT_MS = initialParams.src.includes('/stream/') || initialParams.src.includes('/proxy-audio') ? 30_000 : 8_000;
 
     // Single ownership chokepoint: whatever engine owned the previous track
     // is released before this one claims playback.

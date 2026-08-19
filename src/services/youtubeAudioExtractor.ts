@@ -20,12 +20,7 @@ import { logger } from '../utils/logger';
 
 const INVIDIOUS_INSTANCES: string[] = [];
 
-// yt-dlp extraction on the server routinely takes longer than 4s — Render
-// cold starts alone can stall the first request for many seconds. A too-tight
-// timeout aborts every attempt, extraction "fails", and playback silently
-// falls back to the YouTube IFrame engine — which dies the moment the app is
-// backgrounded (the exact "stops when backgrounded" symptom on Android).
-const SERVER_TIMEOUT_MS = 15_000;
+
 const INVIDIOUS_TIMEOUT_MS = 3_000;
 
 // Bounded retry policy — extraction NEVER retries infinitely:
@@ -60,10 +55,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
 }
 
-/** 429/5xx are worth another attempt; other HTTP errors are definitive. */
-function isTransientStatus(status: number): boolean {
-  return status === 429 || status >= 500;
-}
+
 
 interface InvidiousFormat {
   type: string;
@@ -165,87 +157,54 @@ export async function extractAudioUrl(youtubeId: string): Promise<string | null>
 }
 
 /**
- * Fetch audio URL from server's yt-dlp audio-info endpoint.
- * Returns a proxy URL that streams through the server (Google URLs are IP-locked).
+ * Return the server-side streaming URL for a YouTube video.
  *
- * Never throws — every failure is classified and returned:
- *   permanent  → invalid id / unavailable video / malformed or empty response
- *   transient  → timeout, network error, throttling, server errors
+ * The /stream endpoint handles extraction AND download through a single
+ * yt-dlp invocation (same WARP connection = same exit IP = works).
+ * Calling /audio-info first was wasting 5-20s on a SEPARATE yt-dlp
+ * extraction just to validate the video — then ignoring the extracted
+ * URLs and returning /stream anyway. Skipping it saves one full
+ * extraction round-trip per first play.
+ *
+ * The stream endpoint fails fast (<2s) for invalid/deleted videos,
+ * so validation happens naturally through the player's retry logic.
  */
 async function fetchFromServer(youtubeId: string): Promise<ServerResult> {
-  const url = api(`/audio-info/${youtubeId}`);
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), SERVER_TIMEOUT_MS);
+  // Validate the youtubeId format before returning a stream URL.
+  if (!youtubeId || !/^[a-zA-Z0-9_-]{11}$/.test(youtubeId)) {
+    return { failure: { kind: 'permanent', reason: 'invalid_id' } };
+  }
 
+  // Quick HEAD-check to detect deleted/unavailable videos before the
+  // player commits to a 20s+ stream request. The HEAD check hits the
+  // audio-info endpoint which is fast when the video exists and returns
+  // a clear error when it doesn't. This costs ~3-5s but prevents the
+  // player from showing a permanent loading spinner on invalid videos.
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5_000);
   try {
-    const response = await fetch(url, {
+    const resp = await fetch(api(`/audio-info/${youtubeId}`), {
       signal: controller.signal,
+      method: 'HEAD',
       headers: { Accept: 'application/json' },
     });
-
-    if (!response.ok) {
-      return {
-        failure: {
-          kind: isTransientStatus(response.status) ? 'transient' : 'permanent',
-          reason: `http_${response.status}`,
-        },
-      };
+    if (resp.status === 404) {
+      return { failure: { kind: 'permanent', reason: 'video_not_found' } };
     }
-
-    let data: any;
-    try {
-      data = await response.json();
-    } catch {
-      return { failure: { kind: 'permanent', reason: 'invalid_response' } };
+    if (resp.status === 400) {
+      return { failure: { kind: 'permanent', reason: 'invalid_video' } };
     }
-
-    if (!data || data.success === false || !data.details?.formats?.length) {
-      return { failure: { kind: 'permanent', reason: 'no_audio' } };
-    }
-
-    // Pick the best audio format with a URL. Container FIRST, then bitrate:
-    // YouTube's highest-bitrate "bestaudio" streams are almost always
-    // opus/webm, which the Android native MediaPlayer cannot decode — handing
-    // it one fails onError and playback falls back to the WebView engine
-    // (no background playback). m4a decodes everywhere (native + HTML <audio>),
-    // so prefer it unconditionally and only fall back to webm/opus when no
-    // m4a/mp4 format exists at all.
-    const containerRank = (f: any): number => {
-      const ext = String(f.ext || '').toLowerCase();
-      const type = String(f.type || '').toLowerCase();
-      if (ext.includes('m4a') || ext.includes('mp4') || type.includes('mp4')) return 0;
-      return 1;
-    };
-    // HLS manifest URLs (manifest.googlevideo.com …/hls_playlist/…) are
-    // playlist TEXT, not audio — the proxy would stream the playlist and the
-    // player would fail (or worse, a download would save an HTML-ish file).
-    // Only direct media URLs are playable through the proxy.
-    const IS_HLS_MANIFEST = /manifest\.googlevideo\.com|\/api\/manifest\/hls_playlist\//i;
-    const best = data.details.formats
-      .filter((f: any) => f.url && f.url.startsWith('http') && !IS_HLS_MANIFEST.test(f.url))
-      .sort((a: any, b: any) => {
-        const rankDiff = containerRank(a) - containerRank(b);
-        if (rankDiff !== 0) return rankDiff;
-        return (b.bitrate || 0) - (a.bitrate || 0);
-      })[0];
-
-    // Formats arrived without any usable URL — rare, and worth one retry.
-    if (!best?.url) {
-      return { failure: { kind: 'transient', reason: 'empty_url' } };
-    }
-
-    // Google URLs are IP-locked to the WARP exit IP. proxy-audio can't
-    // fetch them because WARP assigns a different exit IP per connection.
-    // Use /stream which extracts AND downloads through the same WARP
-    // connection in one yt-dlp invocation. First play is ~20s; repeat plays
-    // are served from the server-side audio cache in ~2-3s.
-    return { url: api(`/stream/${youtubeId}`) };
-  } catch (err) {
-    const aborted = err instanceof DOMException && err.name === 'AbortError';
-    return { failure: { kind: 'transient', reason: aborted ? 'timeout' : 'network' } };
+  } catch {
+    // Network error or timeout — proceed to stream anyway (it will
+    // handle its own errors). A slow server is not a permanent failure.
   } finally {
     clearTimeout(timeout);
   }
+
+  // Return the stream URL directly. The server's /stream endpoint does
+  // extraction + download in one yt-dlp invocation — no separate
+  // audio-info extraction needed. Cold start ~20s; cached ~1-2s.
+  return { url: api(`/stream/${youtubeId}`) };
 }
 
 /**

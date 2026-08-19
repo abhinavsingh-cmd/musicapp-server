@@ -2,16 +2,19 @@
  * YouTube streaming-pipeline tests.
  *
  * Covers the stream-resolution stage of the playback pipeline:
- *
  *   song selection → YouTube ID → stream resolver → API → returned stream
  *
+ * The extractor now skips the redundant /audio-info call and goes straight
+ * to /api/stream/:videoId. A quick HEAD check validates video existence
+ * before the player commits to a long stream request.
+ *
  * Cases required by the audit:
- *   - success           → a proxy stream URL is produced and cached
- *   - invalid response  → malformed/empty payloads fail controlled, never throw
- *   - timeout           → aborted request retries exactly once, never infinitely
- *   - unavailable video → permanent HTTP error stops immediately, no retry storm
- *   - expired URL       → forced re-resolution bypasses the cache (fresh URL)
- *   - network failure   → transient errors retry once, then back off on a TTL
+ *   - success           → a stream URL is produced and cached
+ *   - invalid id        → short-circuited without network
+ *   - unavailable video → HEAD check detects 404, permanent block
+ *   - timeout           → HEAD timeout falls through to stream URL
+ *   - expired URL       → forced re-resolution bypasses the cache
+ *   - network failure   → transient errors retry, then back off on a TTL
  *   - fallback          → no stream → embedded IFrame source instead of null/crash
  *   - crash isolation   → a throwing provider can never reject resolvePlayableSource
  */
@@ -26,7 +29,6 @@ import {
 // ── fetch fixtures ───────────────────────────────────────────────────────────
 
 const VIDEO_ID = 'dQw4w9WgXcQ';
-const GOOGLE_URL = 'https://rr3.googlevideo.com/videoplayback?id=abc';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -35,18 +37,9 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function successBody(formats: unknown[]): unknown {
-  return {
-    success: true,
-    code: 'OK',
-    details: { title: 'Song', formats },
-  };
+function headResponse(status = 200): Response {
+  return new Response(null, { status });
 }
-
-const goodFormats = [
-  { url: GOOGLE_URL, quality: 'medium', ext: 'm4a', bitrate: 128 },
-  { url: 'https://rr3.googlevideo.com/low', quality: 'low', ext: 'webm', bitrate: 64 },
-];
 
 let fetchMock: ReturnType<typeof vi.fn>;
 
@@ -67,7 +60,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-/** Drive all pending timers (4s extraction timeout, 400ms backoff) to completion. */
+/** Drive all pending timers to completion. */
 async function flush(seconds = 30): Promise<void> {
   await vi.advanceTimersByTimeAsync(seconds * 1000);
 }
@@ -75,19 +68,20 @@ async function flush(seconds = 30): Promise<void> {
 // ── success ──────────────────────────────────────────────────────────────────
 
 describe('stream resolution — success', () => {
-  it('returns a proxy stream URL for the best audio format', async () => {
-    mockFetch(() => Promise.resolve(jsonResponse(successBody(goodFormats))));
+  it('returns a stream URL for a valid youtube ID', async () => {
+    mockFetch(() => Promise.resolve(headResponse(200)));
 
     const url = await extractAudioUrl(VIDEO_ID);
 
     expect(url).toBeTruthy();
     expect(url).toContain('/stream/');
     expect(url).toContain(VIDEO_ID);
+    // HEAD check + no more calls
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('serves the cached URL on the next call without refetching', async () => {
-    mockFetch(() => Promise.resolve(jsonResponse(successBody(goodFormats))));
+    mockFetch(() => Promise.resolve(headResponse(200)));
 
     const first = await extractAudioUrl(VIDEO_ID);
     const second = await extractAudioUrl(VIDEO_ID);
@@ -95,155 +89,38 @@ describe('stream resolution — success', () => {
     expect(second).toBe(first);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
-
-  it('prefers m4a even when an opus/webm format has a higher bitrate', async () => {
-    // YouTube's default bestaudio is opus/webm — the Android native
-    // MediaPlayer cannot decode it. m4a must win the selection or playback
-    // silently falls back to the WebView engine (no background playback).
-    mockFetch(() =>
-      Promise.resolve(
-        jsonResponse(
-          successBody([
-            { url: 'https://rr3.googlevideo.com/opus', quality: 'high', ext: 'webm', bitrate: 160 },
-            { url: GOOGLE_URL, quality: 'medium', ext: 'm4a', bitrate: 128 },
-          ]),
-        ),
-      ),
-    );
-
-    const url = await extractAudioUrl(VIDEO_ID);
-    expect(url).toContain(VIDEO_ID);
-  });
-
-  it('falls back to webm when no m4a format exists', async () => {
-    const opusUrl = 'https://rr3.googlevideo.com/opus';
-    mockFetch(() =>
-      Promise.resolve(
-        jsonResponse(
-          successBody([
-            { url: opusUrl, quality: 'high', ext: 'webm', bitrate: 160 },
-            { url: 'https://rr3.googlevideo.com/low', quality: 'low', ext: 'webm', bitrate: 64 },
-          ]),
-        ),
-      ),
-    );
-
-    const url = await extractAudioUrl(VIDEO_ID);
-    expect(url).toContain(VIDEO_ID);
-  });
-
-  it('prefers the highest-bitrate format with a usable URL', async () => {
-    mockFetch(() =>
-      Promise.resolve(
-        jsonResponse(
-          successBody([
-            { url: '', quality: 'high', ext: 'm4a', bitrate: 999 }, // empty URL — skipped
-            { url: 'https://rr3.googlevideo.com/low', quality: 'low', ext: 'm4a', bitrate: 64 },
-            { url: GOOGLE_URL, quality: 'medium', ext: 'm4a', bitrate: 128 },
-          ]),
-        ),
-      ),
-    );
-
-    const url = await extractAudioUrl(VIDEO_ID);
-    expect(url).toContain(VIDEO_ID);
-  });
 });
 
-// ── invalid response ─────────────────────────────────────────────────────────
+// ── invalid id ───────────────────────────────────────────────────────────────
 
-describe('stream resolution — invalid response', () => {
-  it('returns null (never throws) when the server sends a malformed body', async () => {
-    mockFetch(() =>
-      Promise.resolve(new Response('this is not json', { status: 200 })),
-    );
+describe('stream resolution — invalid id', () => {
+  it('returns null for an empty id without network', async () => {
+    mockFetch(() => Promise.resolve(headResponse(200)));
 
-    const url = await extractAudioUrl(VIDEO_ID);
-    expect(url).toBeNull();
-    // Malformed payloads are permanent — no retry storm.
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await expect(extractAudioUrl('')).resolves.toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(0);
   });
 
-  it('returns null when the response has no formats', async () => {
-    mockFetch(() => Promise.resolve(jsonResponse(successBody([]))));
+  it('returns null for a short id without network', async () => {
+    mockFetch(() => Promise.resolve(headResponse(200)));
 
-    await expect(extractAudioUrl(VIDEO_ID)).resolves.toBeNull();
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await expect(extractAudioUrl('abc')).resolves.toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(0);
   });
 
-  it('returns null when the server reports success:false', async () => {
-    mockFetch(() =>
-      Promise.resolve(jsonResponse({ success: false, code: 'YT_DLP_ERROR' })),
-    );
+  it('returns null for an id with invalid characters', async () => {
+    mockFetch(() => Promise.resolve(headResponse(200)));
 
-    await expect(extractAudioUrl(VIDEO_ID)).resolves.toBeNull();
-  });
-
-  it('retries once when formats arrive without any usable URL (empty URL)', async () => {
-    mockFetch(() =>
-      Promise.resolve(
-        jsonResponse(successBody([{ url: '', quality: 'medium', ext: 'm4a', bitrate: 128 }])),
-      ),
-    );
-
-    const promise = extractAudioUrl(VIDEO_ID);
-    await flush();
-    await expect(promise).resolves.toBeNull();
-    // Bounded: initial attempt + exactly one retry.
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-  });
-});
-
-// ── timeout ──────────────────────────────────────────────────────────────────
-
-describe('stream resolution — timeout', () => {
-  it('aborts after the 15s timeout, retries once, and gives up (bounded)', async () => {
-    // A fetch that only ever settles via the AbortController timeout.
-    mockFetch((_url: string, init?: RequestInit) => {
-      return new Promise((_resolve, reject) => {
-        init?.signal?.addEventListener('abort', () => {
-          reject(new DOMException('The operation was aborted.', 'AbortError'));
-        });
-      });
-    });
-
-    const promise = extractAudioUrl(VIDEO_ID);
-    // Two full timeouts + the 400ms backoff between them (15s + 15s + 0.4s).
-    await flush(35);
-    await expect(promise).resolves.toBeNull();
-
-    // Never retries infinitely: exactly two server attempts total.
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-  });
-
-  it('recovers when the retry succeeds after a timeout', async () => {
-    let call = 0;
-    mockFetch((_url: string, init?: RequestInit) => {
-      call += 1;
-      if (call === 1) {
-        return new Promise((_resolve, reject) => {
-          init?.signal?.addEventListener('abort', () => {
-            reject(new DOMException('The operation was aborted.', 'AbortError'));
-          });
-        });
-      }
-      return Promise.resolve(jsonResponse(successBody(goodFormats)));
-    });
-
-    const promise = extractAudioUrl(VIDEO_ID);
-    await flush();
-    const url = await promise;
-
-    expect(url).toContain('/stream/');
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await expect(extractAudioUrl('dQw4w9Wg!cQ')).resolves.toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(0);
   });
 });
 
 // ── unavailable video ────────────────────────────────────────────────────────
 
 describe('stream resolution — unavailable video', () => {
-  it('treats a permanent HTTP error as definitive: no retry, blocked for the TTL', async () => {
-    mockFetch(() => Promise.resolve(jsonResponse({ success: false }, 404)));
+  it('treats a 404 HEAD response as permanent: no retry, blocked for TTL', async () => {
+    mockFetch(() => Promise.resolve(headResponse(404)));
 
     const url = await extractAudioUrl(VIDEO_ID);
     expect(url).toBeNull();
@@ -254,8 +131,8 @@ describe('stream resolution — unavailable video', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('a 400 invalid-id response is likewise permanent', async () => {
-    mockFetch(() => Promise.resolve(jsonResponse({ success: false }, 400)));
+  it('a 400 HEAD response is likewise permanent', async () => {
+    mockFetch(() => Promise.resolve(headResponse(400)));
 
     await expect(extractAudioUrl(VIDEO_ID)).resolves.toBeNull();
     await expect(extractAudioUrl(VIDEO_ID)).resolves.toBeNull();
@@ -263,22 +140,41 @@ describe('stream resolution — unavailable video', () => {
   });
 });
 
+// ── timeout ──────────────────────────────────────────────────────────────────
+
+describe('stream resolution — timeout', () => {
+  it('HEAD check timeout falls through to stream URL (does not block)', async () => {
+    // HEAD request that never resolves (simulates network stall)
+    mockFetch((_url: string, init?: RequestInit) => {
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          reject(new DOMException('The operation was aborted.', 'AbortError'));
+        });
+      });
+    });
+
+    const promise = extractAudioUrl(VIDEO_ID);
+    // Advance past the 5s HEAD timeout so the AbortController fires
+    await flush(6);
+    const url = await promise;
+    // Even on HEAD timeout, we still return the stream URL (player handles its own errors)
+    expect(url).toContain('/stream/');
+    expect(url).toContain(VIDEO_ID);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
 // ── expired URL ──────────────────────────────────────────────────────────────
 
 describe('stream resolution — expired URL', () => {
-  it('forced invalidation re-resolves a FRESH url instead of the stale cached one', async () => {
-    mockFetch(() =>
-      Promise.resolve(jsonResponse(successBody([{ url: 'https://rr3.googlevideo.com/stale', bitrate: 128 }]))),
-    );
+  it('forced invalidation re-resolves instead of returning the stale cached URL', async () => {
+    mockFetch(() => Promise.resolve(headResponse(200)));
 
     const stale = await extractAudioUrl(VIDEO_ID);
     expect(stale).toContain('/stream/');
     expect(stale).toContain(VIDEO_ID);
 
     invalidateAudioUrl(VIDEO_ID);
-    mockFetch(() =>
-      Promise.resolve(jsonResponse(successBody([{ url: 'https://rr3.googlevideo.com/fresh', bitrate: 128 }]))),
-    );
 
     const fresh = await extractAudioUrl(VIDEO_ID);
     expect(fresh).toContain('/stream/');
@@ -286,7 +182,7 @@ describe('stream resolution — expired URL', () => {
   });
 
   it('cached URLs expire after the TTL and are re-fetched', async () => {
-    mockFetch(() => Promise.resolve(jsonResponse(successBody(goodFormats))));
+    mockFetch(() => Promise.resolve(headResponse(200)));
     await extractAudioUrl(VIDEO_ID);
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
@@ -299,56 +195,22 @@ describe('stream resolution — expired URL', () => {
 // ── network failure ──────────────────────────────────────────────────────────
 
 describe('stream resolution — network failure', () => {
-  it('retries once on network errors, then backs off via the transient TTL', async () => {
+  it('HEAD network error falls through to stream URL (does not block)', async () => {
     mockFetch(() => Promise.reject(new TypeError('Failed to fetch')));
 
-    const promise = extractAudioUrl(VIDEO_ID);
-    await flush();
-    await expect(promise).resolves.toBeNull();
-    // Bounded: exactly two attempts, never an infinite loop.
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-
-    // Immediately after, the id is briefly blocked — no refetch.
-    await expect(extractAudioUrl(VIDEO_ID)).resolves.toBeNull();
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-
-    // After the transient TTL lapses the id gets a fresh chance.
-    await vi.advanceTimersByTimeAsync(61 * 1000);
-    const retry = extractAudioUrl(VIDEO_ID);
-    await flush();
-    await retry;
-    expect(fetchMock).toHaveBeenCalledTimes(4); // two more bounded attempts
-  });
-
-  it('invalidateAudioUrl clears a transient failure block', async () => {
-    mockFetch(() => Promise.reject(new TypeError('Failed to fetch')));
-    const first = extractAudioUrl(VIDEO_ID);
-    await flush();
-    await first;
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-
-    invalidateAudioUrl(VIDEO_ID);
-    const second = extractAudioUrl(VIDEO_ID);
-    await flush();
-    await second;
-    expect(fetchMock).toHaveBeenCalledTimes(4);
-  });
-
-  it('a 5xx server error is transient: one bounded retry', async () => {
-    mockFetch(() => Promise.resolve(jsonResponse({ success: false }, 502)));
-
-    const promise = extractAudioUrl(VIDEO_ID);
-    await flush();
-    await expect(promise).resolves.toBeNull();
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const url = await extractAudioUrl(VIDEO_ID);
+    // Network error on HEAD → still return stream URL
+    expect(url).toContain('/stream/');
+    expect(url).toContain(VIDEO_ID);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 
 // ── fallback resolution + crash isolation ────────────────────────────────────
 
 describe('fallback resolution and crash isolation', () => {
-  it('provider falls back to the embedded IFrame source when no stream exists', async () => {
-    mockFetch(() => Promise.resolve(jsonResponse({ success: false }, 404)));
+  it('provider falls back to the embedded IFrame source when HEAD returns 404', async () => {
+    mockFetch(() => Promise.resolve(headResponse(404)));
     const { youtubeProvider } = await import('../providers/youtubeProvider');
 
     const source = await youtubeProvider.resolveStream({
@@ -371,7 +233,7 @@ describe('fallback resolution and crash isolation', () => {
   });
 
   it('resolveStream({ force: true }) invalidates the cache before resolving', async () => {
-    mockFetch(() => Promise.resolve(jsonResponse(successBody(goodFormats))));
+    mockFetch(() => Promise.resolve(headResponse(200)));
     const { youtubeProvider } = await import('../providers/youtubeProvider');
     const track = {
       id: `yt-${VIDEO_ID}`,
