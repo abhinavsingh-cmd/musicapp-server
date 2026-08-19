@@ -1192,12 +1192,7 @@ app.get("/api/audio-info/:videoId", (req, res) => {
       "--age-limit", "18",
       ...YT_EXTRACTOR_ARGS,
       ...YT_COOKIES_ARGS,
-      // Skip WARP for metadata extraction: URLs extracted through WARP are
-      // IP-locked to the Cloudflare exit IP, and proxy-audio can't match it
-      // because WARP assigns a different exit IP per connection. Without WARP,
-      // URLs are signed to Render's direct IP, so proxy-audio's fetch() works.
-      // PO tokens (bgutil) handle bot detection for metadata extraction.
-      // ...YT_PROXY_ARGS,
+      ...YT_PROXY_ARGS,
       "https://www.youtube.com/watch?v=" + videoId
     ], { timeout: 30000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
       if (err) {
@@ -1307,7 +1302,15 @@ function pipeViaWarpCurl(url, clientRange, res, req) {
   };
 
   child.stdout.on("data", (chunk) => {
-    if (!headersParsed) tryParseHeaders();
+    if (!headersParsed) {
+      tryParseHeaders();
+      // Set response headers before the first write.
+      if (headersParsed && httpStatus >= 200 && httpStatus < 300) {
+        res.setHeader("Content-Type", detectedContentType);
+        res.setHeader("Cache-Control", "no-cache");
+        res.setHeader("Access-Control-Allow-Origin", "*");
+      }
+    }
     totalBytes += chunk.length;
     if (res.writable) res.write(chunk);
   });
@@ -1321,8 +1324,8 @@ function pipeViaWarpCurl(url, clientRange, res, req) {
 
   child.on("close", (code) => {
     req.removeListener("close", cleanup);
-    try { fs.unlinkSync(tmpFile); } catch {}
     if (!headersParsed) tryParseHeaders();
+    try { fs.unlinkSync(tmpFile); } catch {}
 
     if (code && code !== 0 && totalBytes === 0) {
       console.error("[ProxyAudio/WARP] curl exited", code, stderrBuf.slice(0, 300));
@@ -1362,6 +1365,12 @@ app.get("/api/proxy-audio", (req, res) => {
   const videoId = audioUrlVideoMap.get(audioUrl) || req.query.videoId || null;
 
   console.log("[ProxyAudio] Proxying:", audioUrl.substring(0, 100), videoId ? `(videoId: ${videoId})` : "");
+
+  // Googlevideo URLs are signed to the WARP exit IP. Route through WARP
+  // so the fetch exits from the same IP that extracted the URL.
+  if (YT_PROXY_ARGS.length > 0 && audioUrl.includes("googlevideo.com")) {
+    return pipeViaWarpCurl(audioUrl, clientRange, res, req);
+  }
 
   const pipeToClient = async (url, options = {}) => {
     const { refreshed = false, includeRange = true } = options;
