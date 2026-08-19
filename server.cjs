@@ -1192,7 +1192,12 @@ app.get("/api/audio-info/:videoId", (req, res) => {
       "--age-limit", "18",
       ...YT_EXTRACTOR_ARGS,
       ...YT_COOKIES_ARGS,
-      ...YT_PROXY_ARGS,
+      // Skip WARP for metadata extraction: URLs extracted through WARP are
+      // IP-locked to the Cloudflare exit IP, and proxy-audio can't match it
+      // because WARP assigns a different exit IP per connection. Without WARP,
+      // URLs are signed to Render's direct IP, so proxy-audio's fetch() works.
+      // PO tokens (bgutil) handle bot detection for metadata extraction.
+      // ...YT_PROXY_ARGS,
       "https://www.youtube.com/watch?v=" + videoId
     ], { timeout: 30000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
       if (err) {
@@ -1357,12 +1362,6 @@ app.get("/api/proxy-audio", (req, res) => {
   const videoId = audioUrlVideoMap.get(audioUrl) || req.query.videoId || null;
 
   console.log("[ProxyAudio] Proxying:", audioUrl.substring(0, 100), videoId ? `(videoId: ${videoId})` : "");
-
-  // Googlevideo URLs are signed to the WARP exit IP when WARP is active.
-  // Route through WARP so the fetch IP matches the extraction IP.
-  if (YT_PROXY_ARGS.length > 0 && audioUrl.includes("googlevideo.com")) {
-    return pipeViaWarpCurl(audioUrl, clientRange, res, req);
-  }
 
   const pipeToClient = async (url, options = {}) => {
     const { refreshed = false, includeRange = true } = options;
