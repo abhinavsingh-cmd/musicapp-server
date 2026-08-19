@@ -1232,6 +1232,106 @@ app.get("/api/audio-info/:videoId", (req, res) => {
   attemptInfo();
 });
 
+// ── WARP-aware fetch for audio streams ───────────────────────────────────────
+// Googlevideo URLs extracted through WARP are IP-locked to Cloudflare's exit
+// IP. A plain Node.js fetch() goes through Render's direct IP → 403. When the
+// WARP SOCKS5 proxy is up we route through curl so the fetch uses the same IP
+// that extracted the URL. Falls back to plain fetch() when WARP is down.
+function warpFetch(url, options = {}) {
+  if (YT_PROXY_ARGS.length === 0) return fetch(url, options);
+
+  return new Promise((resolve, reject) => {
+    const curlArgs = [
+      "-sS", "-L",
+      "--proxy", "socks5h://127.0.0.1:1080",
+      "--max-time", "30",
+      "--connect-timeout", "10",
+      "-w", "\n__HTTP_CODE__%{http_code}\n__CONTENT_TYPE__%{content_type}\n",
+      "-D", "/dev/stderr",
+    ];
+    if (options.headers) {
+      for (const [k, v] of Object.entries(options.headers)) {
+        curlArgs.push("-H", k + ": " + v);
+      }
+    }
+    curlArgs.push(url);
+
+    const child = spawn("curl", curlArgs, { stdio: ["ignore", "pipe", "pipe"] });
+    let stderr = "";
+    let bodyChunks = [];
+    let totalBytes = 0;
+
+    child.stdout.on("data", (chunk) => {
+      bodyChunks.push(chunk);
+      totalBytes += chunk.length;
+    });
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+
+    child.on("error", (err) => reject(err));
+    child.on("close", (code) => {
+      // Parse the -w footer from stderr to get HTTP status and content type
+      const codeMatch = stderr.match(/__HTTP_CODE__(\d+)/);
+      const typeMatch = stderr.match(/__CONTENT_TYPE__([^\n]*)/);
+      const httpStatus = codeMatch ? parseInt(codeMatch[1], 10) : (code === 0 ? 200 : 502);
+      const contentType = typeMatch ? typeMatch[1].trim() : "audio/mpeg";
+
+      // Parse response headers from -D output (lines before the body)
+      const headerEnd = stderr.indexOf("\r\n\r\n");
+      let contentLength = null;
+      let contentRange = null;
+      let acceptRanges = null;
+      let responseStatus = httpStatus;
+      if (headerEnd >= 0) {
+        const headerBlock = stderr.substring(0, headerEnd);
+        for (const line of headerBlock.split("\r\n")) {
+          const [key, ...rest] = line.split(": ");
+          const val = rest.join(": ");
+          if (key && key.toLowerCase() === "content-length") contentLength = val;
+          if (key && key.toLowerCase() === "content-range") contentRange = val;
+          if (key && key.toLowerCase() === "accept-ranges") acceptRanges = val;
+          if (key && key.match(/^HTTP\//)) {
+            const s = parseInt(key.split(" ")[1], 10);
+            if (!isNaN(s)) responseStatus = s;
+          }
+        }
+      }
+
+      const body = Buffer.concat(bodyChunks);
+      const stream = new (require("stream").Readable)({
+        read() { this.push(body); this.push(null); },
+      });
+
+      resolve({
+        ok: responseStatus >= 200 && responseStatus < 300,
+        status: responseStatus,
+        headers: {
+          get(name) {
+            if (name === "content-type") return contentType;
+            if (name === "content-length") return contentLength;
+            if (name === "content-range") return contentRange;
+            if (name === "accept-ranges") return acceptRanges;
+            return null;
+          },
+        },
+        body: {
+          getReader() {
+            let done = false;
+            return {
+              async read() {
+                if (done) return { done: true, value: undefined };
+                done = true;
+                return { done: false, value: new Uint8Array(body) };
+              },
+            };
+          },
+          cancel() {},
+        },
+        async cancel() { child.kill(); },
+      });
+    });
+  });
+}
+
 // ── Audio Proxy ──────────────────────────────────────────────────────────────
 // Proxies audio streams from Google CDN. The audio-info endpoint returns URLs
 // that are IP-locked to the Render server — the client can't fetch them directly.
@@ -1282,7 +1382,10 @@ app.get("/api/proxy-audio", (req, res) => {
     if (includeRange) headers["Range"] = clientRange || "bytes=0-";
 
     try {
-      const upstream = await fetch(url, { signal: controller.signal, headers });
+      const useWarp = YT_PROXY_ARGS.length > 0 && url.includes("googlevideo.com");
+      const upstream = useWarp
+        ? await warpFetch(url, { headers })
+        : await fetch(url, { signal: controller.signal, headers });
 
       if (!upstream.ok) {
         // Drain/cancel the failed body so the socket can be reused
