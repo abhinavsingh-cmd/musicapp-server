@@ -1232,96 +1232,6 @@ app.get("/api/audio-info/:videoId", (req, res) => {
   attemptInfo();
 });
 
-
-
-
-
-// ── WARP streaming via yt-dlp ───────────────────────────────────────────────
-// When a pre-extracted googlevideo URL can't be fetched (IP-locked to a
-// different WARP exit IP), use yt-dlp directly to extract AND download
-// the audio through the same WARP connection in one shot.
-function pipeViaWarp(youtubeId, res, req) {
-  const ytArgs = [
-    "-f", "bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio/best",
-    "-o", "-",
-    "--no-check-certificates",
-    "--age-limit", "18",
-    ...YT_EXTRACTOR_ARGS,
-    ...YT_COOKIES_ARGS,
-    ...YT_PROXY_ARGS,
-    "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    "https://www.youtube.com/watch?v=" + youtubeId,
-  ];
-
-  console.log("[ProxyAudio/WARP] Streaming via yt-dlp for:", youtubeId);
-  const child = spawn("yt-dlp", ytArgs, { stdio: ["ignore", "pipe", "pipe"] });
-
-  let headersSent = false;
-  let firstChunk = true;
-  let totalBytes = 0;
-  let detectedMime = "audio/mpeg";
-
-  const cleanup = () => { try { child.kill(); } catch {} };
-  req.once("close", cleanup);
-
-  const startupTimeout = setTimeout(() => {
-    if (!headersSent) {
-      child.kill("SIGTERM");
-      req.removeListener("close", cleanup);
-      if (!res.headersSent) fail(res, 504, "WARP_TIMEOUT", "yt-dlp stream timed out");
-    }
-  }, 30000);
-
-  child.stdout.on("data", (chunk) => {
-    if (firstChunk) {
-      firstChunk = false;
-      headersSent = true;
-      clearTimeout(startupTimeout);
-      // Detect MIME from magic bytes
-      if (chunk.length >= 4) {
-        if (chunk[0] === 0x49 && chunk[1] === 0x44 && chunk[2] === 0x33) detectedMime = "audio/mpeg";
-        else if (chunk[0] === 0xFF && (chunk[1] === 0xFB || chunk[1] === 0xF3 || chunk[1] === 0xF2)) detectedMime = "audio/mpeg";
-        else if (chunk.length >= 8 && chunk[4] === 0x66 && chunk[5] === 0x74 && chunk[6] === 0x79 && chunk[7] === 0x70) detectedMime = "audio/mp4";
-        else detectedMime = "audio/webm";
-      }
-      res.setHeader("Content-Type", detectedMime);
-      res.setHeader("Accept-Ranges", "bytes");
-      res.setHeader("Cache-Control", "no-cache");
-      res.setHeader("Access-Control-Allow-Origin", "*");
-      console.log("[ProxyAudio/WARP] First chunk for:", youtubeId, "MIME:", detectedMime);
-    }
-    totalBytes += chunk.length;
-    res.write(chunk);
-  });
-
-  let stderrOutput = "";
-  child.stderr.on("data", (d) => {
-    const msg = d.toString().trim();
-    if (msg) console.error("[ProxyAudio/WARP]", msg);
-    stderrOutput += msg + "\n";
-  });
-
-  child.on("error", (err) => {
-    clearTimeout(startupTimeout);
-    console.error("[ProxyAudio/WARP] Process error:", err.message);
-    req.removeListener("close", cleanup);
-    if (!res.headersSent) fail(res, 500, "WARP_ERROR", "yt-dlp process failed");
-  });
-
-  child.on("close", (code) => {
-    clearTimeout(startupTimeout);
-    req.removeListener("close", cleanup);
-    if (code && code !== 0 && !headersSent) {
-      console.error("[ProxyAudio/WARP] yt-dlp exited", code, "for:", youtubeId);
-      if (!res.headersSent) fail(res, 500, "WARP_FAILED", "yt-dlp failed", { detail: stderrOutput.slice(0, 500) });
-    } else if (headersSent) {
-      if (code && code !== 0) console.error("[ProxyAudio/WARP] Partial stream, code:", code, "bytes:", totalBytes);
-      else console.log("[ProxyAudio/WARP] Completed:", youtubeId, "bytes:", totalBytes);
-      res.end();
-    }
-  });
-}
-
 // ── Audio Proxy ──────────────────────────────────────────────────────────────
 // Proxies audio streams from Google CDN. The audio-info endpoint returns URLs
 // that are IP-locked to the Render server — the client can't fetch them directly.
@@ -1372,14 +1282,6 @@ app.get("/api/proxy-audio", (req, res) => {
     if (includeRange) headers["Range"] = clientRange || "bytes=0-";
 
     try {
-const useWarp = YT_PROXY_ARGS.length > 0 && url.includes("googlevideo.com") && videoId;
-      if (useWarp) {
-        // Pre-extracted URLs are IP-locked and fail from a different exit IP.
-        // Use yt-dlp to extract AND download in one shot through the same WARP
-        // connection, so the extraction IP and download IP match.
-        req.removeListener("close", cleanup);
-        return pipeViaWarp(videoId, res, req);
-      }
       const upstream = await fetch(url, { signal: controller.signal, headers });
 
       if (!upstream.ok) {
