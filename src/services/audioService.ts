@@ -19,22 +19,6 @@ function isNativePlatform(): boolean {
   return !!(window as any).Capacitor;
 }
 
-/**
- * Race a promise against a timeout. Resolves with `null` when the promise
- * does not settle within `ms` — the caller can then emit a controlled error
- * instead of hanging forever.  The underlying promise continues in the
- * background (no AbortController needed for fire-and-forget network calls).
- */
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T | null> {
-  return Promise.race([
-    promise,
-    new Promise<null>((resolve) => setTimeout(() => {
-      logError(`⏱ ${label} timed out after ${ms}ms`);
-      resolve(null);
-    }, ms)),
-  ]);
-}
-
 function isLocalSrc(url: string): boolean {
   return url.startsWith('blob:') || url.startsWith('file:') || url.startsWith('data:');
 }
@@ -46,16 +30,6 @@ function isLocalSrc(url: string): boolean {
 // recovering through the session's single bounded recovery (fresh stream
 // resolution → embedded IFrame fallback).
 const HTML_STALL_TIMEOUT_MS = 30_000;
-// Maximum time the entire stream resolution step may take.  If the
-// provider (yt-dlp extraction, Invidious, etc.) does not resolve a URL
-// within this budget, the play() chain emits a controlled error instead
-// of hanging indefinitely.
-const STREAM_RESOLUTION_TIMEOUT_MS = 20_000;
-// Maximum time audio.play() may take.  On some mobile browsers the
-// returned promise can hang forever when autoplay is blocked or the
-// source format is unsupported.  This timeout detects that and fails
-// the track instead of leaving the UI in a permanent loading state.
-const AUDIO_PLAY_TIMEOUT_MS = 10_000;
 
 interface AudioState {
   currentSong: Song | null;
@@ -523,7 +497,8 @@ export class AudioService {
       // Must await so the service is guaranteed running before audio starts.
       if (isNativePlatform()) {
         try {
-          await backgroundAudio.startService({ title: song.title, artist: song.artist });
+          const result = await backgroundAudio.startService({ title: song.title, artist: song.artist });
+          log('Foreground service started:', result);
         } catch (err) {
           logError('Failed to start foreground service:', err);
         }
@@ -544,16 +519,7 @@ export class AudioService {
       // Resolve a playable source through the track's provider. The engine
       // never inspects provider ids or endpoints — only the normalized
       // PlayableSource shape.
-      //
-      // Timeout guard: provider resolution (yt-dlp extraction, proxy fetch)
-      // can hang on a dead server or slow network.  The ceiling timer in the
-      // store is the last resort, but a tighter timeout here lets us try a
-      // fresh extraction or fall back to IFrame before the UI timeout fires.
-      const playable = await withTimeout(
-        resolvePlayableSource(track),
-        STREAM_RESOLUTION_TIMEOUT_MS,
-        `resolvePlayableSource(${track.provider}:${track.externalId || track.id})`,
-      );
+      const playable = await resolvePlayableSource(track);
       if (this.currentPlaybackId !== playbackId) return;
 
       if (!playable) {
@@ -633,24 +599,20 @@ export class AudioService {
     log('▶ playNative — routing to Android MediaPlayer:', { title: song.title, src: params.src.substring(0, 80) });
 
     const startPositionMs = this.pendingStartTime > 0 ? Math.round(this.pendingStartTime * 1000) : 0;
-    const result = await withTimeout(
-      backgroundAudio.playAudioUrl({
-        audioUrl: params.src,
-        title: song.title,
-        artist: song.artist,
-        album: song.album || 'MusicApp',
-        albumArt: song.coverArt,
-        startPositionMs,
-        volume: this.state.volume,
-      }),
-      15_000,
-      `native.playAudioUrl(${song.title})`,
-    );
+    const result = await backgroundAudio.playAudioUrl({
+      audioUrl: params.src,
+      title: song.title,
+      artist: song.artist,
+      album: song.album || 'MusicApp',
+      albumArt: song.coverArt,
+      startPositionMs,
+      volume: this.state.volume,
+    });
     if (this.currentPlaybackId !== playbackId) return;
     this.pendingStartTime = 0;
 
-    if (!result || !result.started) {
-      logError('Native engine unavailable or timed out — falling back to WebView audio');
+    if (!result.started) {
+      logError('Native engine unavailable — falling back to WebView audio');
       this.releaseEngine('native');
       this.useNativePlayer = false;
       this.nativeActiveCache = false;
@@ -930,31 +892,10 @@ export class AudioService {
       }
 
       try {
-        // audio.play() can hang forever on some mobile browsers (autoplay
-        // policy, broken source format).  The timeout detects this and
-        // fails the track instead of leaving the UI spinning.
-        const playResult = await withTimeout(
-          audio.play() as Promise<void>,
-          AUDIO_PLAY_TIMEOUT_MS,
-          `audio.play(${song.title})`,
-        );
+        await audio.play();
 
         if (this.currentPlaybackId !== playbackId) return;
         this.pendingStartTime = 0;
-
-        if (playResult === null) {
-          // audio.play() hung — treat as a transient failure so the
-          // retry loop can attempt a fresh source or fall through to
-          // emitPlaybackError after MAX_RETRIES.
-          logError(`⏱ audio.play() hung on attempt ${attempt}/${MAX_RETRIES}`);
-          if (attempt < MAX_RETRIES) {
-            const fresh = await this.reExtractFreshParams(track, params);
-            if (fresh) params = fresh;
-            continue;
-          }
-          this.emitPlaybackError(song, `Unable to play "${song.title}" — playback engine unresponsive`);
-          return;
-        }
 
         if (audioEffectsService.audioContextState !== 'running') {
           log('⚠ AudioContext NOT running after play() — attempting emergency resume');
