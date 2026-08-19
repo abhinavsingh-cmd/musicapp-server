@@ -817,6 +817,13 @@ app.get("/api/health", (req, res) => {
   });
 });
 
+// ── Stream audio cache ─────────────────────────────────────────────────────
+// Store recently streamed audio in memory so repeat plays are instant.
+// Each entry holds the full audio buffer + MIME type + expiry timestamp.
+const streamCache = new Map(); // videoId -> { data: Buffer, mime: string, expiresAt: number }
+const STREAM_CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
+const STREAM_CACHE_MAX_ENTRIES = 50;
+
 // Audio streaming endpoint - streams audio from YouTube
 app.get("/api/stream/:videoId", (req, res) => {
   const videoId = req.params.videoId;
@@ -825,6 +832,19 @@ app.get("/api/stream/:videoId", (req, res) => {
   }
 
   const audioUrl = "https://www.youtube.com/watch?v=" + videoId;
+
+  // Check cache first — instant response for repeat plays.
+  const cached = streamCache.get(videoId);
+  if (cached && cached.expiresAt > Date.now()) {
+    console.log("[Stream] Cache hit for:", videoId, "bytes:", cached.data.length, "mime:", cached.mime);
+    res.setHeader("Content-Type", cached.mime);
+    res.setHeader("Accept-Ranges", "bytes");
+    res.setHeader("Cache-Control", "public, max-age=900");
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Content-Length", cached.data.length);
+    return res.end(cached.data);
+  }
+
   console.log("[Stream] Starting stream for:", videoId);
 
   const attemptStream = (attempt = 1) => {
@@ -870,6 +890,7 @@ app.get("/api/stream/:videoId", (req, res) => {
     let firstChunk = true;
     let totalBytes = 0;
     let detectedMime = "audio/webm";
+    const audioChunks = []; // buffer for caching
     yt.stdout.on("data", (chunk) => {
       if (firstChunk) {
         firstChunk = false;
@@ -889,6 +910,7 @@ app.get("/api/stream/:videoId", (req, res) => {
         console.log("[Stream] First chunk received for:", videoId, "MIME:", detectedMime);
       }
       totalBytes += chunk.length;
+      audioChunks.push(chunk);
       res.write(chunk);
     });
 
@@ -928,6 +950,17 @@ app.get("/api/stream/:videoId", (req, res) => {
           console.error("[Stream] Exited with non-zero code:", code, "for:", videoId, "bytes:", totalBytes, "(partial stream)");
         } else {
           console.log("[Stream] Completed for:", videoId, "bytes:", totalBytes, "MIME:", detectedMime);
+          // Cache the audio data for instant repeat plays.
+          if (audioChunks.length > 0 && totalBytes > 1024) {
+            const cacheData = Buffer.concat(audioChunks);
+            // Evict oldest entries if cache is full.
+            while (streamCache.size >= STREAM_CACHE_MAX_ENTRIES) {
+              const oldest = streamCache.keys().next().value;
+              streamCache.delete(oldest);
+            }
+            streamCache.set(videoId, { data: cacheData, mime: detectedMime, expiresAt: Date.now() + STREAM_CACHE_TTL_MS });
+            console.log("[Stream] Cached", cacheData.length, "bytes for:", videoId);
+          }
         }
         res.end();
       }
