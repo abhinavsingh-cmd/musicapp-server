@@ -856,15 +856,15 @@ app.get("/api/stream/:videoId", (req, res) => {
       if (!headersSent) {
         yt.kill("SIGTERM");
         if (!res.headersSent) {
-          console.error("[Stream] Timed out after 30s for:", videoId, "attempt", attempt);
+          console.error("[Stream] Timed out after 60s for:", videoId, "attempt", attempt);
           if (attempt < maxAttempts) {
             retryStream(retryDelayMs(attempt));
           } else {
-            fail(res, 504, "STREAM_TIMEOUT", "Stream timed out after retries", { videoId, attempts: maxAttempts });
+            fail(res, 504, "STREAM_TIMEOUT", "Stream timed out after retries", { videoId, attempts: maxAttempts, detail: stderrOutput.slice(0, 2000) });
           }
         }
       }
-    }, 30000);
+    }, 60000);
 
     let firstChunk = true;
     let totalBytes = 0;
@@ -919,7 +919,7 @@ app.get("/api/stream/:videoId", (req, res) => {
             console.log("[Stream] Retrying with different clients... attempt", attempt + 1);
             setTimeout(() => attemptStream(attempt + 1), 1500);
           } else {
-            fail(res, 500, "STREAM_FAILED", "Stream failed after retries", { videoId, code, detail: stderrOutput.slice(0, 500), attempts: maxAttempts });
+            fail(res, 500, "STREAM_FAILED", "Stream failed after retries", { videoId, code, detail: stderrOutput.slice(0, 2000), attempts: maxAttempts });
           }
         }
       } else if (headersSent) {
