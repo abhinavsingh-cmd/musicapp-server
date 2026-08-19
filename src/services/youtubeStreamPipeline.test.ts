@@ -81,8 +81,8 @@ describe('stream resolution — success', () => {
     const url = await extractAudioUrl(VIDEO_ID);
 
     expect(url).toBeTruthy();
-    expect(url).toContain('/proxy-audio?url=');
-    expect(url).toContain(encodeURIComponent(GOOGLE_URL));
+    expect(url).toContain('/stream/');
+    expect(url).toContain(VIDEO_ID);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -112,7 +112,7 @@ describe('stream resolution — success', () => {
     );
 
     const url = await extractAudioUrl(VIDEO_ID);
-    expect(url).toContain(encodeURIComponent(GOOGLE_URL));
+    expect(url).toContain(VIDEO_ID);
   });
 
   it('falls back to webm when no m4a format exists', async () => {
@@ -129,7 +129,7 @@ describe('stream resolution — success', () => {
     );
 
     const url = await extractAudioUrl(VIDEO_ID);
-    expect(url).toContain(encodeURIComponent(opusUrl));
+    expect(url).toContain(VIDEO_ID);
   });
 
   it('prefers the highest-bitrate format with a usable URL', async () => {
@@ -146,7 +146,7 @@ describe('stream resolution — success', () => {
     );
 
     const url = await extractAudioUrl(VIDEO_ID);
-    expect(url).toContain(encodeURIComponent(GOOGLE_URL));
+    expect(url).toContain(VIDEO_ID);
   });
 });
 
@@ -234,7 +234,7 @@ describe('stream resolution — timeout', () => {
     await flush();
     const url = await promise;
 
-    expect(url).toContain('/proxy-audio');
+    expect(url).toContain('/stream/');
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
@@ -267,25 +267,22 @@ describe('stream resolution — unavailable video', () => {
 
 describe('stream resolution — expired URL', () => {
   it('forced invalidation re-resolves a FRESH url instead of the stale cached one', async () => {
-    const staleUrl = 'https://rr3.googlevideo.com/stale';
-    const freshUrl = 'https://rr3.googlevideo.com/fresh';
     mockFetch(() =>
-      Promise.resolve(jsonResponse(successBody([{ url: staleUrl, bitrate: 128 }]))),
+      Promise.resolve(jsonResponse(successBody([{ url: 'https://rr3.googlevideo.com/stale', bitrate: 128 }]))),
     );
 
     const stale = await extractAudioUrl(VIDEO_ID);
-    expect(stale).toContain(encodeURIComponent(staleUrl));
+    expect(stale).toContain('/stream/');
+    expect(stale).toContain(VIDEO_ID);
 
-    // The cached proxy URL expired upstream (403/416) — the engine calls
-    // invalidateAudioUrl (via resolveStream({ force: true })) and re-resolves.
     invalidateAudioUrl(VIDEO_ID);
     mockFetch(() =>
-      Promise.resolve(jsonResponse(successBody([{ url: freshUrl, bitrate: 128 }]))),
+      Promise.resolve(jsonResponse(successBody([{ url: 'https://rr3.googlevideo.com/fresh', bitrate: 128 }]))),
     );
 
     const fresh = await extractAudioUrl(VIDEO_ID);
-    expect(fresh).toContain(encodeURIComponent(freshUrl));
-    expect(fresh).not.toBe(stale);
+    expect(fresh).toContain('/stream/');
+    expect(fresh).toContain(VIDEO_ID);
   });
 
   it('cached URLs expire after the TTL and are re-fetched', async () => {

@@ -234,9 +234,12 @@ async function fetchFromServer(youtubeId: string): Promise<ServerResult> {
       return { failure: { kind: 'transient', reason: 'empty_url' } };
     }
 
-    // Google URLs are IP-locked to the server's direct IP when extracted
-    // without WARP. proxy-audio fetches from the same IP, so it works.
-    return { url: api(`/proxy-audio?url=${encodeURIComponent(best.url)}`) };
+    // Google URLs are IP-locked to the WARP exit IP. proxy-audio can't
+    // fetch them because WARP assigns a different exit IP per connection.
+    // Use /stream which extracts AND downloads through the same WARP
+    // connection in one yt-dlp invocation. First play is ~20s; repeat plays
+    // are served from the server-side audio cache in ~2-3s.
+    return { url: api(`/stream/${youtubeId}`) };
   } catch (err) {
     const aborted = err instanceof DOMException && err.name === 'AbortError';
     return { failure: { kind: 'transient', reason: aborted ? 'timeout' : 'network' } };

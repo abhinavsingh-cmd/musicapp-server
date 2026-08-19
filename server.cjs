@@ -851,7 +851,7 @@ app.get("/api/stream/:videoId", (req, res) => {
     const maxAttempts = 3;
 
     const ytArgs = [
-      "-f", "bestaudio/best",
+      "-f", "bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio/best",
       "-o", "-",
       "--no-check-certificates",
       "--age-limit", "18",
@@ -1022,7 +1022,7 @@ app.get("/api/download/:videoId", (req, res) => {
     const buffer = [];
 
     const ytArgs = [
-      "-f", "bestaudio/best",
+      "-f", "bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio/best",
       "-o", "-",
       "--no-check-certificates",
       "--age-limit", "18",
