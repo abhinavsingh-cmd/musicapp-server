@@ -1232,16 +1232,120 @@ app.get("/api/audio-info/:videoId", (req, res) => {
   attemptInfo();
 });
 
+// ── WARP curl fetcher ─────────────────────────────────────────────────────
+// When WARP is active, googlevideo URLs are signed to the Cloudflare exit
+// IP.  A plain Node.js `fetch()` leaves from Render's own IP → 403.  We
+// shell out to `curl --proxy socks5h://…` so the fetch exits through the
+// same WARP tunnel that extracted the URL.
+function pipeViaWarpCurl(url, clientRange, res, req) {
+  const tmpFile = "/tmp/ytproxy_" + process.pid + "_" + Date.now();
+  const curlArgs = [
+    "--proxy", "socks5h://127.0.0.1:1080",
+    "-s", "-S",
+    "-L",
+    "-D", tmpFile,
+    "--max-time", "30",
+    "--connect-timeout", "10",
+    "-H", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "-H", "Origin:https://www.youtube.com",
+    "-H", "Referer:https://www.youtube.com/",
+  ];
+  if (clientRange) curlArgs.push("-H", "Range:" + clientRange);
+  curlArgs.push(url);
+
+  console.log("[ProxyAudio/WARP] curl fetch via SOCKS5 for:", url.substring(0, 80));
+  const child = spawn("curl", curlArgs, { stdio: ["ignore", "pipe", "pipe"] });
+
+  const cleanup = () => { try { child.kill(); } catch {} };
+  req.once("close", cleanup);
+
+  let headersParsed = false;
+  let httpStatus = 0;
+  let detectedContentType = "audio/mpeg";
+  let totalBytes = 0;
+
+  // Read stderr for errors
+  let stderrBuf = "";
+  child.stderr.on("data", (d) => { stderrBuf += d.toString(); });
+
+  // Once headers file is written (by curl -D), parse it and decide.
+  // curl -L appends headers from each redirect, so we take the LAST
+  // HTTP status line + its headers (googlevideo returns 302 → final 200).
+  const tryParseHeaders = () => {
+    if (headersParsed) return;
+    try {
+      if (!fs.existsSync(tmpFile)) return;
+      const raw = fs.readFileSync(tmpFile, "utf8");
+      if (!raw.includes("HTTP/")) return; // incomplete
+      // Split into response blocks separated by blank lines
+      const blocks = raw.split(/\r?\n\r?\n/);
+      // Take the last block that starts with HTTP/
+      for (let i = blocks.length - 1; i >= 0; i--) {
+        const lines = blocks[i].split("\r?\n");
+        const statusMatch = lines[0].match(/^HTTP\/[\d.]+\s+(\d+)/);
+        if (statusMatch) {
+          headersParsed = true;
+          httpStatus = parseInt(statusMatch[1], 10);
+          for (const line of lines.slice(1)) {
+            const colonIdx = line.indexOf(":");
+            if (colonIdx < 0) continue;
+            const key = line.substring(0, colonIdx).trim().toLowerCase();
+            const val = line.substring(colonIdx + 1).trim();
+            if (key === "content-type") detectedContentType = val;
+          }
+          break;
+        }
+      }
+      if (headersParsed) console.log("[ProxyAudio/WARP] HTTP", httpStatus, detectedContentType);
+    } catch {}
+  };
+
+  child.stdout.on("data", (chunk) => {
+    if (!headersParsed) tryParseHeaders();
+    totalBytes += chunk.length;
+    if (res.writable) res.write(chunk);
+  });
+
+  child.on("error", (err) => {
+    req.removeListener("close", cleanup);
+    try { fs.unlinkSync(tmpFile); } catch {}
+    console.error("[ProxyAudio/WARP] curl error:", err.message);
+    if (!res.headersSent) fail(res, 502, "WARP_CURL_ERROR", "curl process failed");
+  });
+
+  child.on("close", (code) => {
+    req.removeListener("close", cleanup);
+    try { fs.unlinkSync(tmpFile); } catch {}
+    if (!headersParsed) tryParseHeaders();
+
+    if (code && code !== 0 && totalBytes === 0) {
+      console.error("[ProxyAudio/WARP] curl exited", code, stderrBuf.slice(0, 300));
+      if (!res.headersSent) fail(res, 502, "WARP_CURL_FAILED", "curl failed via WARP");
+    } else if (httpStatus >= 200 && httpStatus < 300) {
+      console.log("[ProxyAudio/WARP] Streamed", totalBytes, "bytes");
+      res.end();
+    } else if (httpStatus >= 300 && httpStatus < 400) {
+      // 3xx redirect from googlevideo — follow manually
+      const location = stderrBuf.match(/[Ll]ocation:\s*(.+)/);
+      console.log("[ProxyAudio/WARP] Got redirect", httpStatus, location ? location[1].substring(0, 80) : "");
+      if (!res.headersSent) fail(res, 502, "WARP_REDIRECT", "Unexpected redirect from upstream");
+    } else {
+      console.error("[ProxyAudio/WARP] Upstream HTTP", httpStatus, "bytes:", totalBytes);
+      if (!res.headersSent) fail(res, httpStatus || 502, "WARP_UPSTREAM_ERROR", "Upstream returned error via WARP");
+    }
+  });
+}
+
 // ── Audio Proxy ──────────────────────────────────────────────────────────────
 // Proxies audio streams from Google CDN. The audio-info endpoint returns URLs
-// that are IP-locked to the Render server — the client can't fetch them directly.
-// This endpoint fetches the URL server-side and pipes it to the client.
+// that are IP-locked to the WARP exit IP — a plain fetch() from Render gets 403.
+// When WARP is active, googlevideo URLs are fetched through the WARP SOCKS5
+// proxy using curl so the fetch exits from the same IP that extracted the URL.
 //
 // Failure recovery:
 //   403/416 from Google usually means the stream URL expired or was rejected.
 //   We refresh it via yt-dlp (reusing `freshAudioUrlCache` for retry storms)
-//   and retry once. If a 416 persists, we retry without a Range header since
-//   Googlevideo rejects ranges it can't satisfy.
+//   and retry once. If a 416 persists, we retry without a Range header.
 app.get("/api/proxy-audio", (req, res) => {
   const audioUrl = req.query.url;
   if (!audioUrl || !audioUrl.startsWith("https://")) {
@@ -1252,6 +1356,12 @@ app.get("/api/proxy-audio", (req, res) => {
   const videoId = audioUrlVideoMap.get(audioUrl) || req.query.videoId || null;
 
   console.log("[ProxyAudio] Proxying:", audioUrl.substring(0, 100), videoId ? `(videoId: ${videoId})` : "");
+
+  // Googlevideo URLs are signed to the WARP exit IP when WARP is active.
+  // Route through WARP so the fetch IP matches the extraction IP.
+  if (YT_PROXY_ARGS.length > 0 && audioUrl.includes("googlevideo.com")) {
+    return pipeViaWarpCurl(audioUrl, clientRange, res, req);
+  }
 
   const pipeToClient = async (url, options = {}) => {
     const { refreshed = false, includeRange = true } = options;
