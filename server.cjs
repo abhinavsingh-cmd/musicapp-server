@@ -1234,136 +1234,86 @@ app.get("/api/audio-info/:videoId", (req, res) => {
 
 
 
-// ── WARP-aware streaming proxy ───────────────────────────────────────────────
-// Googlevideo URLs extracted through WARP are IP-locked to Cloudflare's exit
-// IP. Plain Node.js fetch() goes through Render's direct IP → 403. When WARP
-// is available, curl streams through the SOCKS5 proxy using the same IP.
-// Returns a Response-like object whose body is a streaming pipe from curl.
-function warpFetchViaCurl(url, headers, signal) {
-  return new Promise((resolve, reject) => {
-    const curlArgs = [
-      "-sS", "-i", "-L",
-      "--proxy", "socks5h://127.0.0.1:1080",
-      "--max-time", "60",
-      "--connect-timeout", "10",
-    ];
-    for (const [k, v] of Object.entries(headers || {})) {
-      curlArgs.push("-H", k + ": " + v);
-    }
-    curlArgs.push(url);
 
-    const child = spawn("curl", curlArgs, { stdio: ["ignore", "pipe", "pipe"] });
-    let stderrData = "";
-    let headerBuf = Buffer.alloc(0);
-    let headersParsed = false;
-    let httpStatus = 200;
-    let contentType = "audio/mpeg";
-    let contentLength = null;
-    let contentRange = null;
-    let acceptRanges = null;
 
-    // Signal abort → kill curl
-    if (signal) {
-      signal.addEventListener("abort", () => { try { child.kill(); } catch {} });
-    }
+// ── WARP streaming pipe ─────────────────────────────────────────────────────
+// Streams a googlevideo URL through the WARP SOCKS5 proxy using curl.
+// Parses headers from the -i output, then pipes the body directly to the
+// Express response. Handles the same retry logic as pipeToClient.
+function pipeViaWarp(url, headers, res, req) {
+  const cleanup = () => { try { child.kill(); } catch {} };
+  req.once("close", cleanup);
 
-    child.stderr.on("data", (d) => { stderrData += d.toString(); });
+  const curlArgs = [
+    "-sS", "-i", "-L",
+    "--proxy", "socks5h://127.0.0.1:1080",
+    "--max-time", "60",
+    "--connect-timeout", "10",
+  ];
+  for (const [k, v] of Object.entries(headers || {})) {
+    curlArgs.push("-H", k + ": " + v);
+  }
+  curlArgs.push(url);
 
-    // The stream reader pulls from stdout; curl writes headers first (due to
-    // -i), then the binary body. We scan for the header/body delimiter.
-    const stream = new (require("stream").Readable)({
-      read() {}, // no-op — data is pushed by the stdout handler below
-    });
+  const child = spawn("curl", curlArgs, { stdio: ["ignore", "pipe", "pipe"] });
+  let headerBuf = Buffer.alloc(0);
+  let headersParsed = false;
 
-    child.stdout.on("data", (chunk) => {
-      if (!headersParsed) {
-        headerBuf = Buffer.concat([headerBuf, chunk]);
-        const idx = headerBuf.indexOf("\r\n\r\n");
-        if (idx >= 0) {
-          headersParsed = true;
-          const headerStr = headerBuf.subarray(0, idx).toString();
-          const bodyStart = idx + 4;
-          // Parse status line + headers from the -i output
-          for (const line of headerStr.split("\r\n")) {
-            if (line.startsWith("HTTP/")) {
-              const m = line.match(/HTTP\/\S+ (\d+)/);
-              if (m) httpStatus = parseInt(m[1], 10);
-            }
-            const colonIdx = line.indexOf(": ");
-            if (colonIdx > 0) {
-              const key = line.substring(0, colonIdx).toLowerCase();
-              const val = line.substring(colonIdx + 2);
-              if (key === "content-type") contentType = val;
-              if (key === "content-length") contentLength = val;
-              if (key === "content-range") contentRange = val;
-              if (key === "accept-ranges") acceptRanges = val;
-            }
+  child.stdout.on("data", (chunk) => {
+    if (!headersParsed) {
+      headerBuf = Buffer.concat([headerBuf, chunk]);
+      const idx = headerBuf.indexOf("\r\n\r\n");
+      if (idx >= 0) {
+        headersParsed = true;
+        const headerStr = headerBuf.subarray(0, idx).toString();
+        const bodyStart = idx + 4;
+        // Parse upstream status + headers
+        let upstreamStatus = 200;
+        for (const line of headerStr.split("\r\n")) {
+          if (line.startsWith("HTTP/")) {
+            const m = line.match(/HTTP\/\S+ (\d+)/);
+            if (m) upstreamStatus = parseInt(m[1], 10);
           }
-          // Push the first body bytes that were mixed into the header buffer
-          if (bodyStart < headerBuf.length) {
-            stream.push(headerBuf.subarray(bodyStart));
+          const ci = line.indexOf(": ");
+          if (ci > 0) {
+            const key = line.substring(0, ci).toLowerCase();
+            const val = line.substring(ci + 2);
+            if (key === "content-type") res.setHeader("Content-Type", val);
+            if (key === "content-length") res.setHeader("Content-Length", val);
+            if (key === "content-range") res.setHeader("Content-Range", val);
+            if (key === "accept-ranges") res.setHeader("Accept-Ranges", val);
           }
         }
-      } else {
-        stream.push(chunk);
+        if (upstreamStatus === 206) res.status(206);
+        res.setHeader("Cache-Control", "no-cache");
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        console.log("[ProxyAudio/WARP] Headers parsed, status:", upstreamStatus);
+        // Forward any body bytes that were mixed into the header buffer
+        if (bodyStart < headerBuf.length) {
+          res.write(headerBuf.subarray(bodyStart));
+        }
       }
-    });
+    } else {
+      res.write(chunk);
+    }
+  });
 
-    child.stdout.on("end", () => { stream.push(null); });
+  child.stderr.on("data", (d) => {}); // discard
 
-    child.on("error", (err) => {
-      if (!headersParsed) reject(err);
-      else stream.destroy(err);
-    });
+  child.on("error", (err) => {
+    console.error("[ProxyAudio/WARP] curl error:", err.message);
+    req.removeListener("close", cleanup);
+    if (!res.headersSent) fail(res, 502, "WARP_PROXY_ERROR", "WARP proxy failed");
+  });
 
-    child.on("close", (code) => {
-      if (!headersParsed) {
-        // curl failed before producing headers
-        const status = code === 0 ? 200 : 502;
-        resolve({
-          ok: status >= 200 && status < 300,
-          status,
-          headers: { get() { return null; } },
-          body: { getReader() { return { read: async () => ({ done: true }) }; }, cancel() {} },
-        });
-      }
-    });
-
-    resolve({
-      get ok() { return httpStatus >= 200 && httpStatus < 300; },
-      get status() { return httpStatus; },
-      headers: {
-        get(name) {
-          if (name === "content-type") return contentType;
-          if (name === "content-length") return contentLength;
-          if (name === "content-range") return contentRange;
-          if (name === "accept-ranges") return acceptRanges;
-          return null;
-        },
-      },
-      body: {
-        getReader() {
-          let done = false;
-          return {
-            async read() {
-              if (done) return { done: true, value: undefined };
-              return new Promise((res) => {
-                const chunk = stream.read();
-                if (chunk) { res({ done: false, value: new Uint8Array(chunk) }); return; }
-                stream.once("readable", () => {
-                  const c = stream.read();
-                  if (c) { res({ done: false, value: new Uint8Array(c) }); }
-                  else { done = true; res({ done: true, value: undefined }); }
-                });
-                stream.once("end", () => { done = true; res({ done: true, value: undefined }); });
-              });
-            },
-          };
-        },
-        cancel() { try { child.kill(); } catch {} },
-      },
-      async cancel() { try { child.kill(); } catch {} },
-    });
+  child.on("close", (code) => {
+    req.removeListener("close", cleanup);
+    if (!headersParsed) {
+      console.error("[ProxyAudio/WARP] curl exited without headers, code:", code);
+      if (!res.headersSent) fail(res, 502, "WARP_PROXY_FAILED", "WARP proxy returned no response");
+    } else {
+      res.end();
+    }
   });
 }
 
@@ -1418,14 +1368,13 @@ app.get("/api/proxy-audio", (req, res) => {
 
     try {
 const useWarp = YT_PROXY_ARGS.length > 0 && url.includes("googlevideo.com");
-      let upstream;
       if (useWarp) {
-        // Route googlevideo URLs through WARP: the URL was extracted via WARP
-        // and is IP-locked to Cloudflare's exit IP. A direct fetch would get 403.
-        upstream = await warpFetchViaCurl(url, headers, controller.signal);
-      } else {
-        upstream = await fetch(url, { signal: controller.signal, headers });
+        // Route googlevideo URLs through WARP — bypass the Response abstraction
+        // entirely and pipe curl stdout directly to the Express response.
+        req.removeListener("close", cleanup);
+        return pipeViaWarp(url, headers, res, req);
       }
+      const upstream = await fetch(url, { signal: controller.signal, headers });
 
       if (!upstream.ok) {
         // Drain/cancel the failed body so the socket can be reused
