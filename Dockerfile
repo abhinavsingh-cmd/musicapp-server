@@ -9,8 +9,9 @@ FROM node:20-slim
 # bgutil-ytdlp-pot-provider is the yt-dlp PO token plugin. Proof-of-origin
 # tokens make extraction traffic from a datacenter IP (Render) look
 # legitimate to YouTube.
-RUN apt-get update && apt-get install -y python3 python3-pip ffmpeg curl git && \
+RUN apt-get update && apt-get install -y python3 python3-pip ffmpeg curl git unzip && \
     pip3 install --break-system-packages -U yt-dlp bgutil-ytdlp-pot-provider && \
+    curl -fsSL https://deno.land/install.sh | sh && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Verify yt-dlp is installed and working
@@ -44,4 +45,7 @@ COPY server.cjs server-songs.json ./
 EXPOSE 3001
 
 # Start the PO token provider, then the WARP SOCKS5 proxy, then the API.
+ENV DENO_INSTALL="/root/.deno"
+ENV PATH="$DENO_INSTALL/bin:$PATH"
+
 CMD ["sh", "-c", "node /opt/bgutil-pot/server/build/main.js > /tmp/bgutil-pot.log 2>&1 & /usr/local/bin/wireproxy -c /root/wgcf-profile.conf > /tmp/wireproxy.log 2>&1 & sleep 3 && exec node server.cjs"]
