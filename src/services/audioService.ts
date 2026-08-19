@@ -751,7 +751,7 @@ export class AudioService {
   ): Promise<void> {
     const MAX_RETRIES = 3;
     // Proxy/extracted URLs need more time to start streaming than local files
-    const CANPLAY_TIMEOUT_MS = initialParams.src.includes('/proxy-audio') ? 10_000 : 8_000;
+    const CANPLAY_TIMEOUT_MS = (initialParams.src.includes('/proxy-audio') || initialParams.src.includes('/stream/')) ? 10_000 : 8_000;
 
     // Single ownership chokepoint: whatever engine owned the previous track
     // is released before this one claims playback.
@@ -946,7 +946,7 @@ export class AudioService {
     track: Track,
     current: { mode: 'html'; src: string; isLocalFile: boolean; expiresInMs?: number },
   ): Promise<{ mode: 'html'; src: string; isLocalFile: boolean; expiresInMs?: number } | null> {
-    if (current.isLocalFile || !current.src.includes('/proxy-audio')) return null;
+    if (current.isLocalFile || !(current.src.includes('/proxy-audio') || current.src.includes('/stream/'))) return null;
     const playable = await resolvePlayableSource(track, { force: true });
     if (!playable) return null;
     const fresh = playableToEngineParams(playable);

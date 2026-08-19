@@ -71,7 +71,7 @@ export function resolveLocalCopy(track: Track): PlayableSource | null {
 /** Heuristic expiry for known transient URL shapes. */
 function expiryForUrl(url: string): number | undefined {
   if (isLocalUrl(url)) return undefined;
-  if (url.includes('/proxy-audio')) return PROXY_URL_TTL_MS;
+  if (url.includes('/proxy-audio') || url.includes('/stream/')) return PROXY_URL_TTL_MS;
   return undefined;
 }
 
