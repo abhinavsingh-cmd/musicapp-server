@@ -57,15 +57,6 @@ export function inferProvider(song: {
 export function toTrack(input: TrackLike): Track {
   if (input.provider) {
     // Already normalized — pass through (idempotent).
-    // Ensure artwork: when coverArt is empty but a YouTube id is available,
-    // synthesize a thumbnail URL so the UI never shows a generic icon.
-    let artwork = input.artwork ?? input.coverArt ?? '';
-    if (!artwork && input.provider === 'youtube') {
-      const ytId = input.externalId ?? input.youtubeId;
-      if (ytId && YT_ID_RE.test(ytId)) {
-        artwork = `https://img.youtube.com/vi/${ytId}/mqdefault.jpg`;
-      }
-    }
     return {
       id: input.id,
       provider: input.provider,
@@ -74,7 +65,7 @@ export function toTrack(input: TrackLike): Track {
       album: input.album ?? '',
       genre: input.genre ?? 'Unknown',
       duration: input.duration || 0,
-      artwork,
+      artwork: input.artwork ?? input.coverArt ?? '',
       releaseYear: input.releaseYear,
       externalId: input.externalId,
       streamUrl: input.streamUrl ?? input.audioUrl,
@@ -86,20 +77,15 @@ export function toTrack(input: TrackLike): Track {
     };
   }
 
-  const provider = inferProvider(input);
-  let inferredArtwork = input.coverArt || input.artwork || '';
-  if (!inferredArtwork && provider === 'youtube' && input.youtubeId && YT_ID_RE.test(input.youtubeId)) {
-    inferredArtwork = `https://img.youtube.com/vi/${input.youtubeId}/mqdefault.jpg`;
-  }
   return {
     id: input.id,
-    provider,
+    provider: inferProvider(input),
     title: input.title || 'Unknown',
     artist: input.artist || 'Unknown',
     album: input.album || input.artist || '',
     genre: input.genre || 'Unknown',
     duration: input.duration || 0,
-    artwork: inferredArtwork,
+    artwork: input.coverArt || input.artwork || '',
     releaseYear: input.releaseYear,
     externalId: input.youtubeId,
     streamUrl: input.audioUrl || input.streamUrl,

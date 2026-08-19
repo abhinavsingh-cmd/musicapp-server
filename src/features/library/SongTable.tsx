@@ -57,7 +57,7 @@ const SongRow = memo(({ song, index, isActive, isCurrentlyPlaying, isLoading, on
         )}
       </div>
       <div className="flex items-center space-x-3 min-w-0 flex-1">
-        <CachedImage src={song.coverArt} youtubeId={song.youtubeId} alt="" className={cn("w-10 h-10 rounded-lg object-cover flex-shrink-0 transition-all duration-200", isCurrentlyPlaying && "ring-2 ring-violet-500 ring-offset-1 ring-offset-[var(--color-bg)] shadow-md shadow-violet-500/20")} />
+        <CachedImage src={song.coverArt} alt="" className={cn("w-10 h-10 rounded-lg object-cover flex-shrink-0 transition-all duration-200", isCurrentlyPlaying && "ring-2 ring-violet-500 ring-offset-1 ring-offset-[var(--color-bg)] shadow-md shadow-violet-500/20")} />
         <div className="min-w-0">
           <div className={cn("font-medium truncate transition-colors", isActive ? "text-violet-400" : "text-white")}>{song.title}</div>
           <div className="text-sm text-gray-400 truncate">{song.artist}</div>

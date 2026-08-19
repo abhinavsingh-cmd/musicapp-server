@@ -25,7 +25,6 @@ import {
   isDownloadedSong,
   resolvePlayableSong,
   stripStaleBlobUrl,
-  ensureYouTubeArtwork,
   toMusicSource,
   buildShareUrl,
   downloadEntryToSong,
@@ -184,45 +183,6 @@ describe('toMusicSource — unified view', () => {
     expect(lib.playableUri?.startsWith('blob:')).toBe(true);
     expect(lib.sourceType).toBe('library');
     expect(lib.sourceId).toBe('lib-9');
-  });
-});
-
-describe('ensureYouTubeArtwork', () => {
-  it('synthesizes a YouTube thumbnail when coverArt is empty and youtubeId is valid', () => {
-    const song = makeSong({ coverArt: '', youtubeId: 'dQw4w9WgXcQ' });
-    const result = ensureYouTubeArtwork(song);
-    expect(result.coverArt).toBe('https://img.youtube.com/vi/dQw4w9WgXcQ/mqdefault.jpg');
-  });
-
-  it('preserves existing coverArt — never overwrites a real thumbnail', () => {
-    const song = makeSong({ coverArt: 'https://cdn.example.com/art.jpg', youtubeId: 'dQw4w9WgXcQ' });
-    const result = ensureYouTubeArtwork(song);
-    expect(result.coverArt).toBe('https://cdn.example.com/art.jpg');
-  });
-
-  it('returns song unchanged when both coverArt and youtubeId are missing', () => {
-    const song = makeSong({ coverArt: '', youtubeId: undefined });
-    const result = ensureYouTubeArtwork(song);
-    expect(result.coverArt).toBe('');
-  });
-
-  it('returns song unchanged when youtubeId is not a valid 11-char YouTube id', () => {
-    const song = makeSong({ coverArt: '', youtubeId: 'short' });
-    const result = ensureYouTubeArtwork(song);
-    expect(result.coverArt).toBe('');
-  });
-
-  it('handles youtubeId with underscores and hyphens correctly', () => {
-    const song = makeSong({ coverArt: '', youtubeId: 'a-b_Cd12345' });
-    const result = ensureYouTubeArtwork(song);
-    expect(result.coverArt).toBe('https://img.youtube.com/vi/a-b_Cd12345/mqdefault.jpg');
-  });
-
-  it('does not block or mutate the original song object', () => {
-    const original = makeSong({ coverArt: '', youtubeId: 'dQw4w9WgXcQ' });
-    const result = ensureYouTubeArtwork(original);
-    expect(original.coverArt).toBe(''); // original untouched
-    expect(result).not.toBe(result === original ? original : null); // new object returned
   });
 });
 

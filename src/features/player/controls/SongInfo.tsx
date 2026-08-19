@@ -19,7 +19,6 @@ export const SongInfo: React.FC<SongInfoProps> = React.memo(({ className }) => {
   const title = useAudioStore((s) => s.currentSong?.title);
   const artist = useAudioStore((s) => s.currentSong?.artist);
   const coverArt = useAudioStore((s) => s.currentSong?.coverArt);
-  const youtubeId = useAudioStore((s) => s.currentSong?.youtubeId);
   const isPlaying = useAudioStore((s) => s.isPlaying);
   const duration = useAudioStore((s) => s.duration);
 
@@ -32,12 +31,13 @@ export const SongInfo: React.FC<SongInfoProps> = React.memo(({ className }) => {
             isPlaying && "animate-[pulse_2s_ease-in-out_infinite]"
           )}
         >
-          <CachedImage
-            src={coverArt || ''}
-            youtubeId={youtubeId}
-            alt={title || 'Now playing'}
-            className="w-full h-full object-cover"
-          />
+          {coverArt ? (
+            <CachedImage
+              src={coverArt}
+              alt={title || 'Now playing'}
+              className="w-full h-full object-cover"
+            />
+          ) : null}
           <div className="absolute inset-0 flex items-center justify-center">
             <Music size={18} className="text-white/80" />
           </div>

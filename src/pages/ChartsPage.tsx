@@ -67,7 +67,6 @@ const ChartRow = memo(({ song, index, onPlay, getTrendIcon, onContextMenu, onTou
     <div className="w-5 flex-shrink-0">{getTrendIcon(song.trend)}</div>
     <CachedImage
       src={song.thumbnail}
-      youtubeId={song.youtubeId}
       alt={song.title}
       className="w-12 h-12 rounded-lg object-cover flex-shrink-0"
     />

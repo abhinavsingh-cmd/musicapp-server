@@ -1,6 +1,5 @@
 import { Song } from '../types/music';
 import { api, apiFetch } from '../config/api';
-import { ensureYouTubeArtwork } from './musicSource';
 import { useSongsStore } from '../stores/songsStore';
 import { logger } from '../utils/logger';
 
@@ -102,7 +101,7 @@ function validateServerItems(items: unknown): Song[] {
     const artist = typeof item.artist === 'string' && item.artist.trim()
       ? item.artist.trim()
       : 'Unknown';
-    songs.push(ensureYouTubeArtwork({
+    songs.push({
       id: 'trending-' + id,
       youtubeId: id,
       title,
@@ -115,7 +114,7 @@ function validateServerItems(items: unknown): Song[] {
       releaseYear: 0,
       isFavorite: false,
       playCount: 0,
-    }));
+    });
   }
   return songs;
 }
