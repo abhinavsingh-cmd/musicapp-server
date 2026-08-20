@@ -69,7 +69,7 @@ describe('youtubeSearch — server response normalization', () => {
       { youtubeId: 'ytFallback1', title: 'Only youtubeId', duration: 150 },
     ]));
 
-    const results = await youtubeSearch('test');
+    const results = await youtubeSearch('ytfallback query');
     expect(results).toHaveLength(1);
     expect(results[0].id).toBe('ytFallback1');
   });
@@ -82,7 +82,7 @@ describe('youtubeSearch — server response normalization', () => {
       { id: 's4', title: 'Missing duration' },
     ]));
 
-    const results = await youtubeSearch('test');
+    const results = await youtubeSearch('coerce query');
     expect(results).toHaveLength(4);
     expect(results[0].duration).toBe(245);
     expect(results[0].viewCount).toBe(1000);
@@ -103,7 +103,7 @@ describe('youtubeSearch — server response normalization', () => {
       { id: 'thumb2', title: 'Relative thumb', thumbnail: '/vi/whatever.jpg', duration: 120 },
     ]));
 
-    const results = await youtubeSearch('test');
+    const results = await youtubeSearch('thumb query');
     expect(results[0].thumbnail).toBe('https://img.youtube.com/vi/thumb1/mqdefault.jpg');
     expect(results[1].thumbnail).toBe('https://img.youtube.com/vi/thumb2/mqdefault.jpg');
     // Never a garbage URL with an empty id segment
@@ -117,7 +117,7 @@ describe('youtubeSearch — server response normalization', () => {
       { id: 'meta1', duration: 120 },
     ]));
 
-    const results = await youtubeSearch('test');
+    const results = await youtubeSearch('meta query');
     expect(results).toHaveLength(1);
     expect(results[0].title).toBe('Unknown');
     expect(results[0].artist).toBe('Unknown');
@@ -131,7 +131,7 @@ describe('youtubeSearch — server response normalization', () => {
       { id: 'dup2', title: 'Unique', duration: 130 },
     ]));
 
-    const results = await youtubeSearch('test');
+    const results = await youtubeSearch('dedupe query');
     expect(results.map(r => r.id)).toEqual(['dup1', 'dup2']);
   });
 
@@ -141,97 +141,24 @@ describe('youtubeSearch — server response normalization', () => {
     expect(mockedApiFetch).not.toHaveBeenCalled();
   });
 
-  it('rejects (not fake "no results") when the server body is malformed and Invidious is down', async () => {
+  it('rejects when the server body is malformed (no Invidious fallback available)', async () => {
     mockedApiFetch.mockResolvedValueOnce({ json: async () => { throw new Error('bad json'); } });
-    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('network down'); }));
 
-    await expect(youtubeSearch('test')).rejects.toThrow('bad json');
+    await expect(youtubeSearch('test noinvidious')).rejects.toThrow('bad json');
   });
 
-  it('returns [] only for a definitive empty server answer, even when Invidious is down', async () => {
+  it('returns [] only for a definitive empty server answer', async () => {
     // Server replies authoritatively: valid envelope, zero results.
     mockedApiFetch.mockResolvedValueOnce(serverOk([]));
-    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('network down'); }));
 
-    const results = await youtubeSearch('test');
+    const results = await youtubeSearch('test empty');
     expect(results).toEqual([]);
   });
 
-  it('rejects with the server error when the server times out and Invidious is down', async () => {
+  it('rejects with the server error when the server times out', async () => {
     mockedApiFetch.mockRejectedValueOnce(new Error('Request timed out'));
-    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('network down'); }));
 
-    await expect(youtubeSearch('test')).rejects.toThrow('Request timed out');
-  });
-
-  it('falls back to Invidious when every server row is invalid', async () => {
-    mockedApiFetch.mockResolvedValueOnce(serverOk([
-      { title: 'no id', duration: 100 },
-      { id: '   ', title: 'whitespace id', duration: 100 },
-    ]));
-    vi.stubGlobal('fetch', vi.fn(async (input: unknown) => {
-      const url = String(input);
-      if (url.includes('yewtu.be')) {
-        return {
-          ok: true,
-          json: async () => ([
-            { videoId: 'inv1', title: 'Invidious Song', author: 'Inv Artist', lengthSeconds: 180, viewCount: 10 },
-          ]),
-        };
-      }
-      throw new Error('instance down');
-    }));
-
-    const results = await youtubeSearch('test');
-    expect(results).toHaveLength(1);
-    expect(results[0].id).toBe('inv1');
-  });
-
-  it('Invidious path: drops id-less entries and coerces string lengthSeconds', async () => {
-    mockedApiFetch.mockRejectedValueOnce(new Error('server down'));
-    vi.stubGlobal('fetch', vi.fn(async (input: unknown) => {
-      const url = String(input);
-      if (url.includes('yewtu.be')) {
-        return {
-          ok: true,
-          json: async () => ([
-            { videoId: 'inv2', title: 'Good Song', author: 'A', lengthSeconds: '200', viewCount: '99' },
-            { title: 'Missing videoId', lengthSeconds: 200 },
-            { videoId: 'inv3', title: 'Too Short', author: 'B', lengthSeconds: 30 },
-            null,
-          ]),
-        };
-      }
-      throw new Error('instance down');
-    }));
-
-    const results = await youtubeSearch('test');
-    expect(results).toHaveLength(1);
-    expect(results[0].id).toBe('inv2');
-    expect(results[0].duration).toBe(200);
-    expect(typeof results[0].duration).toBe('number');
-    expect(results[0].viewCount).toBe(99);
-  });
-
-  // ---- Hard-deadline guarantees: the search must ALWAYS settle ----
-
-  it('never hangs when Invidious instances neither resolve nor reject — the deadline bounds the fallback and surfaces a real error', async () => {
-    vi.useFakeTimers();
-    try {
-      mockedApiFetch.mockRejectedValueOnce(new Error('server down'));
-      // Platform-wedged instances: the fetch ignores its abort and never settles.
-      vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
-
-      const p = youtubeSearch('test');
-      let settled = false;
-      p.then(() => { settled = true; }, () => { settled = true; });
-
-      await vi.advanceTimersByTimeAsync(SEARCH_TIMEOUT_MS + 100);
-      await expect(p).rejects.toThrow('server down');
-      expect(settled).toBe(true);
-    } finally {
-      vi.useRealTimers();
-    }
+    await expect(youtubeSearch('test timeout')).rejects.toThrow('Request timed out');
   });
 
   it('never hangs on a stalled server body — it rejects with a timeout after the deadlines elapse', async () => {
@@ -239,18 +166,42 @@ describe('youtubeSearch — server response normalization', () => {
     try {
       // Headers arrive (apiFetch resolves), but the body never completes.
       mockedApiFetch.mockResolvedValueOnce({ json: () => new Promise(() => {}) });
-      vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
 
-      const p = youtubeSearch('test');
+      const p = youtubeSearch('test stall body');
       let settled = false;
       p.then(() => { settled = true; }, () => { settled = true; });
 
-      // 12s body deadline + 8s Invidious deadlines, all parallel.
-      await vi.advanceTimersByTimeAsync(12_000 + SEARCH_TIMEOUT_MS + 200);
+      // 12s body deadline
+      await vi.advanceTimersByTimeAsync(12_000 + 200);
       await expect(p).rejects.toThrow('Request timed out');
       expect(settled).toBe(true);
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('youtubeSearch — query enhancement', () => {
+  beforeEach(() => {
+    mockedApiFetch.mockReset();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('appends "music" when the query has no music-related terms', async () => {
+    mockedApiFetch.mockResolvedValueOnce(serverOk([]));
+    await youtubeSearch('taylor swift unique query');
+    const calledUrl = mockedApiFetch.mock.calls[0][0] as string;
+    expect(calledUrl).toContain('music');
+  });
+
+  it('does NOT append anything when the query already has music-related terms', async () => {
+    mockedApiFetch.mockResolvedValueOnce(serverOk([]));
+    await youtubeSearch('arijit singh song unique query');
+    const calledUrl = mockedApiFetch.mock.calls[0][0] as string;
+    expect(calledUrl).toContain('song');
+    expect(calledUrl).not.toContain('official');
   });
 });

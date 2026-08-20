@@ -14,13 +14,41 @@
 import { YTSong } from '../stores/searchStore';
 import { api, apiFetch, raceWithDeadline } from '../config/api';
 
-const INVIDIOUS_INSTANCES = [
-  'https://yewtu.be',
-  'https://invidious.flokinet.to',
-  'https://invidious.io.lol',
+const INVIDIOUS_INSTANCES: string[] = [
+  // Public Invidious instances are mostly dead as of 2026.
+  // Keep an empty array — the server is the only reliable path.
 ];
 
 export const SEARCH_TIMEOUT_MS = 8000;
+
+// ── Search result cache ────────────────────────────────────────────────────
+// Cache server search results to avoid re-searching for the same query.
+// The server-side yt-dlp search through WARP takes 5-15s per call — caching
+// makes repeat searches (e.g. typing, switching tabs) instant.
+const searchCache = new Map<string, { results: YTSong[]; expiresAt: number }>();
+const SEARCH_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const SEARCH_CACHE_MAX = 50;
+
+function getCachedSearch(query: string): YTSong[] | null {
+  const cached = searchCache.get(query.toLowerCase().trim());
+  if (cached && cached.expiresAt > Date.now()) return cached.results;
+  if (cached) searchCache.delete(query.toLowerCase().trim());
+  return null;
+}
+
+function setCachedSearch(query: string, results: YTSong[]): void {
+  const key = query.toLowerCase().trim();
+  if (searchCache.size >= SEARCH_CACHE_MAX) {
+    const oldest = searchCache.keys().next().value;
+    if (oldest !== undefined) searchCache.delete(oldest);
+  }
+  searchCache.set(key, { results, expiresAt: Date.now() + SEARCH_CACHE_TTL_MS });
+}
+
+/** Clear the search result cache. Used by tests and manual refresh. */
+export function clearSearchCache(): void {
+  searchCache.clear();
+}
 
 // ── Non-music keyword blacklist ──────────────────────────────────
 // Titles matching these are almost certainly NOT music.
@@ -276,9 +304,18 @@ export async function youtubeSearch(
 ): Promise<YTSong[]> {
   if (!query.trim()) return [];
 
-  // Enhance query for better music-only results
+  // Check cache first — instant for repeat searches
+  const cached = getCachedSearch(query);
+  if (cached) {
+    log(`Cache hit for query: ${query}`);
+    return cached;
+  }
+
+  // Simplified query enhancement — only add 'music' if not present.
+  // The old approach added 'official audio song' to every query, which
+  // bloated the yt-dlp search string and slowed it down significantly.
   const hasMusicTerm = /\b(song|music|audio|video|singer|artist|album|playlist)\b/i.test(query);
-  const musicQuery = hasMusicTerm ? `${query} official` : `${query} official audio song`;
+  const musicQuery = hasMusicTerm ? query : `${query} music`;
 
   // Why the primary path failed. Non-null => the search is in an error
   // state and MUST reject once every fallback also fails.
@@ -350,6 +387,7 @@ export async function youtubeSearch(
           .filter((r: YTSong | null): r is YTSong => r !== null);
         if (normalized.length > 0) {
           log(`Server search returned ${normalized.length} results`);
+          setCachedSearch(query, normalized);
           return normalized;
         }
         // Valid envelope, zero usable rows — the server answered

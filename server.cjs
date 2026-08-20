@@ -401,9 +401,25 @@ function extractAlbum(title) {
   return '';
 }
 
+// ── Server-side search cache ───────────────────────────────────────────────
+// yt-dlp search through WARP takes 5-15s. Caching avoids redundant
+// searches for the same query within a short window.
+const ytSearchCache = new Map(); // key -> { results, expiresAt }
+const YT_SEARCH_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const YT_SEARCH_CACHE_MAX = 100;
+
 app.get("/api/youtube/search", (req, res) => {
   const q = (req.query.q || "").toString().replace(/[^\w\s'!&.+-]/g, "").trim().slice(0, 100);
   if (!q) return ok(res, { results: [] }, "Empty query, returned empty results");
+
+  // Check cache first — instant response for repeat searches
+  const cacheKey = q.toLowerCase();
+  const cached = ytSearchCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    console.log("[YT Search] Cache hit for:", q);
+    return ok(res, { results: cached.results }, `Cached ${cached.results.length} results for "${q}"`);
+  }
+  if (cached) ytSearchCache.delete(cacheKey);
 
   console.log("[YT Search] Searching for:", q);
 
@@ -411,10 +427,10 @@ app.get("/api/youtube/search", (req, res) => {
   const musicQuery = hasSongWord ? q : q + " music";
 
   const attemptSearch = (attempt = 1) => {
-    const maxAttempts = 3;
+    const maxAttempts = 2;
 
     runYtDlp([
-      "ytsearch25:" + musicQuery,
+      "ytsearch15:" + musicQuery,
       "--flat-playlist",
       "--dump-json",
       "--no-warnings",
@@ -424,7 +440,7 @@ app.get("/api/youtube/search", (req, res) => {
       ...YT_COOKIES_ARGS,
       ...YT_PROXY_ARGS,
       "--match-filters", "!is_live & !was_live & duration>?60 & duration<?600",
-    ], { timeout: 30000, maxBuffer: 2 * 1024 * 1024 }, (err, stdout, stderr) => {
+    ], { timeout: 20000, maxBuffer: 2 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) {
         console.error("[YT Search] Error:", err.message, "attempt", attempt);
         if (attempt < maxAttempts) {
@@ -463,6 +479,12 @@ app.get("/api/youtube/search", (req, res) => {
         const top = results.slice(0, 20);
         for (const r of top) delete r.score;
         console.log("[YT Search] Found", top.length, "music results for:", q);
+        // Cache results for repeat searches
+        while (ytSearchCache.size >= YT_SEARCH_CACHE_MAX) {
+          const oldest = ytSearchCache.keys().next().value;
+          ytSearchCache.delete(oldest);
+        }
+        ytSearchCache.set(cacheKey, { results: top, expiresAt: Date.now() + YT_SEARCH_CACHE_TTL_MS });
         return ok(res, { results: top }, `Found ${top.length} results for "${q}"`);
       } catch (e) {
         console.error("[YT Search] Parse error:", e.message);
