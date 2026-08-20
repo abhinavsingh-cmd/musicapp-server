@@ -239,7 +239,7 @@ export const Player: React.FC<PlayerProps> = memo(({ className }) => {
             <button
               onClick={() => togglePanel('queue')}
               className={cn(
-                "w-10 h-10 rounded-full flex items-center justify-center transition-all duration-200 active:scale-90 bg-white/10 hover:bg-white/20",
+                "w-10 h-10 rounded-full flex items-center justify-center transition-[background-color,color,box-shadow,transform] duration-200 active:scale-90 bg-white/10 hover:bg-white/20",
                 showQueue
                   ? "bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white shadow-glow"
                   : "text-gray-400 hover:text-white"
@@ -252,7 +252,7 @@ export const Player: React.FC<PlayerProps> = memo(({ className }) => {
             <button
               onClick={() => togglePanel('lyrics')}
               className={cn(
-                "w-10 h-10 rounded-full flex items-center justify-center transition-all duration-200 active:scale-90 bg-white/10 hover:bg-white/20",
+                "w-10 h-10 rounded-full flex items-center justify-center transition-[background-color,color,box-shadow,transform] duration-200 active:scale-90 bg-white/10 hover:bg-white/20",
                 showLyrics
                   ? "bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white shadow-glow"
                   : "text-gray-400 hover:text-white"
@@ -265,7 +265,7 @@ export const Player: React.FC<PlayerProps> = memo(({ className }) => {
             <button
               onClick={() => togglePanel('equalizer')}
               className={cn(
-                "w-10 h-10 rounded-full flex items-center justify-center transition-all duration-200 active:scale-90 bg-white/10 hover:bg-white/20",
+                "w-10 h-10 rounded-full flex items-center justify-center transition-[background-color,color,box-shadow,transform] duration-200 active:scale-90 bg-white/10 hover:bg-white/20",
                 showEqualizer
                   ? "bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white shadow-glow"
                   : "text-gray-400 hover:text-white"

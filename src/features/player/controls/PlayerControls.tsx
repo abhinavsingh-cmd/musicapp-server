@@ -69,7 +69,7 @@ export const PlayerControls: React.FC<PlayerControlsProps> = React.memo(({ class
           onClick={toggleShuffle}
           disabled={!currentSong}
           className={cn(
-            "w-9 h-9 rounded-full flex items-center justify-center transition-all duration-200 active:scale-90",
+            "w-9 h-9 rounded-full flex items-center justify-center transition-[background-color,color,box-shadow,transform] duration-200 active:scale-90",
             showShuffleActive
               ? "bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white shadow-glow"
               : "text-gray-500 hover:text-white hover:bg-white/10",
@@ -83,7 +83,7 @@ export const PlayerControls: React.FC<PlayerControlsProps> = React.memo(({ class
         <button
           onClick={() => handleSkip(previousSong)}
           disabled={!currentSong}
-          className="w-9 h-9 rounded-full flex items-center justify-center text-gray-300 hover:text-white hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed transition-all duration-200 active:scale-90"
+          className="w-9 h-9 rounded-full flex items-center justify-center text-gray-300 hover:text-white hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed transition-[color,background-color,transform] duration-200 active:scale-90"
         >
           <SkipBack size={18} fill="currentColor" />
         </button>
@@ -92,7 +92,7 @@ export const PlayerControls: React.FC<PlayerControlsProps> = React.memo(({ class
           onClick={togglePlayPause}
           disabled={!currentSong}
           className={cn(
-            "w-12 h-12 sm:w-14 sm:h-14 rounded-full flex items-center justify-center text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all duration-200 active:scale-90",
+            "w-12 h-12 sm:w-14 sm:h-14 rounded-full flex items-center justify-center text-white disabled:opacity-30 disabled:cursor-not-allowed transition-[box-shadow,transform] duration-200 active:scale-90",
             "bg-gradient-to-br from-violet-500 to-fuchsia-500",
             "shadow-[0_0_30px_rgba(139,92,246,0.5)]",
             "hover:shadow-[0_0_40px_rgba(139,92,246,0.7)]"
@@ -110,7 +110,7 @@ export const PlayerControls: React.FC<PlayerControlsProps> = React.memo(({ class
         <button
           onClick={() => handleSkip(nextSong)}
           disabled={!currentSong}
-          className="w-9 h-9 rounded-full flex items-center justify-center text-gray-300 hover:text-white hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed transition-all duration-200 active:scale-90"
+          className="w-9 h-9 rounded-full flex items-center justify-center text-gray-300 hover:text-white hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed transition-[color,background-color,transform] duration-200 active:scale-90"
         >
           <SkipForward size={18} fill="currentColor" />
         </button>
@@ -119,7 +119,7 @@ export const PlayerControls: React.FC<PlayerControlsProps> = React.memo(({ class
           onClick={cycleRepeat}
           disabled={!currentSong}
           className={cn(
-            "w-9 h-9 rounded-full flex items-center justify-center transition-all duration-200 active:scale-90 relative",
+            "w-9 h-9 rounded-full flex items-center justify-center transition-[background-color,color,box-shadow,transform] duration-200 active:scale-90 relative",
             showRepeatActive
               ? "bg-gradient-to-br from-emerald-500 to-teal-500 text-white shadow-[0_0_20px_rgba(16,185,129,0.4)]"
               : "text-gray-500 hover:text-white hover:bg-white/10",
@@ -140,7 +140,7 @@ export const PlayerControls: React.FC<PlayerControlsProps> = React.memo(({ class
         <button
           onClick={() => currentSong && toggleFavorite(favoriteKey(currentSong))}
           className={cn(
-            "w-9 h-9 rounded-full flex items-center justify-center transition-all duration-200 active:scale-90",
+            "w-9 h-9 rounded-full flex items-center justify-center transition-[background-color,color,box-shadow,transform] duration-200 active:scale-90",
             isFav
               ? "bg-gradient-to-br from-red-500 to-pink-500 text-white shadow-[0_0_20px_rgba(239,68,68,0.4)]"
               : "text-gray-500 hover:text-red-400 hover:bg-white/10"

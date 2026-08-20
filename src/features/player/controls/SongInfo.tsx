@@ -27,8 +27,7 @@ export const SongInfo: React.FC<SongInfoProps> = React.memo(({ className }) => {
       <div className="relative flex-shrink-0">
         <div
           className={cn(
-            "w-11 h-11 rounded-lg overflow-hidden bg-gradient-to-br from-purple-500 to-pink-500 shadow-md transition-all duration-300",
-            isPlaying && "animate-[pulse_2s_ease-in-out_infinite]"
+            "w-11 h-11 rounded-lg overflow-hidden bg-gradient-to-br from-purple-500 to-pink-500 shadow-md",
           )}
         >
           {coverArt ? (

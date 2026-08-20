@@ -26,7 +26,7 @@ import {
   type Track,
   type TrackProvider,
 } from '../providers';
-import { downloadSongWithProgress } from '../utils/downloadManager';
+import { downloadSongWithProgress, resetDbConnection } from '../utils/downloadManager';
 import { extractAudioUrl, invalidateAudioUrl } from '../services/youtubeAudioExtractor';
 import { youtubeSearch } from '../services/youtubeSearchService';
 import { trendingService } from '../services/trendingService';
@@ -404,6 +404,7 @@ describe('downloadSongWithProgress with a normalized Track', () => {
   }
 
   beforeEach(() => {
+    resetDbConnection();
     idbStores = new Map([['songs', new Map()], ['thumbnails', new Map()], ['meta', new Map()]]);
     const mockDB: any = {
       objectStoreNames: { contains: (n: string) => idbStores.has(n) },

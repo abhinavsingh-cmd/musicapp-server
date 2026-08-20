@@ -1,5 +1,5 @@
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { isValidBlob, repairDownloads } from './downloadManager';
+import { isValidBlob, repairDownloads, resetDbConnection } from './downloadManager';
 
 // ---------------------------------------------------------------------------
 // Fixtures — repairDownloads now does full verification (size + mime + magic
@@ -123,6 +123,7 @@ const originalIndexedDB = globalThis.indexedDB;
 
 beforeEach(() => {
   resetDB();
+  resetDbConnection();
   dbVersion = 1;
 
   const mockDB: any = {

@@ -52,8 +52,17 @@ export const STALL_TIMEOUT_MS = 40_000;
 // IndexedDB helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Module-level persistent connection. Reused across every call to openDB()
+ * and never explicitly closed — the browser garbage-collects it when the
+ * page unloads. Avoids the 40-open/close-per-scroll thrashing that was the
+ * root cause of the original UI lag on Android.
+ */
+let dbPromise: Promise<IDBDatabase> | null = null;
+
 function openDB(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
+  if (dbPromise) return dbPromise;
+  dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
       const db = req.result;
@@ -70,8 +79,17 @@ function openDB(): Promise<IDBDatabase> {
       }
     };
     req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    req.onerror = () => { dbPromise = null; reject(req.error); };
   });
+  return dbPromise;
+}
+
+/** Reset for tests only. */
+export function resetDbConnection(): void {
+  if (dbPromise) {
+    try { dbPromise.then(db => db.close(), () => {}); } catch {}
+    dbPromise = null;
+  }
 }
 
 function txGet<T>(db: IDBDatabase, store: string, key: IDBValidKey): Promise<T | undefined> {
@@ -127,7 +145,6 @@ export async function clearAllDownloads(): Promise<void> {
   await txClear(db, STORE_SONGS);
   await txClear(db, STORE_THUMBS);
   await txClear(db, STORE_META);
-  db.close();
 }
 
 // ---------------------------------------------------------------------------
@@ -577,7 +594,6 @@ export async function downloadSongWithProgress(
   try {
     await txPut(db, STORE_SONGS, entry);
   } catch (err: any) {
-    db.close();
     // IndexedDB throws DOMException with name "QuotaExceededError" when storage
     // is full.  Surface a clear message instead of a generic failure.
     if (err?.name === 'QuotaExceededError' || err?.message?.includes('quota')) {
@@ -585,7 +601,6 @@ export async function downloadSongWithProgress(
     }
     throw downloadFailure(`Failed to save to local storage: ${err?.message || err}`, { transient: true, cause: err });
   }
-  db.close();
 
   entry.audioUrl = URL.createObjectURL(blob);
 
@@ -682,13 +697,11 @@ export async function cacheMetadata(song: {
     releaseYear: song.releaseYear || 0,
     cachedAt: Date.now(),
   });
-  db.close();
 }
 
 export async function getAllCachedMetadata(): Promise<CachedMeta[]> {
   const db = await openDB();
   const results = await txGetAll<CachedMeta>(db, STORE_META);
-  db.close();
   return results.sort((a, b) => b.cachedAt - a.cachedAt);
 }
 
@@ -728,7 +741,6 @@ export async function repairDownloads(): Promise<number> {
       removed++;
     }
   }
-  db.close();
   if (removed > 0) {
     logger.warn(`[Downloads] Repaired: removed ${removed} corrupted/empty download entries`);
   }
@@ -753,7 +765,6 @@ export async function saveDownload(song: Omit<DownloadedSong, 'audioUrl' | 'down
     size: song.audioBlob.size,
   };
   await txPut(db, STORE_SONGS, entry);
-  db.close();
   entry.audioUrl = URL.createObjectURL(song.audioBlob);
   return entry;
 }
@@ -761,7 +772,6 @@ export async function saveDownload(song: Omit<DownloadedSong, 'audioUrl' | 'down
 export async function getDownload(id: string): Promise<DownloadedSong | null> {
   const db = await openDB();
   const result = await txGet<DownloadedSong>(db, STORE_SONGS, id);
-  db.close();
   return result || null;
 }
 
@@ -774,14 +784,12 @@ export async function getDownloadByYoutubeId(youtubeId: string): Promise<Downloa
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => resolve(undefined);
   });
-  db.close();
   return result || null;
 }
 
 export async function getAllDownloads(): Promise<DownloadedSong[]> {
   const db = await openDB();
   const results = await txGetAll<DownloadedSong>(db, STORE_SONGS);
-  db.close();
   return results.sort((a, b) => b.downloadedAt - a.downloadedAt);
 }
 
@@ -790,14 +798,13 @@ export async function removeDownload(id: string): Promise<void> {
   const existing = await txGet<DownloadedSong>(db, STORE_SONGS, id);
   if (existing?.audioUrl) URL.revokeObjectURL(existing.audioUrl);
   await txDelete(db, STORE_SONGS, id);
-  db.close();
 }
 
 export async function isDownloaded(youtubeId: string): Promise<boolean> {
   const db = await openDB();
   const count = await txCount(db, STORE_SONGS);
   // Fallback: iterate if index count not available
-  if (count === 0) { db.close(); return false; }
+  if (count === 0) { return false; }
   const tx = db.transaction(STORE_SONGS, 'readonly');
   const idx = tx.objectStore(STORE_SONGS).index('youtubeId');
   const req = idx.count(youtubeId);
@@ -805,7 +812,6 @@ export async function isDownloaded(youtubeId: string): Promise<boolean> {
     req.onsuccess = () => resolve(req.result > 0);
     req.onerror = () => resolve(false);
   });
-  db.close();
   return result;
 }
 
@@ -817,7 +823,6 @@ export async function getCacheSize(): Promise<number> {
   const db = await openDB();
   const songs = await txGetAll<DownloadedSong>(db, STORE_SONGS);
   const thumbs = await txGetAll<CachedThumbnail>(db, STORE_THUMBS);
-  db.close();
   const songSize = songs.reduce((acc, s) => acc + (s.size || 0), 0);
   const thumbSize = thumbs.reduce((acc, t) => acc + (t.blob?.size || 0), 0);
   return songSize + thumbSize;
@@ -840,7 +845,6 @@ export async function evictOldCache(targetBytes?: number): Promise<number> {
     removed++;
   }
 
-  db.close();
   return removed;
 }
 
@@ -851,7 +855,6 @@ export async function evictOldCache(targetBytes?: number): Promise<number> {
 export async function getDownloadCount(): Promise<number> {
   const db = await openDB();
   const count = await txCount(db, STORE_SONGS);
-  db.close();
   return count;
 }
 
@@ -859,7 +862,6 @@ export async function getStorageBreakdown(): Promise<{ songs: number; thumbnails
   const db = await openDB();
   const songs = await txGetAll<DownloadedSong>(db, STORE_SONGS);
   const thumbs = await txGetAll<CachedThumbnail>(db, STORE_THUMBS);
-  db.close();
   const songsSize = songs.reduce((acc, s) => acc + (s.size || 0), 0);
   const thumbsSize = thumbs.reduce((acc, t) => acc + (t.blob?.size || 0), 0);
   return { songs: songsSize, thumbnails: thumbsSize, total: songsSize + thumbsSize };
@@ -868,6 +870,5 @@ export async function getStorageBreakdown(): Promise<{ songs: number; thumbnails
 export async function clearThumbnailCache(): Promise<void> {
   const db = await openDB();
   await txClear(db, STORE_THUMBS);
-  db.close();
   thumbnailUrlCache.clear();
 }

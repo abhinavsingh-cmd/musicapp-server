@@ -84,7 +84,7 @@ const SortableSongRow = memo(({ song, index, localIndex, isCurrent, isPlaying, s
       ref={setNodeRef}
       style={style}
       className={cn(
-        "flex items-center gap-3 px-3 py-2 rounded-xl group transition-all duration-200",
+        "flex items-center gap-3 px-3 py-2 rounded-xl group transition-[background-color,border-color,box-shadow] duration-200",
         isCurrent && "bg-violet-500/15 border border-violet-500/20",
         !isCurrent && "hover:bg-white/5",
         isDragging && "shadow-lg shadow-violet-500/20"
@@ -153,7 +153,7 @@ const SortableSongRow = memo(({ song, index, localIndex, isCurrent, isPlaying, s
       {section !== 'recent' && (
         <button
           onClick={() => removeFromQueue(index)}
-          className="opacity-0 group-hover:opacity-100 text-gray-600 hover:text-red-400 transition-all flex-shrink-0"
+          className="opacity-0 group-hover:opacity-100 text-gray-600 hover:text-red-400 transition-[opacity,color] flex-shrink-0"
         >
           <X size={14} />
         </button>
@@ -255,7 +255,7 @@ export const QueuePanel: React.FC = memo(() => {
             <button
               onClick={toggleShuffle}
               className={cn(
-                "w-7 h-7 rounded-full flex items-center justify-center transition-all",
+                "w-7 h-7 rounded-full flex items-center justify-center transition-[background-color,color]",
                 isShuffled ? "text-violet-400 bg-violet-500/15" : "text-gray-600 hover:text-gray-400"
               )}
               title={isShuffled ? "Shuffle On" : "Shuffle Off"}
@@ -265,7 +265,7 @@ export const QueuePanel: React.FC = memo(() => {
             <button
               onClick={cycleRepeat}
               className={cn(
-                "w-7 h-7 rounded-full flex items-center justify-center transition-all relative",
+                "w-7 h-7 rounded-full flex items-center justify-center transition-[background-color,color] relative",
                 repeatMode !== 'off' ? "text-emerald-400 bg-emerald-500/15" : "text-gray-600 hover:text-gray-400"
               )}
               title={`Repeat: ${repeatMode}`}
@@ -279,7 +279,7 @@ export const QueuePanel: React.FC = memo(() => {
             </button>
             <button
               onClick={clearQueue}
-              className="w-7 h-7 rounded-full flex items-center justify-center text-gray-600 hover:text-red-400 transition-all"
+              className="w-7 h-7 rounded-full flex items-center justify-center text-gray-600 hover:text-red-400 transition-[color]"
               title="Clear Queue"
             >
               <Trash2 size={13} />

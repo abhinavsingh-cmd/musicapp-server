@@ -8,6 +8,7 @@ import {
   cancelDownloadById,
   HEADER_TIMEOUT_MS,
   STALL_TIMEOUT_MS,
+  resetDbConnection,
 } from './downloadManager';
 // Warm the provider module graph at import time. The download path lazy-
 // imports the YouTube provider; under vi.useFakeTimers() a first-time
@@ -141,6 +142,7 @@ function resetDB() {
 
 beforeEach(() => {
   resetDB();
+  resetDbConnection();
   const mockDB: any = {
     objectStoreNames: { contains: (name: string) => stores.has(name) },
     createObjectStore: (name: string, opts: any) => {

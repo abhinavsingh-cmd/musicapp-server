@@ -57,7 +57,7 @@ const SongRow = memo(({ song, index, isActive, isCurrentlyPlaying, isLoading, on
         )}
       </div>
       <div className="flex items-center space-x-3 min-w-0 flex-1">
-        <CachedImage src={song.coverArt} alt="" className={cn("w-10 h-10 rounded-lg object-cover flex-shrink-0 transition-all duration-200", isCurrentlyPlaying && "ring-2 ring-violet-500 ring-offset-1 ring-offset-[var(--color-bg)] shadow-md shadow-violet-500/20")} />
+        <CachedImage src={song.coverArt} alt="" className={cn("w-10 h-10 rounded-lg object-cover flex-shrink-0 transition-[box-shadow,ring] duration-200", isCurrentlyPlaying && "ring-2 ring-violet-500 ring-offset-1 ring-offset-[var(--color-bg)] shadow-md shadow-violet-500/20")} />
         <div className="min-w-0">
           <div className={cn("font-medium truncate transition-colors", isActive ? "text-violet-400" : "text-white")}>{song.title}</div>
           <div className="text-sm text-gray-400 truncate">{song.artist}</div>
@@ -67,7 +67,7 @@ const SongRow = memo(({ song, index, isActive, isCurrentlyPlaying, isLoading, on
       <div className="hidden sm:flex items-center w-20 text-sm text-gray-500 flex-shrink-0"><Clock size={12} className="mr-1" />{fmt(song.duration)}</div>
       <div className="flex items-center justify-end gap-1 flex-shrink-0">
         <DownloadButton song={song} />
-        <button className={cn("transition-all duration-200 p-1.5 rounded-lg", isFav ? "text-red-500" : "text-gray-500 opacity-0 group-hover:opacity-100 hover:text-red-400 hover:bg-white/5")} onClick={(e) => { e.stopPropagation(); onFavToggle(); }}>
+        <button className={cn("transition-[color,opacity,background-color] duration-200 p-1.5 rounded-lg", isFav ? "text-red-500" : "text-gray-500 opacity-0 group-hover:opacity-100 hover:text-red-400 hover:bg-white/5")} onClick={(e) => { e.stopPropagation(); onFavToggle(); }}>
           <Heart size={14} fill={isFav ? "currentColor" : "none"} />
         </button>
       </div>

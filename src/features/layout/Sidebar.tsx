@@ -80,7 +80,7 @@ const NavItem = memo(function NavItem({ item, isActive, onClose }: {
         onClick={onClose}
         onMouseEnter={handlePreload}
         className={cn(
-          "flex items-center space-x-3 px-3 py-2.5 rounded-xl transition-all duration-200 group relative overflow-hidden",
+          "flex items-center space-x-3 px-3 py-2.5 rounded-xl transition-[color,background-color] duration-200 group relative overflow-hidden",
           isActive
             ? "text-[var(--color-text)] font-semibold bg-white/5"
             : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
@@ -88,7 +88,7 @@ const NavItem = memo(function NavItem({ item, isActive, onClose }: {
       >
         {isActive && (
           <div
-            className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-6 rounded-r-full transition-all duration-200"
+            className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-6 rounded-r-full transition-[opacity] duration-200"
             style={{ background: 'linear-gradient(to bottom, var(--color-accent), var(--color-accent-dark))' }}
           />
         )}
@@ -96,7 +96,7 @@ const NavItem = memo(function NavItem({ item, isActive, onClose }: {
         <Icon
           size={20}
           className={cn(
-            "relative z-10 transition-all duration-200",
+            "relative z-10 transition-[color,transform] duration-200",
             isActive
               ? "text-[var(--color-accent)]"
               : "text-[var(--color-text-muted)] group-hover:text-[var(--color-accent)] group-hover:scale-110"
@@ -114,9 +114,9 @@ const CreateItem = memo(({ item, onClose }: { item: typeof createItems[0]; onClo
     key={item.path}
     to={item.path}
     onClick={onClose}
-    className="flex items-center space-x-3 px-3 py-2 rounded-xl transition-all duration-300 text-[var(--color-text-muted)] hover:text-[var(--color-text)] group"
+    className="flex items-center space-x-3 px-3 py-2 rounded-xl transition-[color] duration-300 text-[var(--color-text-muted)] hover:text-[var(--color-text)] group"
   >
-    <item.icon size={20} className="text-[var(--color-text-muted)] group-hover:text-[var(--color-accent)] group-hover:scale-110 transition-all" />
+    <item.icon size={20} className="text-[var(--color-text-muted)] group-hover:text-[var(--color-accent)] group-hover:scale-110 transition-[color,transform]" />
     <span className="font-medium">{item.label}</span>
   </Link>
 ));

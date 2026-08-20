@@ -59,8 +59,22 @@ export function useVirtualList(
     const el = containerRef.current;
     if (!el) return;
 
+    // Cache the scroll parent lazily on first compute(). findScrollParent
+    // calls getComputedStyle() which is expensive on every scroll event.
+    // The cache is reset when deps change (new layout effect).
+    // We re-detect if the cached parent looks stale (e.g. clientHeight 0
+    // during test mock setup, or after a real layout shift).
+    let cachedParent: HTMLElement | null = null;
+    const getParent = (): HTMLElement => {
+      if (cachedParent && cachedParent !== document.documentElement && cachedParent.clientHeight > 0) {
+        return cachedParent;
+      }
+      cachedParent = findScrollParent(el);
+      return cachedParent;
+    };
+
     const compute = () => {
-      const parent = findScrollParent(el);
+      const parent = getParent();
       const parentRect = parent.getBoundingClientRect();
       const viewportTop = parent === document.documentElement || parent === document.body ? 0 : parentRect.top;
       const visibleStart = viewportTop - el.getBoundingClientRect().top;
@@ -81,7 +95,8 @@ export function useVirtualList(
     if (typeof ResizeObserver !== 'undefined') {
       ro = new ResizeObserver(compute);
       ro.observe(el);
-      const parent = findScrollParent(el);
+      // Observe the actual parent (re-resolve from cache for the observer).
+      const parent = getParent();
       if (parent !== document.documentElement && parent !== document.body) ro.observe(parent);
     }
     return () => {
