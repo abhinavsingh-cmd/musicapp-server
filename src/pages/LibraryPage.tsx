@@ -40,12 +40,10 @@ export const LibraryPage: React.FC = () => {
   // false "Failed to load library" while the fetch was still legitimately
   // in flight.
   const retryTimeout = 60000;
-  const now = Date.now();
-  
   const shouldRetryFetch = useMemo(() => {
-    const timeSinceLastAttempt = now - lastFetchAttempt;
+    const timeSinceLastAttempt = Date.now() - lastFetchAttempt;
     return loading && (timeSinceLastAttempt >= retryTimeout || fetchRetries >= maxRetries);
-  }, [loading, lastFetchAttempt, fetchRetries, now, retryTimeout, maxRetries]);
+  }, [loading, lastFetchAttempt, fetchRetries, retryTimeout, maxRetries]);
 
   useEffect(() => {
     const attemptFetch = () => {

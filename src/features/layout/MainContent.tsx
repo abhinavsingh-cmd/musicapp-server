@@ -36,14 +36,14 @@ export const MainContent = memo(() => {
         <div className="flex items-center space-x-2">
           <button
             onClick={() => navigate('/search')}
-            className="p-2.5 rounded-xl bg-white/10 hover:bg-white/20 transition-all"
+            className="p-2.5 rounded-xl bg-white/10 hover:bg-white/20 transition-[background-color]"
             aria-label="Search"
           >
             <Search className="w-5 h-5 text-white" />
           </button>
           <button
             onClick={() => navigate('/settings')}
-            className="p-2.5 rounded-xl bg-white/10 hover:bg-white/20 transition-all"
+            className="p-2.5 rounded-xl bg-white/10 hover:bg-white/20 transition-[background-color]"
             aria-label="Settings"
           >
             <Settings className="w-5 h-5 text-white" />

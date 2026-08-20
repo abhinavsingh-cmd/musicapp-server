@@ -125,10 +125,15 @@ export const ChartsPage: React.FC = () => {
     });
   }, [hydrateFromCache, fetchCharts]);
 
-  const charts = useMemo(() =>
-    (activeTab === 'top' ? topCharts : activeTab === 'global' ? globalCharts : bollywoodCharts) || [],
-    [activeTab, topCharts, globalCharts, bollywoodCharts]
-  );
+  const charts = useMemo(() => {
+    // Only show LIVE/CACHED (YouTube) data. LIBRARY/BUILT_IN fallbacks
+    // cause a visible flicker: page shows library data first, then swaps
+    // to YouTube data when the fresh fetch arrives. Hide fallback data
+    // entirely — the loading skeleton is shown until YouTube data arrives.
+    const isYouTubeData = source === 'LIVE' || source === 'CACHED';
+    const raw = activeTab === 'top' ? topCharts : activeTab === 'global' ? globalCharts : bollywoodCharts;
+    return isYouTubeData ? (raw || []) : [];
+  }, [activeTab, topCharts, globalCharts, bollywoodCharts, source]);
   const chartWin = useVirtualList(charts.length, CHART_ROW_HEIGHT, chartListRef);
 
   const handlePlay = useCallback((song: ChartSong, index: number) => {
@@ -182,7 +187,7 @@ export const ChartsPage: React.FC = () => {
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
-              className={`px-4 py-2 rounded-xl text-sm font-medium transition-all ${
+              className={`px-4 py-2 rounded-xl text-sm font-medium transition-[background-color,color] ${
                 activeTab === tab
                   ? 'bg-violet-500 text-white'
                   : 'bg-white/5 text-gray-400 hover:bg-white/10'

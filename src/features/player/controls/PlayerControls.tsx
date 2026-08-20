@@ -160,7 +160,7 @@ export const PlayerControls: React.FC<PlayerControlsProps> = React.memo(({ class
             : 'Download'
           }
           className={cn(
-            "w-9 h-9 rounded-full flex items-center justify-center transition-all duration-200 active:scale-90",
+            "w-9 h-9 rounded-full flex items-center justify-center transition-[background-color,color,box-shadow,transform] duration-200 active:scale-90",
             downloaded
               ? "bg-gradient-to-br from-emerald-500 to-teal-500 text-white shadow-[0_0_20px_rgba(16,185,129,0.4)]"
               : downloading
@@ -185,7 +185,7 @@ export const PlayerControls: React.FC<PlayerControlsProps> = React.memo(({ class
             step="0.01"
             value={volume}
             onChange={(e) => setVolume(parseFloat(e.target.value))}
-            className="w-20 sm:w-24 h-1.5 rounded-full appearance-none cursor-pointer bg-white/10 group-hover:bg-white/20 transition-all"
+            className="w-20 sm:w-24 h-1.5 rounded-full appearance-none cursor-pointer bg-white/10 group-hover:bg-white/20 transition-[background-color]"
             style={{
               background: `linear-gradient(to right, rgb(139 92 246) 0%, rgb(139 92 246) ${volume * 100}%, rgba(255,255,255,0.1) ${volume * 100}%, rgba(255,255,255,0.1) 100%)`,
             }}
