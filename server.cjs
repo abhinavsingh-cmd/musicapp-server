@@ -824,6 +824,113 @@ const streamCache = new Map(); // videoId -> { data: Buffer, mime: string, expir
 const STREAM_CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
 const STREAM_CACHE_MAX_ENTRIES = 50;
 
+// ── Stream cache pre-warming ────────────────────────────────────────────────
+// Download the top N trending songs in the background so the first user play
+// is a cache hit (~1.5s) instead of a cold yt-dlp extraction (~20s).
+// Runs after the first trending fetch and then every PREWARM_INTERVAL_MS.
+const PREWARM_SONGS = 15;        // top N trending songs to pre-warm
+const PREWARM_CONCURRENCY = 2;   // parallel yt-dlp downloads
+const PREWARM_INTERVAL_MS = 12 * 60 * 1000; // re-warm every 12 minutes
+const PREWARM_STARTUP_DELAY = 5000; // wait 5s after boot before first pre-warm
+
+function prewarmOneStream(videoId) {
+  if (streamCache.has(videoId) && streamCache.get(videoId).expiresAt > Date.now()) {
+    console.log('[PreWarm] Already cached:', videoId);
+    return Promise.resolve();
+  }
+  console.log('[PreWarm] Downloading:', videoId);
+  const audioUrl = 'https://www.youtube.com/watch?v=' + videoId;
+  return new Promise((resolve) => {
+    const ytArgs = [
+      '-f', 'bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio/best',
+      '-o', '-',
+      '--no-check-certificates',
+      '--age-limit', '18',
+      ...YT_EXTRACTOR_ARGS,
+      ...YT_COOKIES_ARGS,
+      ...YT_PROXY_ARGS,
+      '--add-header', 'User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      audioUrl,
+    ];
+    const yt = spawn('yt-dlp', ytArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const chunks = [];
+    let totalBytes = 0;
+    let detectedMime = 'audio/webm';
+    let killed = false;
+
+    const timer = setTimeout(() => { killed = true; yt.kill('SIGTERM'); }, 60_000);
+
+    yt.stdout.on('data', (chunk) => {
+      // MIME detection on first chunk
+      if (chunks.length === 0 && chunk.length >= 8) {
+        if (chunk[0] === 0x49 && chunk[1] === 0x44 && chunk[2] === 0x33) detectedMime = 'audio/mpeg';
+        else if (chunk[0] === 0xFF && (chunk[1] === 0xFB || chunk[1] === 0xF3 || chunk[1] === 0xF2)) detectedMime = 'audio/mpeg';
+        else if (chunk[4] === 0x66 && chunk[5] === 0x74 && chunk[6] === 0x79 && chunk[7] === 0x70) detectedMime = 'audio/mp4';
+      }
+      totalBytes += chunk.length;
+      chunks.push(chunk);
+    });
+
+    let stderrBuf = '';
+    yt.stderr.on('data', (d) => { stderrBuf += d.toString(); });
+
+    yt.on('close', (code) => {
+      clearTimeout(timer);
+      if (killed || (code && code !== 0 && totalBytes === 0)) {
+        console.log('[PreWarm] Failed:', videoId, 'code:', code, 'bytes:', totalBytes);
+      } else if (totalBytes > 1024) {
+        const cacheData = Buffer.concat(chunks);
+        // Evict oldest if full
+        while (streamCache.size >= STREAM_CACHE_MAX_ENTRIES) {
+          const oldest = streamCache.keys().next().value;
+          streamCache.delete(oldest);
+        }
+        streamCache.set(videoId, { data: cacheData, mime: detectedMime, expiresAt: Date.now() + STREAM_CACHE_TTL_MS });
+        console.log('[PreWarm] Cached:', videoId, 'bytes:', cacheData.length, 'mime:', detectedMime);
+      }
+      resolve();
+    });
+
+    yt.on('error', (err) => {
+      clearTimeout(timer);
+      console.log('[PreWarm] Error:', videoId, err.message);
+      resolve();
+    });
+  });
+}
+
+/**
+ * Pre-warm the stream cache with the top trending songs.
+ * Downloads run with limited concurrency to avoid overwhelming WARP.
+ */
+async function prewarmStreamCache() {
+  const ids = (trendingCache || []).slice(0, PREWARM_SONGS).map(s => s.id);
+  if (ids.length === 0) {
+    console.log('[PreWarm] No trending songs available yet — skipping');
+    return;
+  }
+  console.log('[PreWarm] Starting pre-warm for', ids.length, 'songs');
+  const startMs = Date.now();
+  // Process in batches of PREWARM_CONCURRENCY
+  for (let i = 0; i < ids.length; i += PREWARM_CONCURRENCY) {
+    const batch = ids.slice(i, i + PREWARM_CONCURRENCY);
+    await Promise.all(batch.map(id => prewarmOneStream(id)));
+  }
+  console.log('[PreWarm] Completed in', Date.now() - startMs, 'ms — cache now has', streamCache.size, 'entries');
+}
+
+/** Schedule periodic pre-warming. */
+function startPrewarmScheduler() {
+  // First pre-warm after a delay (lets trending + server stabilize)
+  setTimeout(() => {
+    prewarmStreamCache().catch(e => console.error('[PreWarm] Error:', e.message));
+    // Then re-warm on a schedule
+    setInterval(() => {
+      prewarmStreamCache().catch(e => console.error('[PreWarm] Error:', e.message));
+    }, PREWARM_INTERVAL_MS);
+  }, PREWARM_STARTUP_DELAY);
+}
+
 // Audio streaming endpoint - streams audio from YouTube
 app.get("/api/stream/:videoId", (req, res) => {
   const videoId = req.params.videoId;
@@ -1616,6 +1723,8 @@ app.listen(PORT, "0.0.0.0", () => {
   autoScrapeTrending().catch((err) => {
     console.error("[Auto-Scrape] Fatal error:", err.message || err);
   });
+  // Pre-warm the stream cache for top trending songs after boot.
+  startPrewarmScheduler();
 });
 
 async function autoScrapeTrending() {
