@@ -1,7 +1,7 @@
 {
   "name": "music-app",
   "private": true,
-  "version": "2.5.48",
+  "version": "2.5.49",
   "type": "module",
   "scripts": {
     "dev": "concurrently \"node server.cjs\" \"vite --port 3000\"",

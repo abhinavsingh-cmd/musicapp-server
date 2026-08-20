@@ -175,35 +175,14 @@ async function fetchFromServer(youtubeId: string): Promise<ServerResult> {
     return { failure: { kind: 'permanent', reason: 'invalid_id' } };
   }
 
-  // Quick HEAD-check to detect deleted/unavailable videos before the
-  // player commits to a 20s+ stream request. The HEAD check hits the
-  // audio-info endpoint which is fast when the video exists and returns
-  // a clear error when it doesn't. This costs ~3-5s but prevents the
-  // player from showing a permanent loading spinner on invalid videos.
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 5_000);
-  try {
-    const resp = await fetch(api(`/audio-info/${youtubeId}`), {
-      signal: controller.signal,
-      method: 'HEAD',
-      headers: { Accept: 'application/json' },
-    });
-    if (resp.status === 404) {
-      return { failure: { kind: 'permanent', reason: 'video_not_found' } };
-    }
-    if (resp.status === 400) {
-      return { failure: { kind: 'permanent', reason: 'invalid_video' } };
-    }
-  } catch {
-    // Network error or timeout — proceed to stream anyway (it will
-    // handle its own errors). A slow server is not a permanent failure.
-  } finally {
-    clearTimeout(timeout);
-  }
-
   // Return the stream URL directly. The server's /stream endpoint does
   // extraction + download in one yt-dlp invocation — no separate
   // audio-info extraction needed. Cold start ~20s; cached ~1-2s.
+  //
+  // We skip the old HEAD check to /audio-info because it added 3-5s
+  // latency to EVERY play (and 10s when retried), making songs feel
+  // broken on slow connections. Invalid/deleted videos are caught by
+  // the player's canplay timeout → retry → error path instead.
   return { url: api(`/stream/${youtubeId}`) };
 }
 
