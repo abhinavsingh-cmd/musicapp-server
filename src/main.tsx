@@ -52,6 +52,10 @@ if (typeof window !== 'undefined') {
   import('./services/preloadService').then(module => {
     deferIdle(() => module.preloadCriticalResources().catch(() => {}));
   }).catch(() => {});
+  // Keep the server warm so the first play/search is never a cold start.
+  import('./services/serverKeepAlive').then(module => {
+    module.startServerKeepAlive();
+  }).catch(() => {});
 }
 
 // Measure after first render + paint

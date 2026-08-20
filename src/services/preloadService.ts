@@ -1,6 +1,10 @@
 import { toTrack } from '../providers/adapters';
 import { providerRegistry } from '../providers/registry';
 import { Song } from '../types/music';
+// Ensure built-in providers are registered (idempotent). Static import: the
+// barrel is already in the main bundle via audioService — a dynamic import
+// here prevents Vite from code-splitting the providers chunk.
+import '../providers';
 
 /**
  * Preload Service
@@ -22,7 +26,8 @@ function isNativePlatform(): boolean {
 
 /** Make sure the built-in providers are registered (idempotent). */
 async function ensureBuiltinProviders(): Promise<void> {
-  await import('../providers');
+  // Built-ins are registered at module load via the static import above.
+  return Promise.resolve();
 }
 
 /** Warm every registered provider's network resources (each is idempotent). */

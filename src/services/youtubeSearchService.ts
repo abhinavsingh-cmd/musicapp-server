@@ -330,7 +330,10 @@ export async function youtubeSearch(
   // made search look broken while reporting no error.
   try {
     const url = api(`/youtube/search?q=${encodeURIComponent(musicQuery)}`);
-    const result = await apiFetch(url, { timeout: 12_000, retries: 1, signal });
+    // 20s budget: server-side yt-dlp takes 5-15s, plus a Render cold start
+    // can add several seconds. The old 12s aborted mid-search and made
+    // search feel broken.
+    const result = await apiFetch(url, { timeout: 20_000, retries: 1, signal });
 
     // Malformed-response protection: a body that isn't valid JSON, or isn't
     // the expected shape, falls through to the Invidious fallback — it can
@@ -340,7 +343,7 @@ export async function youtubeSearch(
     // A stalled body is treated exactly like a parse failure.
     let data: any = null;
     try {
-      data = await raceWithDeadline(result.json(), 12_000, url);
+      data = await raceWithDeadline(result.json(), 20_000, url);
     } catch (parseErr) {
       serverError = parseErr instanceof Error ? parseErr : new Error('Malformed search response');
       logError('Server search returned malformed JSON:', parseErr);

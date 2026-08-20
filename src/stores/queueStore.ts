@@ -4,6 +4,12 @@ import { preloadNextSongs as preload } from '../services/preloadService';
 import { isDownloadedSong } from '../services/musicSource';
 import { logger } from '../utils/logger';
 import { deferIdle } from '../utils/idle';
+import { toTrack, toSong } from '../providers/adapters';
+import { providerRegistry } from '../providers/registry';
+// Ensure built-in providers are registered (idempotent). Static import: the
+// barrel is already in the main bundle via audioService — a dynamic import
+// here prevents Vite from code-splitting the providers chunk.
+import '../providers';
 
 const QUEUE_KEY = 'playback-queue';
 const MAX_RECENT = 50;
@@ -577,9 +583,6 @@ export const useQueueStore = create<QueueState>((set, get) => ({
       let recommendations: Song[] = [];
       if (currentSong) {
         try {
-          const { toTrack, toSong } = await import('../providers/adapters');
-          const { providerRegistry } = await import('../providers/registry');
-          await import('../providers'); // ensure built-ins registered (idempotent)
           const track = toTrack(currentSong);
           const provider = providerRegistry.get(track.provider);
           if (provider?.capabilities.relatedTracks && provider.getRelated) {

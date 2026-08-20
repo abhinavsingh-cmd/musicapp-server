@@ -14,6 +14,10 @@
 import { providerRegistry } from './registry';
 import { logger } from '../utils/logger';
 import { ProviderId, SearchOptions, Track, TrackProvider } from './types';
+// Ensure built-in providers are registered (idempotent). Static import: the
+// barrel is already in the main bundle via audioService, and a dynamic
+// import here prevents Vite from ever code-splitting the providers chunk.
+import './index';
 
 export interface ProviderSearchResult {
   providerId: ProviderId;
@@ -31,7 +35,8 @@ export interface ProviderSearchOptions extends SearchOptions {
 
 /** Make sure the built-in providers are registered (idempotent). */
 async function ensureBuiltinProviders(): Promise<void> {
-  await import('./index');
+  // Built-ins are registered at module load via the static import above.
+  return Promise.resolve();
 }
 
 function searchableProviders(filter?: ProviderId[]): TrackProvider[] {

@@ -188,6 +188,18 @@ setInterval(() => {
   }
 }, 300000);
 
+// Sweep expired stream-cache entries so the byte budget reflects reality.
+setInterval(() => {
+  const now = Date.now();
+  for (const [videoId, entry] of streamCache) {
+    if (entry.expiresAt <= now) {
+      streamCacheBytes -= entry.data.length;
+      streamCache.delete(videoId);
+    }
+  }
+  if (streamCacheBytes < 0) streamCacheBytes = 0;
+}, 60000);
+
 // CORS: restrict to known origins
 const ALLOWED_ORIGINS = [
   'https://music-app-neon-xi.vercel.app',
@@ -401,9 +413,27 @@ function extractAlbum(title) {
   return '';
 }
 
+// ── Server-side search cache ───────────────────────────────────────────────
+// yt-dlp search through yt-dlp takes 5-15s. Caching avoids redundant
+// searches for the same query within a short window. Bounded LRU + TTL so a
+// search storm can never grow memory unboundedly (this cache is a few KB per
+// entry — never a memory risk like the stream cache).
+const ytSearchCache = new Map(); // key -> { results, expiresAt }
+const YT_SEARCH_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const YT_SEARCH_CACHE_MAX = 100;
+
 app.get("/api/youtube/search", (req, res) => {
   const q = (req.query.q || "").toString().replace(/[^\w\s'!&.+-]/g, "").trim().slice(0, 100);
   if (!q) return ok(res, { results: [] }, "Empty query, returned empty results");
+
+  // Check cache first — instant response for repeat searches
+  const cacheKey = q.toLowerCase();
+  const cached = ytSearchCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    console.log("[YT Search] Cache hit for:", q);
+    return ok(res, { results: cached.results }, `Cached ${cached.results.length} results for "${q}"`);
+  }
+  if (cached) ytSearchCache.delete(cacheKey);
 
   console.log("[YT Search] Searching for:", q);
 
@@ -411,7 +441,7 @@ app.get("/api/youtube/search", (req, res) => {
   const musicQuery = hasSongWord ? q : q + " music";
 
   const attemptSearch = (attempt = 1) => {
-    const maxAttempts = 3;
+    const maxAttempts = 2;
 
     runYtDlp([
       "ytsearch25:" + musicQuery,
@@ -463,6 +493,14 @@ app.get("/api/youtube/search", (req, res) => {
         const top = results.slice(0, 20);
         for (const r of top) delete r.score;
         console.log("[YT Search] Found", top.length, "music results for:", q);
+        // Cache the results for instant repeat searches (LRU-bounded).
+        if (top.length > 0) {
+          if (ytSearchCache.size >= YT_SEARCH_CACHE_MAX) {
+            const oldest = ytSearchCache.keys().next().value;
+            if (oldest !== undefined) ytSearchCache.delete(oldest);
+          }
+          ytSearchCache.set(cacheKey, { results: top, expiresAt: Date.now() + YT_SEARCH_CACHE_TTL_MS });
+        }
         return ok(res, { results: top }, `Found ${top.length} results for "${q}"`);
       } catch (e) {
         console.error("[YT Search] Parse error:", e.message);
@@ -818,11 +856,31 @@ app.get("/api/health", (req, res) => {
 });
 
 // ── Stream audio cache ─────────────────────────────────────────────────────
-// Store recently streamed audio in memory so repeat plays are instant.
-// Each entry holds the full audio buffer + MIME type + expiry timestamp.
+// Store recently streamed audio so repeat plays are instant. Memory on the
+// free Render tier is ~512MB — buffering EVERY full song (the old behavior:
+// 50 entries x 5-8MB = up to 400MB) OOMs the server, which is what made
+// playback/search/downloads hang. The cache is now byte-budgeted: only
+// small tracks are buffered, and the total is capped hard so the heap can
+// never be exhausted by cached audio.
 const streamCache = new Map(); // videoId -> { data: Buffer, mime: string, expiresAt: number }
 const STREAM_CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
-const STREAM_CACHE_MAX_ENTRIES = 50;
+const STREAM_CACHE_MAX_ENTRY_BYTES = 6 * 1024 * 1024; // only songs <= 6MB are cached
+const STREAM_CACHE_MAX_TOTAL_BYTES = 36 * 1024 * 1024; // hard heap budget for the cache
+let streamCacheBytes = 0;
+
+function cacheStreamEntry(videoId, data, mime) {
+  if (data.length > STREAM_CACHE_MAX_ENTRY_BYTES) return; // too big — never buffer
+  while (streamCacheBytes + data.length > STREAM_CACHE_MAX_TOTAL_BYTES) {
+    const oldest = streamCache.keys().next().value;
+    if (oldest === undefined) return;
+    const evicted = streamCache.get(oldest);
+    streamCacheBytes -= evicted.data.length;
+    streamCache.delete(oldest);
+  }
+  streamCache.set(videoId, { data, mime, expiresAt: Date.now() + STREAM_CACHE_TTL_MS });
+  streamCacheBytes += data.length;
+  console.log("[Stream] Cached", data.length, "bytes for:", videoId, "(cache total:", streamCacheBytes, "bytes)");
+}
 
 // Audio streaming endpoint - streams audio from YouTube
 app.get("/api/stream/:videoId", (req, res) => {
@@ -873,11 +931,14 @@ app.get("/api/stream/:videoId", (req, res) => {
         attemptStream(attempt + 1);
       }, delayMs);
     };
+    // 45s covers Render cold start + yt-dlp extraction on a warm instance
+    // (~6-10s) with headroom; the client-side canplay timeout (30s) races
+    // this, so keeping it bounded prevents a long wait before erroring.
     let startupTimeout = setTimeout(() => {
       if (!headersSent) {
         yt.kill("SIGTERM");
         if (!res.headersSent) {
-          console.error("[Stream] Timed out after 60s for:", videoId, "attempt", attempt);
+          console.error("[Stream] Timed out after 45s for:", videoId, "attempt", attempt);
           if (attempt < maxAttempts) {
             retryStream(retryDelayMs(attempt));
           } else {
@@ -885,12 +946,16 @@ app.get("/api/stream/:videoId", (req, res) => {
           }
         }
       }
-    }, 60000);
+    }, 45000);
 
     let firstChunk = true;
     let totalBytes = 0;
     let detectedMime = "audio/webm";
-    const audioChunks = []; // buffer for caching
+    // Buffer ONLY for caching — bounded by the entry-size cap so a long
+    // track is never held in heap. Nothing is buffered unless it can be
+    // cached, so the server can't accumulate memory on long streams.
+    let cacheable = true;
+    const audioChunks = []; // buffer for caching (only if within budget)
     yt.stdout.on("data", (chunk) => {
       if (firstChunk) {
         firstChunk = false;
@@ -901,16 +966,24 @@ app.get("/api/stream/:videoId", (req, res) => {
           if (chunk[0] === 0x49 && chunk[1] === 0x44 && chunk[2] === 0x33) detectedMime = "audio/mpeg";
           else if (chunk[0] === 0xFF && (chunk[1] === 0xFB || chunk[1] === 0xF3 || chunk[1] === 0xF2)) detectedMime = "audio/mpeg";
           else if (chunk.length >= 8 && chunk[4] === 0x66 && chunk[5] === 0x74 && chunk[6] === 0x79 && chunk[7] === 0x70) detectedMime = "audio/mp4";
+          else if (chunk[0] === 0x1A && chunk[1] === 0x45 && chunk[2] === 0xDF && chunk[3] === 0xA3) detectedMime = "audio/webm";
           else detectedMime = "audio/webm";
         }
-        res.setHeader("Content-Type", detectedMime + "; charset=utf-8");
+        res.setHeader("Content-Type", detectedMime);
         res.setHeader("Accept-Ranges", "bytes");
         res.setHeader("Cache-Control", "no-cache");
         res.setHeader("X-Content-Type-Options", "nosniff");
         console.log("[Stream] First chunk received for:", videoId, "MIME:", detectedMime);
       }
       totalBytes += chunk.length;
-      audioChunks.push(chunk);
+      if (cacheable) {
+        if (totalBytes > STREAM_CACHE_MAX_ENTRY_BYTES) {
+          cacheable = false; // too big to cache — stop buffering immediately
+          audioChunks.length = 0;
+        } else {
+          audioChunks.push(chunk);
+        }
+      }
       res.write(chunk);
     });
 
@@ -950,16 +1023,11 @@ app.get("/api/stream/:videoId", (req, res) => {
           console.error("[Stream] Exited with non-zero code:", code, "for:", videoId, "bytes:", totalBytes, "(partial stream)");
         } else {
           console.log("[Stream] Completed for:", videoId, "bytes:", totalBytes, "MIME:", detectedMime);
-          // Cache the audio data for instant repeat plays.
-          if (audioChunks.length > 0 && totalBytes > 1024) {
+          // Cache the audio data for instant repeat plays — only when it was
+          // fully buffered within the entry-size budget.
+          if (cacheable && audioChunks.length > 0 && totalBytes > 1024) {
             const cacheData = Buffer.concat(audioChunks);
-            // Evict oldest entries if cache is full.
-            while (streamCache.size >= STREAM_CACHE_MAX_ENTRIES) {
-              const oldest = streamCache.keys().next().value;
-              streamCache.delete(oldest);
-            }
-            streamCache.set(videoId, { data: cacheData, mime: detectedMime, expiresAt: Date.now() + STREAM_CACHE_TTL_MS });
-            console.log("[Stream] Cached", cacheData.length, "bytes for:", videoId);
+            cacheStreamEntry(videoId, cacheData, detectedMime);
           }
         }
         res.end();
@@ -1076,7 +1144,10 @@ app.get("/api/download/:videoId", (req, res) => {
     };
 
     // Hard cap so a runaway producer can never exhaust server memory.
-    const MAX_BUFFER_BYTES = 128 * 1024 * 1024;
+    // A typical song is 3-10MB; 64MB covers even a 20-minute high-bitrate
+    // track. 3 parallel downloads at the old 128MB cap = 384MB — an OOM on
+    // the free tier. Bounded here keeps the heap safe.
+    const MAX_BUFFER_BYTES = 64 * 1024 * 1024;
 
     yt.stdout.on("data", (chunk) => {
       if (settled) return;

@@ -171,8 +171,8 @@ describe('youtubeSearch — server response normalization', () => {
       let settled = false;
       p.then(() => { settled = true; }, () => { settled = true; });
 
-      // 12s body deadline
-      await vi.advanceTimersByTimeAsync(12_000 + 200);
+      // 20s body deadline (matches the server-side yt-dlp search budget)
+      await vi.advanceTimersByTimeAsync(20_000 + 200);
       await expect(p).rejects.toThrow('Request timed out');
       expect(settled).toBe(true);
     } finally {
