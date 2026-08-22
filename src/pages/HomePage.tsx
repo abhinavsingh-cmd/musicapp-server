@@ -28,6 +28,9 @@ const HERO_GRADIENTS = [
 
 const HeroSection = memo(({ songCount, trendingSource, onPlayAll, onPlayTrending }: { songCount: number; trendingSource: TrendingSourceLabel | 'none'; onPlayAll: () => void; onPlayTrending: () => void }) => {
   const [heroIdx, setHeroIdx] = useState(0);
+  const isNative = typeof window !== 'undefined' && (window as any).Capacitor?.isNativePlatform();
+  const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
+  const reduceMotion = isNative || isMobile;
 
   useEffect(() => {
     const timer = setInterval(() => setHeroIdx(i => (i + 1) % HERO_GRADIENTS.length), 5000);
@@ -39,80 +42,82 @@ const HeroSection = memo(({ songCount, trendingSource, onPlayAll, onPlayTrending
       <AnimatePresence mode="wait">
         <motion.div
           key={heroIdx}
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={{ duration: 1, ease: 'easeInOut' }}
+          initial={reduceMotion ? false : { opacity: 0 }}
+          animate={reduceMotion ? false : { opacity: 1 }}
+          exit={reduceMotion ? false : { opacity: 0 }}
+          transition={reduceMotion ? false : { duration: 0.6, ease: 'easeInOut' }}
           className={`absolute inset-0 bg-gradient-to-br ${HERO_GRADIENTS[heroIdx]}`}
         />
       </AnimatePresence>
       
       <div className="absolute inset-0 bg-gradient-to-b from-black/20 via-transparent to-black/40" />
       
-      <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute top-10 left-10 w-40 h-40 rounded-full bg-white/10 blur-2xl will-transform" />
-        <div className="absolute bottom-10 right-20 w-56 h-56 rounded-full bg-white/5 blur-3xl will-transform" />
-        <div className="absolute top-1/2 left-1/2 w-32 h-32 rounded-full bg-violet-500/20 blur-2xl will-transform" />
-      </div>
+      {!reduceMotion && (
+        <div className="absolute inset-0 overflow-hidden pointer-events-none">
+          <div className="absolute top-10 left-10 w-40 h-40 rounded-full bg-white/10 blur-2xl" />
+          <div className="absolute bottom-10 right-20 w-56 h-56 rounded-full bg-white/5 blur-3xl" />
+          <div className="absolute top-1/2 left-1/2 w-32 h-32 rounded-full bg-violet-500/20 blur-2xl" />
+        </div>
+      )}
       
       <motion.div 
-        initial={{ opacity: 0, y: 30 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.8, delay: 0.2 }}
-        className="relative z-10 px-4 sm:px-8 py-12 sm:py-16 max-w-2xl will-transform"
+        initial={reduceMotion ? false : { opacity: 0, y: 30 }}
+        animate={reduceMotion ? false : { opacity: 1, y: 0 }}
+        transition={reduceMotion ? false : { duration: 0.5, delay: 0.1 }}
+        className="relative z-10 px-4 sm:px-8 py-12 sm:py-16 max-w-2xl"
       >
         <motion.div 
-          initial={{ opacity: 0, scale: 0.9 }}
-          animate={{ opacity: 1, scale: 1 }}
-          transition={{ delay: 0.3 }}
-          className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white/10 text-white/90 text-sm font-medium mb-4 sm:mb-6 will-transform"
-          whileHover={{ scale: 1.05 }}
-          whileTap={{ scale: 0.95 }}
+          initial={reduceMotion ? false : { opacity: 0, scale: 0.9 }}
+          animate={reduceMotion ? false : { opacity: 1, scale: 1 }}
+          transition={reduceMotion ? false : { delay: 0.2 }}
+          className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white/10 text-white/90 text-sm font-medium mb-4 sm:mb-6"
+          whileHover={reduceMotion ? false : { scale: 1.05 }}
+          whileTap={reduceMotion ? false : { scale: 0.95 }}
         >
           <Sparkles size={14} className="text-violet-300" />
           <span>{trendingTagline(songCount, trendingSource)}</span>
         </motion.div>
         
         <motion.h1 
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.4 }}
-          className="text-3xl sm:text-5xl font-black text-white mb-3 sm:mb-4 leading-tight will-transform"
+          initial={reduceMotion ? false : { opacity: 0, y: 20 }}
+          animate={reduceMotion ? false : { opacity: 1, y: 0 }}
+          transition={reduceMotion ? false : { delay: 0.3 }}
+          className="text-3xl sm:text-5xl font-black text-white mb-3 sm:mb-4 leading-tight"
         >
           Your Music,<br />
           <span className="text-gradient-aurora">Your Mood</span>
         </motion.h1>
         
         <motion.p 
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.5 }}
-          className="text-white/70 text-sm sm:text-lg mb-6 sm:mb-8 max-w-md will-transform"
+          initial={reduceMotion ? false : { opacity: 0, y: 20 }}
+          animate={reduceMotion ? false : { opacity: 1, y: 0 }}
+          transition={reduceMotion ? false : { delay: 0.4 }}
+          className="text-white/70 text-sm sm:text-lg mb-6 sm:mb-8 max-w-md"
         >
           Stream trending hits from YouTube, discover new artists, create playlists.
         </motion.p>
         
         <motion.div 
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.6 }}
-          className="flex gap-3 will-transform"
+          initial={reduceMotion ? false : { opacity: 0, y: 20 }}
+          animate={reduceMotion ? false : { opacity: 1, y: 0 }}
+          transition={reduceMotion ? false : { delay: 0.5 }}
+          className="flex gap-3"
         >
           <motion.button
-            whileHover={{ scale: 1.05, boxShadow: '0 20px 40px rgba(255, 255, 255, 0.2)' }}
-            whileTap={{ scale: 0.95 }}
+            whileHover={reduceMotion ? false : { scale: 1.05, boxShadow: '0 20px 40px rgba(255, 255, 255, 0.2)' }}
+            whileTap={reduceMotion ? false : { scale: 0.95 }}
             onClick={onPlayAll}
-            className="flex items-center gap-2 px-6 sm:px-8 py-3 sm:py-3.5 rounded-full bg-white text-gray-900 font-bold text-sm sm:text-base transition-all duration-300 will-transform"
+            className="flex items-center gap-2 px-6 sm:px-8 py-3 sm:py-3.5 rounded-full bg-white text-gray-900 font-bold text-sm sm:text-base transition-all duration-300"
           >
             <Play size={18} fill="currentColor" />
             Play All
           </motion.button>
           
           <motion.button
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.95 }}
+            whileHover={reduceMotion ? false : { scale: 1.05 }}
+            whileTap={reduceMotion ? false : { scale: 0.95 }}
             onClick={onPlayTrending}
-            className="flex items-center gap-2 px-6 sm:px-8 py-3 sm:py-3.5 rounded-full bg-white/10 text-white font-bold text-sm sm:text-base transition-all duration-300 will-transform"
+            className="flex items-center gap-2 px-6 sm:px-8 py-3 sm:py-3.5 rounded-full bg-white/10 text-white font-bold text-sm sm:text-base transition-all duration-300"
           >
             <Zap size={18} />
             Trending

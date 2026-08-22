@@ -5,15 +5,18 @@ import { useReducedMotion } from 'framer-motion';
 /**
  * Background album art — a subtle, blurred backdrop behind the UI.
  *
- * Performance: full-screen `blur(20px)` + CSS animation is a GPU compositor
- * killer on low-end Android WebViews. We use `blur(8px)` + CSS-only
- * `background-size` animation (GPU-composited) instead of filter-based
- * animation. The blur is small enough that it never triggers per-frame
- * rasterisation on any device.
+ * Performance: full-screen `blur()` + CSS animation is a GPU compositor
+ * killer on low-end Android WebViews. We use a static image with NO blur/animation
+ * on Android, and only enable blur+animation on capable devices.
  */
 export const AlbumArtBackground: React.FC = memo(() => {
   const currentSong = useAudioStore((s) => s.currentSong);
   const shouldReduceMotion = useReducedMotion();
+  // Disable background entirely on Android Capacitor (WebView)
+  const isNative = typeof window !== 'undefined' && (window as any).Capacitor?.isNativePlatform();
+  
+  if (isNative) return null;
+
   const [active, setActive] = useState<'a' | 'b'>('a');
   const prevSongRef = useRef<string | null>(null);
   const prevCoverUrlRef = useRef<string | null>(null);
@@ -34,23 +37,25 @@ export const AlbumArtBackground: React.FC = memo(() => {
   const coverUrl = currentSong?.coverArt || '';
   const prevCoverUrl = prevCoverUrlRef.current;
 
-  // Blur(8px) is a fixed cost — the browser rasterises it once and the GPU
-  // composites the result. No per-frame re-raster needed.
-  const transitionMs = shouldReduceMotion ? 0 : 1200;
+  // Only enable blur/zoom on desktop, not mobile WebView
+  const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
+  const transitionMs = shouldReduceMotion || isMobile ? 0 : 800;
   const baseImageStyle: React.CSSProperties = useMemo(() => ({
-    filter: 'blur(8px) brightness(0.45) saturate(120%)',
+    filter: isMobile ? 'brightness(0.5)' : 'blur(4px) brightness(0.45) saturate(120%)',
     willChange: 'transform',
-  }), []);
+  }), [isMobile]);
 
   // Use CSS background animation for the slow zoom — GPU-composited,
-  // never triggers layout or paint.
+  // never triggers layout or paint. Disable on mobile.
   const zoomStyle: React.CSSProperties = useMemo(() => ({
     ...baseImageStyle,
-    animation: shouldReduceMotion ? 'none' : 'album-zoom-bg 10s ease-in-out infinite alternate',
-  }), [baseImageStyle, shouldReduceMotion]);
+    animation: (shouldReduceMotion || isMobile) ? 'none' : 'album-zoom-bg 12s ease-in-out infinite alternate',
+  }), [baseImageStyle, shouldReduceMotion, isMobile]);
 
   const slotAOpacity = active === 'a' ? 1 : 0;
   const slotBOpacity = active === 'b' ? 1 : 0;
+
+  if (!coverUrl && !prevCoverUrl) return null;
 
   return (
     <div

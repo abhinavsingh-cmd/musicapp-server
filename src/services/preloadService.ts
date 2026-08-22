@@ -167,12 +167,28 @@ export function prewarmOnFirstInteraction(): void {
     if (done) return;
     done = true;
     prefetchServerDNS();
+    preconnectStreamEndpoint();
     void preconnectProviders();
     document.removeEventListener('click', handler);
     document.removeEventListener('touchstart', handler);
   };
   document.addEventListener('click', handler, { once: false, passive: true });
   document.addEventListener('touchstart', handler, { once: false, passive: true });
+}
+
+let streamEndpointPreconnected = false;
+function preconnectStreamEndpoint(): void {
+  if (streamEndpointPreconnected) return;
+  streamEndpointPreconnected = true;
+
+  const API_BASE = import.meta.env.VITE_API_URL;
+  if (!API_BASE) return;
+
+  const link = document.createElement('link');
+  link.rel = 'preconnect';
+  link.href = API_BASE;
+  link.crossOrigin = 'anonymous';
+  document.head.appendChild(link);
 }
 
 /**

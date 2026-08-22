@@ -29,6 +29,50 @@ const MAX_CACHE_SIZE = 500 * 1024 * 1024; // 500 MB soft limit
 const MIN_AUDIO_SIZE = 10 * 1024; // 10 KB — anything smaller is not a valid audio file
 
 /**
+ * Download failure reason codes — safe for logs, no sensitive data.
+ */
+export type DownloadFailureReason =
+  | 'SOURCE_UNAVAILABLE'      // No download URL from provider
+  | 'NETWORK_TIMEOUT'         // Client-side fetch timeout
+  | 'SERVER_ERROR'            // 5xx from server
+  | 'HTTP_ERROR'              // 4xx from server (expired, not found, etc.)
+  | 'EMPTY_RESPONSE'          // 0 bytes received
+  | 'INVALID_AUDIO'           // Failed magic bytes check
+  | 'ANDROID_FILESYSTEM_ERROR' // IndexedDB/Quota/permission
+  | 'TRUNCATED_TRANSFER'      // Content-Length mismatch
+  | 'INVALID_RESPONSE_TYPE'   // HTML/JSON instead of audio
+  | 'UNKNOWN';
+
+/**
+ * Internal error class with stage and reason for precise debugging.
+ */
+export interface DownloadErrorInfo {
+  stage: string;
+  reason: DownloadFailureReason;
+  message: string;
+  transient: boolean;
+  metadata?: Record<string, unknown>;
+}
+
+function stageLog(stage: string, track: { title: string; id: string; provider?: string; externalId?: string }, meta?: Record<string, unknown>) {
+  logger.debug(`[Download] ${stage}`, { title: track.title, id: track.id, provider: track.provider, externalId: track.externalId || 'NONE', ...meta });
+}
+
+function stageWarn(stage: string, track: { title: string; id: string }, meta?: Record<string, unknown>) {
+  logger.warn(`[Download] ${stage}`, { title: track.title, id: track.id, ...meta });
+}
+
+function stageError(stage: string, track: { title: string; id: string }, err: unknown, meta?: Record<string, unknown>) {
+  logger.error(`[Download] ${stage} FAILED`, { title: track.title, id: track.id, error: err instanceof Error ? err.message : String(err), ...meta });
+}
+
+function downloadFailureInfo(info: DownloadErrorInfo): Error {
+  const err = new Error(info.message, info.cause !== undefined ? { cause: info.cause } : undefined) as Error & DownloadErrorInfo;
+  Object.assign(err, info);
+  return err;
+}
+
+/**
  * Hard deadline for the initial download request (response headers). The
  * server's /api/download endpoint buffers the whole yt-dlp payload before
  * committing headers and caps each attempt at 60s × 2 attempts, so a
@@ -383,14 +427,26 @@ export async function downloadSongWithProgress(
   signal?: AbortSignal,
 ): Promise<DownloadedSong> {
   const track = toTrack(input);
+  
+  stageLog('DOWNLOAD_START', track);
+
+  // SOURCE_RESOLUTION
+  stageLog('SOURCE_RESOLUTION', track);
   const descriptor = await resolveDownloadDescriptor(track);
   const downloadUrl = descriptor?.url || '';
-
-  logger.debug('[Download] Starting:', { title: track.title, provider: track.provider, externalId: track.externalId || 'NONE', url: downloadUrl.substring(0, 120) });
-
+  
   if (!downloadUrl) {
-    throw downloadFailure('No download URL available for this song');
+    stageError('SOURCE_RESOLUTION', track, new Error('No download URL'));
+    throw downloadFailureInfo({
+      stage: 'SOURCE_RESOLUTION',
+      reason: 'SOURCE_UNAVAILABLE',
+      message: 'No download URL available for this song',
+      transient: false,
+      metadata: { provider: track.provider, externalId: track.externalId },
+    });
   }
+  
+  stageLog('SOURCE_RESOLVED', track, { url: downloadUrl.substring(0, 120) });
 
   if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 
@@ -406,6 +462,7 @@ export async function downloadSongWithProgress(
   try {
     // fetch() follows redirects automatically; whatever the final hop serves
     // still passes every validation below (status, content-type, magic bytes).
+    stageLog('HTTP_REQUEST', track, { url: downloadUrl.substring(0, 120) });
     res = await raceWithTimeout(
       fetch(downloadUrl, {
         signal: requestController.signal,
@@ -418,45 +475,67 @@ export async function downloadSongWithProgress(
   } catch (fetchErr: any) {
     if (fetchErr?.name === 'AbortError' || signal?.aborted) throw fetchErr;
     if (fetchErr?.name === 'TimeoutError') {
-      throw downloadFailure('Download request timed out — the server did not respond', { transient: true, cause: fetchErr });
+      stageError('HTTP_REQUEST', track, fetchErr, { timeout: HEADER_TIMEOUT_MS });
+      throw downloadFailureInfo({
+        stage: 'HTTP_REQUEST',
+        reason: 'NETWORK_TIMEOUT',
+        message: 'Download request timed out — the server did not respond',
+        transient: true,
+        cause: fetchErr,
+        metadata: { timeoutMs: HEADER_TIMEOUT_MS },
+      });
     }
-    logger.error('[Download] fetch() failed:', fetchErr?.message || fetchErr);
-    throw downloadFailure(`Network error: ${fetchErr?.message || fetchErr}`, { transient: true, cause: fetchErr });
+    stageError('HTTP_REQUEST', track, fetchErr);
+    throw downloadFailureInfo({
+      stage: 'HTTP_REQUEST',
+      reason: 'NETWORK_TIMEOUT',
+      message: `Network error: ${fetchErr?.message || fetchErr}`,
+      transient: true,
+      cause: fetchErr,
+    });
   } finally {
     signal?.removeEventListener('abort', forwardCallerAbort);
   }
 
   if (res.redirected) {
-    logger.debug('[Download] Followed redirect to:', res.url?.substring(0, 120));
+    stageLog('HTTP_RESPONSE', track, { redirected: true, finalUrl: res.url?.substring(0, 120) });
   }
 
-  logger.debug('[Download] Response:', { status: res.status, type: res.headers.get('content-type'), len: res.headers.get('content-length'), body: !!res.body });
+  stageLog('HTTP_RESPONSE', track, { status: res.status, contentType: res.headers.get('content-type'), contentLength: res.headers.get('content-length'), hasBody: !!res.body });
 
   if (!res.ok) {
     let detail = '';
     try { detail = (await res.clone().json())?.message || ''; } catch {}
     // Map common statuses to human-readable causes so the Downloads UI shows
     // the real reason instead of a bare status code.
-    let reason: string;
+    let reason: DownloadFailureReason = 'HTTP_ERROR';
+    let httpReason: string;
     switch (res.status) {
       case 403:
-        reason = 'Access denied — the stream link is expired or blocked';
+        reason = 'HTTP_ERROR';
+        httpReason = 'Access denied — the stream link is expired or blocked';
         break;
       case 404:
-        reason = 'The audio source was not found';
+        reason = 'HTTP_ERROR';
+        httpReason = 'The audio source was not found';
         break;
       case 429:
-        reason = 'Server is rate-limiting downloads — try again in a minute';
+        reason = 'HTTP_ERROR';
+        httpReason = 'Server is rate-limiting downloads — try again in a minute';
         break;
       default:
-        reason = res.status >= 500
+        reason = res.status >= 500 ? 'SERVER_ERROR' : 'HTTP_ERROR';
+        httpReason = res.status >= 500
           ? 'The download server hit an error'
           : 'Download failed';
     }
-    throw downloadFailure(`${reason} (HTTP ${res.status})${detail ? ' — ' + detail : ''}`, {
-      // 429 (rate limit) and 5xx (server-side) are worth an automatic retry;
-      // 4xx client errors (expired link, not found) are deterministic.
-      transient: res.status === 429 || res.status >= 500,
+    const transient = res.status === 429 || res.status >= 500;
+    throw downloadFailureInfo({
+      stage: 'HTTP_RESPONSE',
+      reason,
+      message: `${httpReason} (HTTP ${res.status})${detail ? ' — ' + detail : ''}`,
+      transient,
+      metadata: { status: res.status, detail },
     });
   }
 
@@ -468,21 +547,49 @@ export async function downloadSongWithProgress(
     if (contentType.startsWith('application/json')) {
       let msg: string;
       try { msg = (await res.clone().json())?.message || 'Server returned an error'; } catch { msg = 'Server returned an error'; }
-      throw downloadFailure(msg);
+      throw downloadFailureInfo({
+        stage: 'HTTP_RESPONSE',
+        reason: 'INVALID_RESPONSE_TYPE',
+        message: msg,
+        transient: false,
+        metadata: { contentType },
+      });
     }
     if (contentType.startsWith('text/html')) {
-      throw new Error('Server returned an HTML error page instead of audio — the stream link may have expired, try again');
+      throw downloadFailureInfo({
+        stage: 'HTTP_RESPONSE',
+        reason: 'INVALID_RESPONSE_TYPE',
+        message: 'Server returned an HTML error page instead of audio — the stream link may have expired, try again',
+        transient: true,
+        metadata: { contentType },
+      });
     }
-    throw new Error(`Unexpected response type: ${contentType}`);
+    throw downloadFailureInfo({
+      stage: 'HTTP_RESPONSE',
+      reason: 'INVALID_RESPONSE_TYPE',
+      message: `Unexpected response type: ${contentType}`,
+      transient: false,
+      metadata: { contentType },
+    });
   }
 
   const contentLength = Number(res.headers.get('content-length')) || 0;
   if (contentLength === 0 && !res.body) {
-    throw downloadFailure('Server returned an empty response — the stream link may have expired, try again', { transient: true });
+    throw downloadFailureInfo({
+      stage: 'HTTP_RESPONSE',
+      reason: 'EMPTY_RESPONSE',
+      message: 'Server returned an empty response — the stream link may have expired, try again',
+      transient: true,
+    });
   }
 
   const reader = res.body?.getReader();
-  if (!reader) throw downloadFailure('No response body', { transient: true });
+  if (!reader) throw downloadFailureInfo({
+    stage: 'HTTP_RESPONSE',
+    reason: 'EMPTY_RESPONSE',
+    message: 'No response body',
+    transient: true,
+  });
 
   const chunks: Uint8Array[] = [];
   let received = 0;
@@ -506,7 +613,13 @@ export async function downloadSongWithProgress(
         if (settled) return;
         settled = true;
         try { reader.cancel(); } catch {}
-        reject(downloadFailure(`Download stalled — no data received for ${STALL_TIMEOUT_MS / 1000}s`, { transient: true }));
+        reject(downloadFailureInfo({
+          stage: 'FILE_WRITE',
+          reason: 'NETWORK_TIMEOUT',
+          message: `Download stalled — no data received for ${STALL_TIMEOUT_MS / 1000}s`,
+          transient: true,
+          metadata: { received, contentLength },
+        }));
       }, STALL_TIMEOUT_MS);
       reader.read().then(
         (r) => { if (!settled) { settled = true; clearTimeout(timer); resolve(r); } },
@@ -514,6 +627,7 @@ export async function downloadSongWithProgress(
       );
     });
 
+  stageLog('FILE_WRITE_START', track, { contentLength });
   try {
     while (true) {
       if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
@@ -534,15 +648,28 @@ export async function downloadSongWithProgress(
       // never assemble a blob whose true size contradicts the headers.
       if (contentLength > 0 && received > contentLength) {
         try { reader.cancel(); } catch {}
-        throw downloadFailure(`Corrupted download: received ${received} bytes but server declared ${contentLength}`, { transient: true });
+        throw downloadFailureInfo({
+          stage: 'FILE_WRITE',
+          reason: 'TRUNCATED_TRANSFER',
+          message: `Corrupted download: received ${received} bytes but server declared ${contentLength}`,
+          transient: true,
+          metadata: { received, contentLength },
+        });
       }
       onProgress?.({ loaded: received, total: contentLength || received, percent: contentLength ? Math.round((received / contentLength) * 100) : 0 });
     }
   } catch (err: any) {
     if (err?.name === 'AbortError' || signal?.aborted) throw err;
     if (isTransientDownloadError(err)) throw err;
-    logger.error('[Download] Stream interrupted:', err?.message || err);
-    throw downloadFailure(`Connection lost during download${err?.message ? ': ' + err.message : ''}`, { transient: true, cause: err });
+    stageError('FILE_WRITE', track, err, { received, contentLength });
+    throw downloadFailureInfo({
+      stage: 'FILE_WRITE',
+      reason: 'NETWORK_TIMEOUT',
+      message: `Connection lost during download${err?.message ? ': ' + err.message : ''}`,
+      transient: true,
+      cause: err,
+      metadata: { received, contentLength },
+    });
   } finally {
     signal?.removeEventListener('abort', releasePauseOnAbort);
   }
@@ -550,33 +677,62 @@ export async function downloadSongWithProgress(
   // Partial transfer: the server declared more bytes than the connection
   // actually delivered. Never persist a truncated file as a valid download.
   if (contentLength > 0 && received < contentLength) {
-    throw downloadFailure(`Incomplete download: received ${received} of ${contentLength} bytes`, { transient: true });
+    stageError('FILE_WRITE', track, new Error('Incomplete download'), { received, contentLength });
+    throw downloadFailureInfo({
+      stage: 'FILE_WRITE',
+      reason: 'TRUNCATED_TRANSFER',
+      message: `Incomplete download: received ${received} of ${contentLength} bytes`,
+      transient: true,
+      metadata: { received, contentLength },
+    });
   }
 
   // A fully-empty stream is never a valid download. Rejected explicitly so
   // the error names the real cause, and so the "invalid file" check below
   // can never report a 0-byte file.
   if (received === 0) {
-    throw downloadFailure('Downloaded file is empty: 0 bytes — the server returned no audio data', { transient: true });
+    throw downloadFailureInfo({
+      stage: 'FILE_WRITE',
+      reason: 'EMPTY_RESPONSE',
+      message: 'Downloaded file is empty: 0 bytes — the server returned no audio data',
+      transient: true,
+      metadata: { received },
+    });
   }
 
   if (received < MIN_AUDIO_SIZE) {
-    throw downloadFailure(`Downloaded file is too small: ${received} bytes (minimum ${MIN_AUDIO_SIZE}) — the stream link may have expired, try again`, { transient: true });
+    throw downloadFailureInfo({
+      stage: 'FILE_WRITE',
+      reason: 'INVALID_AUDIO',
+      message: `Downloaded file is too small: ${received} bytes (minimum ${MIN_AUDIO_SIZE}) — the stream link may have expired, try again`,
+      transient: true,
+      metadata: { received, minSize: MIN_AUDIO_SIZE },
+    });
   }
 
   const blobType = contentType || 'audio/mpeg';
   const blob = new Blob(chunks, { type: blobType });
 
-  logger.debug('[Download] Complete:', { received, blobSize: blob.size, type: blobType });
+  stageLog('FILE_WRITE_COMPLETE', track, { received, blobSize: blob.size, type: blobType });
 
+  // FILE_VALIDATION
+  stageLog('FILE_VALIDATION', track, { blobSize: blob.size, blobType });
   if (!(await verifyAudioBlob(blob))) {
     // Not retryable: the server completed the transfer but the payload is
     // not audio (error page, empty file, wrong content). Retrying the same
     // URL would return the same bytes.
-    throw downloadFailure(`Downloaded file is invalid: ${blob.size} bytes, type: ${blob.type || 'unknown'} — the response did not contain valid audio data`);
+    stageError('FILE_VALIDATION', track, new Error('Magic bytes check failed'), { blobSize: blob.size, blobType });
+    throw downloadFailureInfo({
+      stage: 'FILE_VALIDATION',
+      reason: 'INVALID_AUDIO',
+      message: `Downloaded file is invalid: ${blob.size} bytes, type: ${blob.type || 'unknown'} — the response did not contain valid audio data`,
+      transient: false,
+      metadata: { blobSize: blob.size, blobType },
+    });
   }
 
   // Persist to IndexedDB
+  stageLog('INDEXEDDB_WRITE', track, { blobSize: blob.size });
   const db = await openDB();
   const entry: DownloadedSong = {
     id: track.id,
@@ -597,9 +753,21 @@ export async function downloadSongWithProgress(
     // IndexedDB throws DOMException with name "QuotaExceededError" when storage
     // is full.  Surface a clear message instead of a generic failure.
     if (err?.name === 'QuotaExceededError' || err?.message?.includes('quota')) {
-      throw downloadFailure('Storage full — free up space and try again', { cause: err });
+      throw downloadFailureInfo({
+        stage: 'INDEXEDDB_WRITE',
+        reason: 'ANDROID_FILESYSTEM_ERROR',
+        message: 'Storage full — free up space and try again',
+        transient: false,
+        cause: err,
+      });
     }
-    throw downloadFailure(`Failed to save to local storage: ${err?.message || err}`, { transient: true, cause: err });
+    throw downloadFailureInfo({
+      stage: 'INDEXEDDB_WRITE',
+      reason: 'ANDROID_FILESYSTEM_ERROR',
+      message: `Failed to save to local storage: ${err?.message || err}`,
+      transient: true,
+      cause: err,
+    });
   }
 
   entry.audioUrl = URL.createObjectURL(blob);
@@ -620,6 +788,7 @@ export async function downloadSongWithProgress(
     releaseYear: track.releaseYear,
   }).catch(() => {});
 
+  stageLog('DOWNLOAD_SUCCESS', track, { size: blob.size, blobType });
   return entry;
 }
 

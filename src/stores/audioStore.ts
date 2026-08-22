@@ -343,9 +343,18 @@ function initAudioServiceHandler() {
               }
               const qs = useQueueStore.getState();
               const resolvedQueue = resolveQueueDownloads(qs.queue);
-              preloadNextSongs(resolvedQueue, qs.currentIndex, { count: 3 }).catch(() => {});
+              // count: 1 — each preloaded stream spawns a yt-dlp process on
+              // the 1-CPU server; 3 concurrent extractions starve search.
+              preloadNextSongs(resolvedQueue, qs.currentIndex, { count: 1 }).catch(() => {});
             }
           }
+          break;
+        }
+        case 'loaded': {
+          // NOTE: deliberately NO preloading here. Preloading during 'loaded'
+          // spawns concurrent yt-dlp extractions on the 1-CPU Render server,
+          // starving search/stream/download (the v2.5.54 regression).
+          // Preloading happens once playback starts ('play' below).
           break;
         }
         case 'playing': {

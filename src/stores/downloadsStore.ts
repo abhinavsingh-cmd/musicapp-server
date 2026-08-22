@@ -282,17 +282,32 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
       if (controller.signal.aborted) return;
 
       logger.error('Download failed:', e);
-      const msg = e instanceof Error ? e.message : 'Download failed';
+      
+      // Extract structured error info from downloadManager
+      const err = e as Error & { stage?: string; reason?: string; metadata?: Record<string, unknown>; transient?: boolean };
+      const msg = err.message || 'Download failed';
+      const stage = err.stage || 'UNKNOWN';
+      const reason = err.reason || 'UNKNOWN';
+      const transient = err.transient ?? isTransientDownloadError(e);
+
+      // Log with stage/reason for debugging
+      logger.error(`[DownloadsStore] Download failed at ${stage}: ${reason}`, { 
+        title: song.title, 
+        stage, 
+        reason, 
+        transient, 
+        metadata: err.metadata 
+      });
 
       // Transient failure with retries left: schedule an automatic retry
       // instead of surfacing the error. The failed-download entry is only
       // created once every attempt has been exhausted, so the preserved
       // reason always comes from the final attempt.
       const attempts = retryAttempts.get(key) || 0;
-      if (isTransientDownloadError(e) && attempts < MAX_AUTO_RETRIES && !cancelledKeys.has(key) && navigator.onLine) {
+      if (transient && attempts < MAX_AUTO_RETRIES && !cancelledKeys.has(key) && navigator.onLine) {
         retryAttempts.set(key, attempts + 1);
         const delay = RETRY_DELAYS_MS[Math.min(attempts, RETRY_DELAYS_MS.length - 1)];
-        logger.warn(`[DownloadsStore] Transient failure for "${song.title}" (${msg}) — auto-retry ${attempts + 1}/${MAX_AUTO_RETRIES} in ${delay}ms`);
+        logger.warn(`[DownloadsStore] Transient failure for "${song.title}" at ${stage} (${reason}) — auto-retry ${attempts + 1}/${MAX_AUTO_RETRIES} in ${delay}ms`);
         cancelRetryTimer(key);
         pendingRetries.set(key, setTimeout(() => {
           pendingRetries.delete(key);
@@ -311,6 +326,9 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
       }
       retryAttempts.delete(key);
 
+      // Build detailed error message with stage/reason for UI
+      const detailedMsg = `${msg} [${stage}:${reason}]`;
+
       set((s) => {
         const newIds = new Set(s.downloadingIds);
         newIds.delete(key);
@@ -319,12 +337,12 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
         return {
           downloadingIds: newIds,
           progressMap: newProgress,
-          failedDownloads: [...s.failedDownloads, { song, message: msg, timestamp: Date.now() }],
+          failedDownloads: [...s.failedDownloads, { song, message: detailedMsg, timestamp: Date.now() }],
         };
       });
 
       // Show error notification
-      sendDownloadNotification(`Failed to download "${song.title}": ${msg}`);
+      sendDownloadNotification(`Failed to download "${song.title}": ${detailedMsg}`);
 
       // Process queue
       processQueue();

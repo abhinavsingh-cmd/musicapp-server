@@ -150,6 +150,31 @@ function runYtDlp(args, options, callback) {
   }
 }
 
+/**
+ * Spawn-based jobs (stream/download pipes) share the SAME gate as execFile
+ * jobs. Without this, one song play could run 4 concurrent yt-dlp processes
+ * on the 1-CPU Render instance — starving search (timeouts) and slowing
+ * every extraction. acquireYtSlot(cb) invokes cb() exactly once when a slot
+ * frees up; releaseYtSlot() MUST be called when the process settles.
+ */
+function acquireYtSlot(cb) {
+  const job = () => {
+    ytDlpActive++;
+    cb();
+  };
+  if (ytDlpActive >= YT_DLP_MAX_CONCURRENCY) {
+    ytDlpQueue.push(job);
+  } else {
+    job();
+  }
+}
+
+function releaseYtSlot() {
+  ytDlpActive--;
+  const next = ytDlpQueue.shift();
+  if (next) next();
+}
+
 // Standard API response helpers
 function ok(res, data, message = "OK") {
   return res.json({ success: true, message, code: "OK", details: data });
@@ -454,7 +479,7 @@ app.get("/api/youtube/search", (req, res) => {
       ...YT_COOKIES_ARGS,
       ...YT_PROXY_ARGS,
       "--match-filters", "!is_live & !was_live & duration>?60 & duration<?600",
-    ], { timeout: 30000, maxBuffer: 2 * 1024 * 1024 }, (err, stdout, stderr) => {
+    ], { timeout: 35000, maxBuffer: 2 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) {
         console.error("[YT Search] Error:", err.message, "attempt", attempt);
         if (attempt < maxAttempts) {
@@ -868,6 +893,88 @@ const STREAM_CACHE_MAX_ENTRY_BYTES = 6 * 1024 * 1024; // only songs <= 6MB are c
 const STREAM_CACHE_MAX_TOTAL_BYTES = 36 * 1024 * 1024; // hard heap budget for the cache
 let streamCacheBytes = 0;
 
+// ── Persistent file cache ──────────────────────────────────────────────────
+// Survives server restarts. Stores to /tmp/stream-cache/<videoId>.{webm,m4a,mp3}
+// Uses symlinks for atomic writes. Max 200MB total on disk.
+function initDiskCache() {
+  try {
+    if (!fs.existsSync(STREAM_DISK_CACHE_DIR)) {
+      fs.mkdirSync(STREAM_DISK_CACHE_DIR, { recursive: true });
+    }
+  } catch {}
+}
+
+function getDiskCachePath(videoId, mime) {
+  const ext = mime === "audio/mpeg" ? "mp3" : mime === "audio/mp4" ? "m4a" : "webm";
+  return path.join(STREAM_DISK_CACHE_DIR, `${videoId}.${ext}`);
+}
+
+function getDiskCacheMetaPath(videoId) {
+  return path.join(STREAM_DISK_CACHE_DIR, `${videoId}.meta`);
+}
+
+function readDiskCache(videoId) {
+  try {
+    const metaPath = getDiskCacheMetaPath(videoId);
+    if (!fs.existsSync(metaPath)) return null;
+    const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+    if (Date.now() > meta.expiresAt) return null;
+    const filePath = getDiskCachePath(videoId, meta.mime);
+    if (!fs.existsSync(filePath)) return null;
+    return { filePath, mime: meta.mime, size: meta.size };
+  } catch {
+    return null;
+  }
+}
+
+function writeDiskCache(videoId, data, mime) {
+  try {
+    if (data.length > 50 * 1024 * 1024) return; // don't cache >50MB files to disk
+    const filePath = getDiskCachePath(videoId, mime);
+    const tmpPath = filePath + ".tmp";
+    fs.writeFileSync(tmpPath, data);
+    fs.renameSync(tmpPath, filePath); // atomic
+    const meta = { mime, size: data.length, expiresAt: Date.now() + STREAM_DISK_CACHE_MAX_AGE_MS };
+    fs.writeFileSync(getDiskCacheMetaPath(videoId), JSON.stringify(meta));
+    // Enforce disk budget
+    enforceDiskCacheBudget();
+    console.log("[Stream] Disk cached", data.length, "bytes for:", videoId);
+  } catch (e) {
+    console.error("[Stream] Disk cache write failed:", e.message);
+  }
+}
+
+function enforceDiskCacheBudget() {
+  try {
+    const files = fs.readdirSync(STREAM_DISK_CACHE_DIR)
+      .filter(f => f.endsWith(".meta"))
+      .map(f => {
+        const metaPath = path.join(STREAM_DISK_CACHE_DIR, f);
+        const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+        const filePath = path.join(STREAM_DISK_CACHE_DIR, f.replace(".meta", ""));
+        return { metaPath, filePath, size: meta.size, expiresAt: meta.expiresAt };
+      })
+      .filter(f => fs.existsSync(f.filePath) && Date.now() <= f.expiresAt)
+      .sort((a, b) => a.expiresAt - b.expiresAt);
+
+    let total = files.reduce((sum, f) => sum + f.size, 0);
+    for (const f of files) {
+      if (total <= STREAM_DISK_CACHE_MAX_BYTES) break;
+      try {
+        fs.unlinkSync(f.filePath);
+        fs.unlinkSync(f.metaPath);
+        total -= f.size;
+        console.log("[Stream] Disk cache evicted:", path.basename(f.filePath));
+      } catch {}
+    }
+  } catch {}
+}
+
+initDiskCache();
+
+// Cleanup on startup
+enforceDiskCacheBudget();
+
 function cacheStreamEntry(videoId, data, mime) {
   if (data.length > STREAM_CACHE_MAX_ENTRY_BYTES) return; // too big — never buffer
   while (streamCacheBytes + data.length > STREAM_CACHE_MAX_TOTAL_BYTES) {
@@ -880,6 +987,8 @@ function cacheStreamEntry(videoId, data, mime) {
   streamCache.set(videoId, { data, mime, expiresAt: Date.now() + STREAM_CACHE_TTL_MS });
   streamCacheBytes += data.length;
   console.log("[Stream] Cached", data.length, "bytes for:", videoId, "(cache total:", streamCacheBytes, "bytes)");
+  // Also write to persistent disk cache
+  writeDiskCache(videoId, data, mime);
 }
 
 // Audio streaming endpoint - streams audio from YouTube
@@ -891,10 +1000,10 @@ app.get("/api/stream/:videoId", (req, res) => {
 
   const audioUrl = "https://www.youtube.com/watch?v=" + videoId;
 
-  // Check cache first — instant response for repeat plays.
+  // Check memory cache first — instant response for repeat plays.
   const cached = streamCache.get(videoId);
   if (cached && cached.expiresAt > Date.now()) {
-    console.log("[Stream] Cache hit for:", videoId, "bytes:", cached.data.length, "mime:", cached.mime);
+    console.log("[Stream] Memory cache hit for:", videoId, "bytes:", cached.data.length, "mime:", cached.mime);
     res.setHeader("Content-Type", cached.mime);
     res.setHeader("Accept-Ranges", "bytes");
     res.setHeader("Cache-Control", "public, max-age=900");
@@ -903,15 +1012,42 @@ app.get("/api/stream/:videoId", (req, res) => {
     return res.end(cached.data);
   }
 
+  // Check persistent disk cache — survives server restarts, instant for previously played songs
+  const diskCached = readDiskCache(videoId);
+  if (diskCached) {
+    console.log("[Stream] Disk cache hit for:", videoId, "bytes:", diskCached.size, "mime:", diskCached.mime);
+    res.setHeader("Content-Type", diskCached.mime);
+    res.setHeader("Accept-Ranges", "bytes");
+    res.setHeader("Cache-Control", "public, max-age=900");
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Content-Length", diskCached.size);
+    // Stream from file (don't load entire file into memory)
+    const fileStream = fs.createReadStream(diskCached.filePath);
+    fileStream.pipe(res);
+    // Also populate memory cache for next request
+    if (diskCached.size <= STREAM_CACHE_MAX_ENTRY_BYTES) {
+      const chunks = [];
+      fileStream.on("data", (chunk) => chunks.push(chunk));
+      fileStream.on("end", () => {
+        const data = Buffer.concat(chunks);
+        cacheStreamEntry(videoId, data, diskCached.mime);
+      });
+    }
+    return;
+  }
+
   console.log("[Stream] Starting stream for:", videoId);
 
   const attemptStream = (attempt = 1) => {
     const maxAttempts = 3;
 
     const ytArgs = [
-      "-f", "bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio/best",
+      "-f", "bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio[ext=webm]/bestaudio/best",
       "-o", "-",
       "--no-check-certificates",
+      "--no-warnings",
+      "--no-playlist",
+      "--no-part",
       "--age-limit", "18",
       ...YT_EXTRACTOR_ARGS,
       ...YT_COOKIES_ARGS,
@@ -920,10 +1056,20 @@ app.get("/api/stream/:videoId", (req, res) => {
       audioUrl
     ];
 
-    console.log(`[Stream] Attempt ${attempt}/${maxAttempts} for: ${videoId}`);
+    console.log(`[Stream] Attempt ${attempt}/${maxAttempts} for: ${videoId} — acquiring yt slot (active: ${ytDlpActive}, queued: ${ytDlpQueue.length})`);
+    // Shared concurrency gate — never run more than YT_DLP_MAX_CONCURRENCY
+    // yt-dlp processes at once on the 1-CPU instance.
+    acquireYtSlot(() => {
     const yt = spawn("yt-dlp", ytArgs, { stdio: ["ignore", "pipe", "pipe"] });
 
     let headersSent = false;
+    // 'error' AND 'close' may BOTH fire for one process — release exactly once.
+    let slotReleased = false;
+    const releaseSlotOnce = () => {
+      if (slotReleased) return;
+      slotReleased = true;
+      releaseYtSlot();
+    };
     const retryStream = (delayMs) => {
       console.log("[Stream] Retrying with different clients... attempt", attempt + 1, "for:", videoId);
       setTimeout(async () => {
@@ -996,6 +1142,7 @@ app.get("/api/stream/:videoId", (req, res) => {
 
     yt.on("error", (err) => {
       clearTimeout(startupTimeout);
+      releaseSlotOnce();
       console.error("[Stream] Process error:", err.message, "attempt", attempt);
       if (!res.headersSent) {
         if (attempt < maxAttempts) {
@@ -1008,6 +1155,7 @@ app.get("/api/stream/:videoId", (req, res) => {
 
     yt.on("close", (code) => {
       clearTimeout(startupTimeout);
+      releaseSlotOnce();
       if (code && code !== 0 && !headersSent) {
         console.error("[Stream] yt-dlp exited with code:", code, "for:", videoId, "attempt", attempt);
         if (!res.headersSent) {
@@ -1038,6 +1186,7 @@ app.get("/api/stream/:videoId", (req, res) => {
       clearTimeout(startupTimeout);
       yt.kill("SIGTERM");
     });
+    }); // acquireYtSlot
   };
 
   attemptStream();
@@ -1055,7 +1204,7 @@ app.get("/api/download/:videoId", (req, res) => {
     return fail(res, 400, "INVALID_VIDEO_ID", "Invalid video ID");
   }
 
-  console.log("[Download] Starting download for:", videoId, "title:", title);
+  console.log("[Download] DOWNLOAD_START", { videoId, title });
 
   // Non-ASCII titles (e.g. Hindi) would otherwise sanitize to an empty
   // string and produce a bogus ".mp3" attachment name — fall back to the
@@ -1089,10 +1238,15 @@ app.get("/api/download/:videoId", (req, res) => {
     let settled = false;
     const buffer = [];
 
+    console.log("[Download] SOURCE_RESOLUTION", { videoId, attempt });
+
     const ytArgs = [
-      "-f", "bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio/best",
+      "-f", "bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio[ext=webm]/bestaudio/best",
       "-o", "-",
       "--no-check-certificates",
+      "--no-warnings",
+      "--no-playlist",
+      "--no-part",
       "--age-limit", "18",
       ...YT_EXTRACTOR_ARGS,
       ...YT_COOKIES_ARGS,
@@ -1101,8 +1255,19 @@ app.get("/api/download/:videoId", (req, res) => {
       audioUrl
     ];
 
-    console.log("[Download] Attempt", attempt + "/" + maxAttempts, "for:", videoId);
+    console.log("[Download] SOURCE_RESOLVED", { videoId, attempt, format: ytArgs[1] });
+    console.log("[Download] YT_DLP_START", { videoId, attempt, active: ytDlpActive, queued: ytDlpQueue.length });
+    // Shared concurrency gate with search/stream — protects the 1-CPU box.
+    acquireYtSlot(() => {
     const yt = spawn("yt-dlp", ytArgs, { stdio: ["ignore", "pipe", "pipe"] });
+
+    // 'error' AND 'close' may BOTH fire — release the gate slot exactly once.
+    let slotReleased = false;
+    const releaseSlotOnce = () => {
+      if (slotReleased) return;
+      slotReleased = true;
+      releaseYtSlot();
+    };
 
     // No byte may be sent to the client until the entire payload has been
     // produced and verified. Streaming partial output was the source of the
@@ -1153,7 +1318,7 @@ app.get("/api/download/:videoId", (req, res) => {
       if (settled) return;
       totalBytes += chunk.length;
       if (totalBytes > MAX_BUFFER_BYTES) {
-        console.error("[Download] Buffer limit exceeded for:", videoId);
+        console.error("[Download] BUFFER_LIMIT_EXCEEDED", { videoId, bytes: totalBytes });
         yt.kill("SIGTERM");
         settle(() => retryOrFail(500, "DOWNLOAD_TOO_LARGE", "Download exceeded the size limit", { videoId, bytes: totalBytes }));
         return;
@@ -1163,33 +1328,38 @@ app.get("/api/download/:videoId", (req, res) => {
 
     yt.stderr.on("data", (data) => {
       const msg = data.toString().trim();
-      if (msg) console.error("[Download]", msg);
+      if (msg) console.error("[Download] YT_DLP_STDERR", { videoId, attempt, msg });
       stderrOutput += msg + "\n";
     });
 
     yt.on("error", (err) => {
-      console.error("[Download] Process error:", err.message, "attempt", attempt, "for:", videoId);
+      releaseSlotOnce();
+      console.error("[Download] YT_DLP_PROCESS_ERROR", { videoId, attempt, error: err.message });
       settle(() => retryOrFail(500, "DOWNLOAD_ERROR", "Download process failed after retries", { videoId, detail: err.message, attempts: maxAttempts }));
     });
 
     yt.on("close", (code) => {
+      releaseSlotOnce();
       settle(() => {
+        console.log("[Download] YT_DLP_CLOSE", { videoId, attempt, code, totalBytes });
+        
         // Anything but a clean exit means the payload is incomplete — never
         // serve it, even when some bytes were produced.
         if (code !== 0) {
-          console.error("[Download] yt-dlp exited with code:", code, "for:", videoId, "attempt", attempt, "bytes:", totalBytes);
+          console.error("[Download] YT_DLP_FAILED", { videoId, attempt, code, totalBytes });
           retryOrFail(500, "DOWNLOAD_FAILED", "Download failed after retries", { videoId, code, detail: stderrOutput.slice(0, 500), attempts: maxAttempts });
           return;
         }
 
         // Empty / too-small payloads are never valid audio.
         if (totalBytes < MIN_BYTES) {
-          console.error("[Download] Too few bytes:", totalBytes, "for:", videoId);
+          console.error("[Download] YT_DLP_EMPTY", { videoId, attempt, bytes: totalBytes });
           retryOrFail(500, "DOWNLOAD_EMPTY", "Download produced no audio data", { videoId, bytes: totalBytes, code, detail: stderrOutput.slice(0, 500), attempts: maxAttempts });
           return;
         }
 
         // Detect the real container from magic bytes — never trust a default.
+        console.log("[Download] MAGIC_BYTES_CHECK", { videoId, attempt, bytes: totalBytes });
         const first = buffer[0];
         let detectedMime = null;
         let detectedExt = null;
@@ -1202,7 +1372,7 @@ app.get("/api/download/:videoId", (req, res) => {
         if (!detectedMime) {
           // Not audio — likely an error page or unsupported output. Never serve
           // this as audio/mpeg.
-          console.error("[Download] Payload is not audio (bad magic bytes) for:", videoId);
+          console.error("[Download] MAGIC_BYTES_FAILED", { videoId, attempt, bytes: totalBytes });
           retryOrFail(500, "DOWNLOAD_NOT_AUDIO", "Download did not produce a supported audio file", { videoId, bytes: totalBytes, attempts: maxAttempts });
           return;
         }
@@ -1210,7 +1380,7 @@ app.get("/api/download/:videoId", (req, res) => {
         if (res.destroyed || res.writableEnded) {
           // The client disconnected while the payload was being buffered —
           // the response is gone; nothing to write or end.
-          console.log("[Download] Client disconnected before delivery for:", videoId, "bytes:", totalBytes);
+          console.log("[Download] CLIENT_DISCONNECTED", { videoId, attempt, bytes: totalBytes });
           buffer.length = 0;
           return;
         }
@@ -1221,7 +1391,7 @@ app.get("/api/download/:videoId", (req, res) => {
         res.setHeader("Content-Type", detectedMime);
         res.setHeader("Content-Length", String(totalBytes));
         res.setHeader("Cache-Control", "no-cache, no-store");
-        console.log("[Download] Completed for:", videoId, "bytes:", totalBytes, "MIME:", detectedMime);
+        console.log("[Download] DOWNLOAD_COMPLETE", { videoId, attempt, bytes: totalBytes, mime: detectedMime, ext: detectedExt });
         for (const chunk of buffer) {
           res.write(chunk);
         }
@@ -1236,6 +1406,7 @@ app.get("/api/download/:videoId", (req, res) => {
       attemptInFlight = false;
       yt.kill("SIGTERM");
     });
+    }); // acquireYtSlot
   };
 
   attemptDownload();

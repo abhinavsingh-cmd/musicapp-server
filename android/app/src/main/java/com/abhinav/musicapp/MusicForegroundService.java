@@ -176,9 +176,32 @@ public class MusicForegroundService extends Service implements MediaPlayer.OnPre
         if (mediaPlayer == null) return;
         try {
             playbackGeneration++;
+            boolean isNetworkUrl = audioUrl != null && (
+                audioUrl.startsWith("http:") || 
+                audioUrl.startsWith("https:") || 
+                audioUrl.startsWith("rtsp:") || 
+                audioUrl.startsWith("udp:"));
+            
+            mediaPlayer.reset();
+            
+            if (isNetworkUrl) {
+                // Network/streaming URL - use setDataSource with URL string directly
+                // This bypasses MediaExtractor compatibility issues with streaming URLs
+                mediaPlayer.setDataSource(audioUrl);
+                Log.i("MusicForegroundService", "Preparing native MediaPlayer for streaming: " + audioUrl);
+            } else {
+                // Local file path or content URI (file://, content://, or raw path)
+                // Use setDataSource with Context and Uri - handles all local sources
+                mediaPlayer.setDataSource(this, Uri.parse(audioUrl));
+                Log.i("MusicForegroundService", "Preparing native MediaPlayer for local source: " + audioUrl);
+            }
+            
+            preparedGeneration = playbackGeneration;
+            persistSnapshot(true, startPositionMs);
+            mediaPlayer.prepareAsync();
+            
             pendingAudioUrl = audioUrl;
             currentUrl = audioUrl;
-            pendingStartPositionMs = startPositionMs;
             playWhenPrepared = true;
             nativeEngineActive = true;
             resumeOnFocusGain = false;
@@ -186,15 +209,6 @@ public class MusicForegroundService extends Service implements MediaPlayer.OnPre
             isBuffering = true;
             requestAudioFocus();
             updateNativePlaybackState(PlaybackState.STATE_BUFFERING);
-
-            mediaPlayer.reset();
-            mediaPlayer.setDataSource(this, Uri.parse(audioUrl));
-            preparedGeneration = playbackGeneration;
-            // Snapshot BEFORE prepareAsync — if the OS kills this service while
-            // it is starting, the restarted service rebuilds this exact session.
-            persistSnapshot(true, startPositionMs);
-            mediaPlayer.prepareAsync();
-            Log.i("MusicForegroundService", "Preparing native MediaPlayer for: " + audioUrl);
         } catch (Exception e) {
             System.err.println("[MusicForegroundService] playAudioUrl failed: " + e.getMessage());
             isBuffering = false;

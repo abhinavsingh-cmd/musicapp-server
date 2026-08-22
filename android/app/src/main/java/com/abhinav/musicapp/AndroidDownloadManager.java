@@ -118,6 +118,8 @@ public class AndroidDownloadManager extends Plugin {
             ? sanitizeFileName(title) + "_" + sanitizeFileName(artist) + ".mp4"
             : sanitizeFileNameWithExtension(requestedName);
 
+        System.out.println("[AndroidDownloadManager] DOWNLOAD_START {url=" + url + ", title=" + title + ", artist=" + artist + ", youtubeId=" + youtubeId + "}");
+
         DownloadManager.Request request = new DownloadManager.Request(Uri.parse(url))
             .setTitle(title)
             .setDescription("Downloading " + title + " by " + artist)
@@ -137,6 +139,7 @@ public class AndroidDownloadManager extends Plugin {
         } catch (Exception e) {
             // SecurityException (missing notification permission on some OEM
             // builds), IllegalArgumentException (bad destination), etc.
+            System.err.println("[AndroidDownloadManager] ENQUEUE_FAILED {error=" + e.getMessage() + "}");
             call.reject("Failed to enqueue download: " + e.getMessage());
             return;
         }
@@ -215,6 +218,8 @@ public class AndroidDownloadManager extends Plugin {
                     break;
             }
 
+            System.out.println("[AndroidDownloadManager] QUERY_DOWNLOAD {downloadId=" + downloadId + ", status=" + statusString + ", percent=" + percent + ", totalSize=" + totalSize + ", downloaded=" + downloaded + "}");
+
             JSObject result = new JSObject();
             result.put("status", statusString);
             result.put("percent", percent);
@@ -258,16 +263,20 @@ public class AndroidDownloadManager extends Plugin {
             long declaredSize = totalSizeIndex >= 0 ? cursor.getLong(totalSizeIndex) : -1;
             cursor.close();
 
+            System.out.println("[AndroidDownloadManager] GET_DOWNLOADED_FILE_START {downloadId=" + downloadId + ", status=" + status + ", localUri=" + localUri + ", reason=" + reason + ", declaredSize=" + declaredSize + "}");
+
             if (status != DownloadManager.STATUS_SUCCESSFUL) {
                 // A failed/aborted download can still leave partial bytes on
                 // disk — never leave them behind on the user's device.
                 deleteFileQuietly(uriToFile(localUri));
+                System.err.println("[AndroidDownloadManager] GET_DOWNLOADED_FILE_FAILED {downloadId=" + downloadId + ", status=" + status + ", reason=" + reason + "}");
                 call.reject("Download did not complete successfully (status=" + status
                     + (reason >= 0 ? ", reason=" + reason : "") + ")");
                 return;
             }
 
             if (localUri == null) {
+                System.err.println("[AndroidDownloadManager] GET_DOWNLOADED_FILE_FAILED {downloadId=" + downloadId + ", error=NO_LOCAL_URI}");
                 call.reject("File not found — download reports no local URI");
                 return;
             }
@@ -283,9 +292,12 @@ public class AndroidDownloadManager extends Plugin {
                 // it is garbage, not a valid download: remove it instead of
                 // leaving a broken file in the user's Music folder.
                 deleteFileQuietly(file);
+                System.err.println("[AndroidDownloadManager] FILE_VALIDATION_FAILED {downloadId=" + downloadId + ", reason=" + invalidReason + "}");
                 call.reject("Downloaded file is invalid: " + invalidReason);
                 return;
             }
+
+            System.out.println("[AndroidDownloadManager] GET_DOWNLOADED_FILE_SUCCESS {downloadId=" + downloadId + ", path=" + localUri + ", size=" + file.length() + "}");
 
             JSObject result = new JSObject();
             result.put("path", localUri);
@@ -371,17 +383,22 @@ public class AndroidDownloadManager extends Plugin {
      *         human-readable reason describing exactly what is wrong.
      */
     static String validateDownloadedFile(File file) {
+        System.out.println("[AndroidDownloadManager] FILE_VALIDATION_START {file=" + file + "}");
         if (file == null) {
+            System.err.println("[AndroidDownloadManager] FILE_VALIDATION_FAILED {reason=NULL_FILE}");
             return "file could not be located on disk";
         }
         if (!file.exists()) {
+            System.err.println("[AndroidDownloadManager] FILE_VALIDATION_FAILED {reason=FILE_NOT_FOUND, file=" + file.getName() + "}");
             return "file does not exist at " + file.getName();
         }
         long size = file.length();
         if (size == 0) {
+            System.err.println("[AndroidDownloadManager] FILE_VALIDATION_FAILED {reason=EMPTY_FILE, size=0}");
             return "0 bytes — the server sent an empty response";
         }
         if (size < MIN_AUDIO_FILE_BYTES) {
+            System.err.println("[AndroidDownloadManager] FILE_VALIDATION_FAILED {reason=TOO_SMALL, size=" + size + "}");
             return size + " bytes — too small to be a valid audio file";
         }
         byte[] head = new byte[16];
@@ -389,14 +406,18 @@ public class AndroidDownloadManager extends Plugin {
         try (InputStream in = new FileInputStream(file)) {
             read = in.read(head);
         } catch (IOException e) {
+            System.err.println("[AndroidDownloadManager] FILE_VALIDATION_FAILED {reason=READ_ERROR, error=" + e.getMessage() + "}");
             return "could not read file header: " + e.getMessage();
         }
         if (read < 2) {
+            System.err.println("[AndroidDownloadManager] FILE_VALIDATION_FAILED {reason=HEADER_TOO_SMALL, read=" + read + "}");
             return "could not read file header";
         }
         if (!looksLikeAudio(head, read)) {
+            System.err.println("[AndroidDownloadManager] FILE_VALIDATION_FAILED {reason=INVALID_MAGIC_BYTES, read=" + read + "}");
             return "header bytes are not a known audio container (possibly an HTML/JSON error page)";
         }
+        System.out.println("[AndroidDownloadManager] FILE_VALIDATION_SUCCESS {file=" + file + ", size=" + size + "}");
         return null;
     }
 
@@ -410,6 +431,7 @@ public class AndroidDownloadManager extends Plugin {
         String reason = validateDownloadedFile(file);
         if (reason != null) return reason;
         if (declaredSize > 0 && file.length() != declaredSize) {
+            System.err.println("[AndroidDownloadManager] FILE_VALIDATION_FAILED {reason=TRUNCATED_TRANSFER, fileSize=" + file.length() + ", declaredSize=" + declaredSize + "}");
             return file.length() + " bytes but the server declared " + declaredSize
                 + " — truncated transfer";
         }
