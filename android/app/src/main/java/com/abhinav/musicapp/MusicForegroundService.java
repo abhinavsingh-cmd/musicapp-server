@@ -71,6 +71,13 @@ public class MusicForegroundService extends Service implements MediaPlayer.OnPre
     private int preparedGeneration = -1;
     private long pendingStartPositionMs = 0;
     private String currentUrl = null;
+    // Prepare watchdog: a stream whose server never sends bytes (cold Render
+    // instance, dead upstream) leaves MediaPlayer in preparing state FOREVER —
+    // it retries network reads every ~3s indefinitely. This timer converts the
+    // silent hang into an 'error' notification so JS can smart-replace or skip.
+    private static final long PREPARE_TIMEOUT_MS = 25_000;
+    private Runnable prepareTimeoutRunnable;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
     // Audio focus bookkeeping — resume only happens when the pre-interruption
     //   state says playback should resume (never blindly).
     private float userVolume = 1.0f;
@@ -199,6 +206,7 @@ public class MusicForegroundService extends Service implements MediaPlayer.OnPre
             preparedGeneration = playbackGeneration;
             persistSnapshot(true, startPositionMs);
             mediaPlayer.prepareAsync();
+            armPrepareTimeout(playbackGeneration);
             
             pendingAudioUrl = audioUrl;
             currentUrl = audioUrl;
@@ -214,6 +222,29 @@ public class MusicForegroundService extends Service implements MediaPlayer.OnPre
             isBuffering = false;
             updateNativePlaybackState(PlaybackState.STATE_ERROR);
             BackgroundAudioPlugin.notifyMediaAction("error", -1);
+        }
+    }
+
+    /** Arms the prepare watchdog for this generation. A stale firing (a newer
+     *  play/stop already happened) is ignored via generation check. */
+    private void armPrepareTimeout(final int generation) {
+        cancelPrepareTimeout();
+        prepareTimeoutRunnable = () -> {
+            if (generation != playbackGeneration) return; // superseded
+            if (isPrepared) return;                       // prepared in time
+            System.err.println("[MusicForegroundService] PREPARE_TIMEOUT after " + PREPARE_TIMEOUT_MS + "ms — no audio bytes from server");
+            isBuffering = false;
+            nativeEngineActive = false;
+            updateNativePlaybackState(PlaybackState.STATE_ERROR);
+            BackgroundAudioPlugin.notifyMediaAction("error", -1);
+        };
+        mainHandler.postDelayed(prepareTimeoutRunnable, PREPARE_TIMEOUT_MS);
+    }
+
+    private void cancelPrepareTimeout() {
+        if (prepareTimeoutRunnable != null) {
+            mainHandler.removeCallbacks(prepareTimeoutRunnable);
+            prepareTimeoutRunnable = null;
         }
     }
 
@@ -249,6 +280,7 @@ public class MusicForegroundService extends Service implements MediaPlayer.OnPre
         playbackGeneration++;
         playWhenPrepared = false;
         resumeOnFocusGain = false;
+        cancelPrepareTimeout();
         if (mediaPlayer != null) {
             try { mediaPlayer.stop(); } catch (IllegalStateException ignored) {}
             mediaPlayer.reset();
@@ -395,6 +427,7 @@ public class MusicForegroundService extends Service implements MediaPlayer.OnPre
         if (mp != mediaPlayer) return;
         // Stale prepare from a replaced/stopped track — never start it.
         if (preparedGeneration != playbackGeneration) return;
+        cancelPrepareTimeout();
         isPrepared = true;
         isBuffering = false;
         if (pendingStartPositionMs > 0) {
@@ -437,6 +470,7 @@ public class MusicForegroundService extends Service implements MediaPlayer.OnPre
     @Override
     public boolean onError(MediaPlayer mp, int what, int extra) {
         System.err.println("[MusicForegroundService] Native MediaPlayer error: what=" + what + ", extra=" + extra);
+        cancelPrepareTimeout();
         isBuffering = false;
         isPrepared = false;
         isPlaying = false;
@@ -1101,6 +1135,7 @@ private void registerHeadsetReceiver() {
     public void onDestroy() {
         instance = null;
         BackgroundAudioPlugin.stopKeepAlive();
+        cancelPrepareTimeout();
         if (mediaPlayer != null) {
             try {
                 mediaPlayer.stop();

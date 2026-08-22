@@ -144,7 +144,7 @@ function runYtDlp(args, options, callback) {
     });
   };
   if (ytDlpActive >= YT_DLP_MAX_CONCURRENCY) {
-    ytDlpQueue.push(job);
+    ytDlpQueue.push({ job, timer: null });
   } else {
     job();
   }
@@ -156,14 +156,29 @@ function runYtDlp(args, options, callback) {
  * on the 1-CPU Render instance — starving search (timeouts) and slowing
  * every extraction. acquireYtSlot(cb) invokes cb() exactly once when a slot
  * frees up; releaseYtSlot() MUST be called when the process settles.
+ *
+ * Queue entries carry an optional deadline: a queued request that waits past
+ * queueTimeoutMs is dropped with onQueuedTooLong() so clients get a clean
+ * JSON error instead of hanging until Render's edge 502s (~80s).
  */
-function acquireYtSlot(cb) {
+
+function acquireYtSlot(cb, opts = {}) {
   const job = () => {
     ytDlpActive++;
     cb();
   };
   if (ytDlpActive >= YT_DLP_MAX_CONCURRENCY) {
-    ytDlpQueue.push(job);
+    const item = { job, timer: null };
+    if (opts.queueTimeoutMs > 0 && typeof opts.onQueuedTooLong === "function") {
+      item.timer = setTimeout(() => {
+        const idx = ytDlpQueue.indexOf(item);
+        if (idx === -1) return;
+        ytDlpQueue.splice(idx, 1);
+        console.error("[YT Gate] Queued job dropped after", opts.queueTimeoutMs, "ms");
+        opts.onQueuedTooLong();
+      }, opts.queueTimeoutMs);
+    }
+    ytDlpQueue.push(item);
   } else {
     job();
   }
@@ -172,7 +187,22 @@ function acquireYtSlot(cb) {
 function releaseYtSlot() {
   ytDlpActive--;
   const next = ytDlpQueue.shift();
-  if (next) next();
+  if (!next) return;
+  if (next.timer) clearTimeout(next.timer);
+  next.job();
+}
+
+/**
+ * Kill a spawned yt-dlp reliably: SIGTERM first, SIGKILL shortly after.
+ * A yt-dlp stuck on a dead socket can ignore SIGTERM forever — without the
+ * SIGKILL escalation its 'close' event never fires and the gate slot leaks,
+ * wedging ALL subsequent streams/downloads behind the queue.
+ */
+function killYtProcess(yt) {
+  try { yt.kill("SIGTERM"); } catch {}
+  setTimeout(() => {
+    try { yt.kill("SIGKILL"); } catch {}
+  }, 3000);
 }
 
 // Standard API response helpers
@@ -1058,7 +1088,8 @@ app.get("/api/stream/:videoId", (req, res) => {
 
     console.log(`[Stream] Attempt ${attempt}/${maxAttempts} for: ${videoId} — acquiring yt slot (active: ${ytDlpActive}, queued: ${ytDlpQueue.length})`);
     // Shared concurrency gate — never run more than YT_DLP_MAX_CONCURRENCY
-    // yt-dlp processes at once on the 1-CPU instance.
+    // yt-dlp processes at once on the 1-CPU instance. Queue deadline 90s:
+    // past that, fail cleanly (Render's edge would 502 us at ~80s anyway).
     acquireYtSlot(() => {
     const yt = spawn("yt-dlp", ytArgs, { stdio: ["ignore", "pipe", "pipe"] });
 
@@ -1082,7 +1113,7 @@ app.get("/api/stream/:videoId", (req, res) => {
     // this, so keeping it bounded prevents a long wait before erroring.
     let startupTimeout = setTimeout(() => {
       if (!headersSent) {
-        yt.kill("SIGTERM");
+        killYtProcess(yt);
         if (!res.headersSent) {
           console.error("[Stream] Timed out after 45s for:", videoId, "attempt", attempt);
           if (attempt < maxAttempts) {
@@ -1184,9 +1215,15 @@ app.get("/api/stream/:videoId", (req, res) => {
 
     req.on("close", () => {
       clearTimeout(startupTimeout);
-      yt.kill("SIGTERM");
+      killYtProcess(yt);
     });
-    }); // acquireYtSlot
+    }, {
+      queueTimeoutMs: 90_000,
+      onQueuedTooLong: () => {
+        console.error("[Stream] QUEUE_TIMEOUT:", videoId);
+        if (!res.headersSent) fail(res, 503, "STREAM_BUSY", "Server is busy — try again shortly", { videoId });
+      },
+    });
   };
 
   attemptStream();
@@ -1275,7 +1312,7 @@ app.get("/api/download/:videoId", (req, res) => {
     // a mid-stream yt-dlp failure could no longer be reported as an error.
     const startupTimeout = setTimeout(() => {
       if (!settled && !killed) {
-        yt.kill("SIGTERM");
+        killYtProcess(yt);
         settle(() => retryOrFail(504, "DOWNLOAD_TIMEOUT", "Download timed out after retries", { videoId, attempts: maxAttempts }));
       }
     }, 60000);
@@ -1319,7 +1356,7 @@ app.get("/api/download/:videoId", (req, res) => {
       totalBytes += chunk.length;
       if (totalBytes > MAX_BUFFER_BYTES) {
         console.error("[Download] BUFFER_LIMIT_EXCEEDED", { videoId, bytes: totalBytes });
-        yt.kill("SIGTERM");
+        killYtProcess(yt);
         settle(() => retryOrFail(500, "DOWNLOAD_TOO_LARGE", "Download exceeded the size limit", { videoId, bytes: totalBytes }));
         return;
       }
@@ -1404,9 +1441,15 @@ app.get("/api/download/:videoId", (req, res) => {
       clearTimeout(startupTimeout);
       killed = true;
       attemptInFlight = false;
-      yt.kill("SIGTERM");
+      killYtProcess(yt);
     });
-    }); // acquireYtSlot
+    }, {
+      queueTimeoutMs: 120_000,
+      onQueuedTooLong: () => {
+        console.error("[Download] QUEUE_TIMEOUT:", videoId);
+        if (!res.headersSent && !res.destroyed) fail(res, 503, "DOWNLOAD_BUSY", "Server is busy — try again shortly", { videoId });
+      },
+    });
   };
 
   attemptDownload();
