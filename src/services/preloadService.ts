@@ -1,6 +1,7 @@
 import { toTrack } from '../providers/adapters';
 import { providerRegistry } from '../providers/registry';
 import { Song } from '../types/music';
+import { api } from '../config/api';
 // Ensure built-in providers are registered (idempotent). Static import: the
 // barrel is already in the main bundle via audioService — a dynamic import
 // here prevents Vite from code-splitting the providers chunk.
@@ -49,6 +50,69 @@ async function preconnectProviders(): Promise<void> {
 // --- Audio preload pool ---
 const preloadPool = new Map<string, HTMLAudioElement>();
 const MAX_PRELOAD_AUDIO = 5;
+
+// ── Server-side next-track warm (single slot, cancellable) ──
+let serverPreloadAbort: AbortController | null = null;
+let serverPreloadTargetId: string | null = null;
+
+/**
+ * Cancel any in-flight server-side next-track warm.
+ * Idempotent. Never throws. Keeps at most one preload alive.
+ */
+export function cancelNextTrackPreload(): void {
+  if (serverPreloadAbort) {
+    try { serverPreloadAbort.abort(); } catch {}
+    serverPreloadAbort = null;
+    serverPreloadTargetId = null;
+  }
+}
+
+/**
+ * Warm the server cache for the *single* next track in background.
+ * - At most one concurrent fetch (previous is aborted).
+ * - Never creates an audible player — only a network fetch with X-Preload
+ *   so the server enqueues it at PRELOAD priority (PLAY jumps ahead).
+ * - Never blocks current playback: abort frees the stream slot via req close.
+ * - Downloaded or direct-stream tracks are skipped (no server work needed).
+ * - Failures are silent (best-effort); stale preloads are cancelled by caller.
+ */
+export async function warmNextTrackServerCache(
+  nextSong: Song | null,
+  opts: { isDownloaded?: (s: Song) => boolean } = {},
+): Promise<void> {
+  if (!nextSong || !nextSong.id) { cancelNextTrackPreload(); return; }
+  if (opts.isDownloaded?.(nextSong)) { cancelNextTrackPreload(); return; }
+  const track = toTrack(nextSong);
+  const id = track.externalId;
+  // Only YouTube-like tracks need server warming; library blobs already local.
+  if (!id || !/^[a-zA-Z0-9_-]{11}$/.test(id)) { cancelNextTrackPreload(); return; }
+  if (track.streamUrl && track.streamUrl.trim()) { cancelNextTrackPreload(); return; }
+  if (serverPreloadTargetId === id) return; // already warming this exact next
+
+  cancelNextTrackPreload();
+  serverPreloadTargetId = id;
+  const controller = new AbortController();
+  serverPreloadAbort = controller;
+  try {
+    const res = await fetch(api(`/stream/${id}?preload=1`), {
+      signal: controller.signal,
+      headers: { 'X-Preload': '1', Accept: '*/*' },
+    });
+    if (!res.ok) return;
+    // Drain body to let server finish and populate its memory/disk cache.
+    // We discard bytes — only the server-side cache matters for Next.
+    // Use arrayBuffer to ensure full consumption; abort frees slot if stale.
+    await res.arrayBuffer().catch(() => {});
+  } catch (e: any) {
+    if (e?.name === 'AbortError') return;
+    // best-effort — silent
+  } finally {
+    if (serverPreloadAbort === controller) {
+      serverPreloadAbort = null;
+      serverPreloadTargetId = null;
+    }
+  }
+}
 
 function prewarmAudioElement(url: string): void {
   // On Android the native MediaPlayer owns streaming — extra HTML audio

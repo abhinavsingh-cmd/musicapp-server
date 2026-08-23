@@ -8,10 +8,10 @@ import { playbackPersistenceService } from '../services/playbackPersistenceServi
 import { backgroundPlaybackService } from '../services/backgroundPlaybackService';
 import { backgroundAudio } from '../services/backgroundAudio';
 import { useHistoryStore } from './historyStore';
-import { preloadNextSongs, prewarmOnFirstInteraction } from '../services/preloadService';
+import { preloadNextSongs, prewarmOnFirstInteraction, warmNextTrackServerCache, cancelNextTrackPreload } from '../services/preloadService';
 import { registerLocalCopyResolver } from '../providers/resolve';
 import { findVerifiedReplacement } from '../services/smartReplaceService';
-import { resolvePlayableSong, sourceKey, stripStaleBlobUrl } from '../services/musicSource';
+import { resolvePlayableSong, sourceKey, stripStaleBlobUrl, isDownloadedSong } from '../services/musicSource';
 import { showToast } from '../utils/toast';
 import { logger } from '../utils/logger';
 import { deferIdle } from '../utils/idle';
@@ -346,6 +346,12 @@ function initAudioServiceHandler() {
               // count: 1 — each preloaded stream spawns a yt-dlp process on
               // the 1-CPU server; 3 concurrent extractions starve search.
               preloadNextSongs(resolvedQueue, qs.currentIndex, { count: 1 }).catch(() => {});
+              // Server-side warm for *exactly* the next track — single slot,
+              // PRELOAD priority so PLAY jumps ahead, no audible player.
+              try {
+                const nextForWarm = (qs as any).peekNextSong ? (qs as any).peekNextSong() : (resolvedQueue[qs.currentIndex + 1] || null);
+                void warmNextTrackServerCache(nextForWarm, { isDownloaded: isDownloadedSong });
+              } catch {}
             }
           }
           break;
@@ -594,6 +600,33 @@ function initAudioServiceHandler() {
         );
       } catch {}
     });
+
+    // ── Next-track preload lifecycle ──
+    // Exactly one background warm at a time, cancelled when the queue or
+    // current track changes (stale next), on multi-skip, or on destroy.
+    let lastNextTrackId: string | null = null;
+    useQueueStore.subscribe((state) => {
+      try {
+        const next = (state as any).peekNextSong ? (state as any).peekNextSong() : (state.queue[state.currentIndex + 1] || null);
+        const nid = next?.id || null;
+        if (nid !== lastNextTrackId) {
+          lastNextTrackId = nid;
+          // Queue reshaped (add/remove/reorder/shuffle) — old next is stale.
+          // The play-path will re-warm the correct next; just cancel here.
+          try { cancelNextTrackPreload(); } catch {}
+        }
+      } catch {}
+    });
+    // Destroy / background teardown — ensure no leaked fetch keeps slot busy.
+    try {
+      if (typeof window !== 'undefined') {
+        window.addEventListener('beforeunload', () => { try { cancelNextTrackPreload(); } catch {} });
+        // HMR dispose (Vite) — cancelled when store module is replaced.
+        if ((import.meta as any).hot) {
+          (import.meta as any).hot.dispose(() => { try { cancelNextTrackPreload(); } catch {} });
+        }
+      }
+    } catch {}
   })();
 }
 
@@ -741,6 +774,8 @@ function chainQueueTransition(opts: {
   const { isPending, setPending, move, label, onNoSong } = opts;
 
   if (isPending()) return; // exactly one transition of this kind at a time
+  // User is skipping — stale next-track warm for the old next is now wrong.
+  try { cancelNextTrackPreload(); } catch {}
   setPending(true);
   clearNextSongRetry();
   pendingResumePosition = null;
@@ -904,6 +939,7 @@ export const useAudioStore = create<AudioStore>((set, get) => ({
 
   loadSong: (song: Song, playlist: Song[], index: number, preserveShuffle = false) => {
     clearNextSongRetry();
+    try { cancelNextTrackPreload(); } catch {}
 
     // Boundary validation: a malformed track must produce a controlled
     // error — never a crash, a broken queue item, or a fake PLAYING state.

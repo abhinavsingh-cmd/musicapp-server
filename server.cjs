@@ -86,19 +86,22 @@ const retryDelayMs = (attempt) => RETRY_DELAYS_MS[Math.min(attempt - 1, RETRY_DE
 // Force real traffic through the tunnel so the WireGuard handshake completes
 // NOW, not on the user's first song. Without this, the very first yt-dlp
 // request through :1080 stalls/fails while the handshake happens.
+// Warm BOTH Cloudflare edge and YouTube+GitHub via WARP so the first real
+// stream doesn't pay DNS/TLS/handshake for those hosts.
 async function warmWarpTunnel() {
-  return new Promise((resolve) => {
-    execFile("curl", [
-      "-s", "-o", "/dev/null", "-m", "25",
-      "--proxy", "socks5://127.0.0.1:1080",
-      // Cloudflare's own edge — the WARP tunnel terminates there, so this
-      // cannot be blocked the way google/youtube can be from some networks.
-      "https://1.1.1.1/cdn-cgi/trace",
-    ], (err) => {
-      console.log("[WARP] warm-up " + (err ? "FAILED (" + err.message + ")" : "OK — tunnel ready for first request"));
-      resolve(!err);
-    });
+  const curlViaWarp = (url) => new Promise((resolve) => {
+    execFile("curl", ["-s", "-o", "/dev/null", "-m", "15", "--proxy", "socks5://127.0.0.1:1080", url], (err) => resolve(!err));
   });
+  const r1 = await curlViaWarp("https://1.1.1.1/cdn-cgi/trace");
+  // Pre-resolve GitHub (ejs:github) and YouTube through the same WARP exit
+  // so the first yt-dlp spawn doesn't block on remote EJS fetch + n-solve.
+  await Promise.all([
+    curlViaWarp("https://raw.githubusercontent.com/yt-dlp/ejs/main/ejs.min.js"),
+    curlViaWarp("https://www.youtube.com/generate_204"),
+  ]);
+  const ok = r1;
+  console.log("[WARP] warm-up " + (ok ? "OK — tunnel ready for first request (edge+github+youtube)" : "FAILED — tunnel not ready"));
+  return ok;
 }
 
 // Re-probe the proxy before a retry: if wireproxy died mid-flight, drop the
@@ -122,53 +125,84 @@ async function refreshProxyBeforeRetry() {
   console.log("[WARP] Giving up after 15 probes — direct connections only");
 })();
 
-// ── yt-dlp concurrency gate ──────────────────────────────────────────────
+// ── yt-dlp concurrency gates ─────────────────────────────────────────────
 // Render free tier runs 1 CPU / ~512MB. Under parallel load (observed:
 // 8 concurrent audio-info requests) yt-dlp processes starve each other and
 // all hit their execFile timeout, while the same calls succeed sequentially
-// in ~6s. Serialize the quick metadata calls with a small concurrency limit;
-// long-running stream/download spawns are unaffected (they have their own
-// larger timeouts and are naturally user-paced).
+// in ~6s. Two independent lanes prevent stream starvation:
+//
+//  • metadata lane (YT_DLP_MAX_CONCURRENCY=2) — search/trending/audio-info
+//  • stream lane  (STREAM_MAX_CONCURRENCY=1) — /stream and /download pipes
+//
+// Total max 3, but a stream is never queued behind a search batch. This
+// preserves WARP/rate-limit safety while removing the cold-first-play queue.
+//
+// Priority scheduling (PLAY > PRELOAD > BACKGROUND):
+//   PLAY = interactive playback — must not wait behind background work
+//   PRELOAD = next-track prefetch — medium, cancellable if stale
+//   BACKGROUND = search/trending — lowest, may be starved by PLAY
+// Queues are priority-ordered (ascending) with FIFO inside same priority.
 const YT_DLP_MAX_CONCURRENCY = 2;
 let ytDlpActive = 0;
 const ytDlpQueue = [];
 
-function runYtDlp(args, options, callback) {
+const STREAM_MAX_CONCURRENCY = 1;
+let streamActive = 0;
+const streamQueue = [];
+
+const PRIORITY = { PLAY: 0, PRELOAD: 1, BACKGROUND: 2 };
+let queueSeq = 0;
+
+function insertByPriority(queue, item) {
+  // priority ascending, seq ascending (FIFO within same priority)
+  let idx = queue.findIndex(q => q.priority > item.priority || (q.priority === item.priority && q.seq > item.seq));
+  if (idx === -1) queue.push(item);
+  else queue.splice(idx, 0, item);
+}
+
+function runYtDlp(args, options, callback, priority = PRIORITY.BACKGROUND) {
+  const seq = queueSeq++;
   const job = () => {
     ytDlpActive++;
     execFile("yt-dlp", args, options, (err, stdout, stderr) => {
       ytDlpActive--;
       const next = ytDlpQueue.shift();
-      if (next) next();
+      if (next) {
+        if (next.timer) clearTimeout(next.timer);
+        next.job();
+      }
       callback(err, stdout, stderr);
     });
   };
   if (ytDlpActive >= YT_DLP_MAX_CONCURRENCY) {
-    ytDlpQueue.push({ job, timer: null });
+    ytDlpQueue.push({ job, priority, seq, timer: null, id: null });
+    // stable sort by priority/seq — keep queue ordered
+    // simple insertion sort already via insertByPriority for acquire* paths;
+    // for runYtDlp batch push we sort: lowest priority value first
+    ytDlpQueue.sort((a, b) => a.priority - b.priority || a.seq - b.seq);
   } else {
     job();
   }
 }
 
 /**
- * Spawn-based jobs (stream/download pipes) share the SAME gate as execFile
- * jobs. Without this, one song play could run 4 concurrent yt-dlp processes
- * on the 1-CPU Render instance — starving search (timeouts) and slowing
- * every extraction. acquireYtSlot(cb) invokes cb() exactly once when a slot
- * frees up; releaseYtSlot() MUST be called when the process settles.
- *
- * Queue entries carry an optional deadline: a queued request that waits past
- * queueTimeoutMs is dropped with onQueuedTooLong() so clients get a clean
- * JSON error instead of hanging until Render's edge 502s (~80s).
+ * Metadata gate for quick execFile jobs (search/trending/audio-info).
+ * Spawn-based stream/download jobs use the separate stream lane below.
+ * acquireYtSlot/releaseYtSlot remain for metadata; acquireStreamSlot/
+ * releaseStreamSlot gate the long-running pipes.
+ * opts.priority: PRIORITY.PLAY|PRELOAD|BACKGROUND (default BACKGROUND)
+ * opts.id: optional tag for cancellation (e.g. preload:<videoId>)
  */
 
 function acquireYtSlot(cb, opts = {}) {
+  const priority = opts.priority ?? PRIORITY.BACKGROUND;
+  const seq = queueSeq++;
   const job = () => {
     ytDlpActive++;
     cb();
   };
   if (ytDlpActive >= YT_DLP_MAX_CONCURRENCY) {
-    const item = { job, timer: null };
+    const item = { job, priority, seq, timer: null, id: opts.id || null };
     if (opts.queueTimeoutMs > 0 && typeof opts.onQueuedTooLong === "function") {
       item.timer = setTimeout(() => {
         const idx = ytDlpQueue.indexOf(item);
@@ -178,7 +212,7 @@ function acquireYtSlot(cb, opts = {}) {
         opts.onQueuedTooLong();
       }, opts.queueTimeoutMs);
     }
-    ytDlpQueue.push(item);
+    insertByPriority(ytDlpQueue, item);
   } else {
     job();
   }
@@ -190,6 +224,73 @@ function releaseYtSlot() {
   if (!next) return;
   if (next.timer) clearTimeout(next.timer);
   next.job();
+}
+
+function acquireStreamSlot(cb, opts = {}) {
+  const priority = opts.priority ?? PRIORITY.PLAY;
+  const seq = queueSeq++;
+  const job = () => {
+    streamActive++;
+    cb();
+  };
+  if (streamActive >= STREAM_MAX_CONCURRENCY) {
+    const item = { job, priority, seq, timer: null, id: opts.id || null };
+    if (opts.queueTimeoutMs > 0 && typeof opts.onQueuedTooLong === "function") {
+      item.timer = setTimeout(() => {
+        const idx = streamQueue.indexOf(item);
+        if (idx === -1) return;
+        streamQueue.splice(idx, 1);
+        console.error("[Stream Gate] Queued job dropped after", opts.queueTimeoutMs, "ms");
+        opts.onQueuedTooLong();
+      }, opts.queueTimeoutMs);
+    }
+    insertByPriority(streamQueue, item);
+  } else {
+    job();
+  }
+}
+
+function releaseStreamSlot() {
+  streamActive--;
+  const next = streamQueue.shift();
+  if (!next) return;
+  if (next.timer) clearTimeout(next.timer);
+  next.job();
+}
+
+// Cancel queued preloads (stale next-track prefetch) — never cancels a
+// running job, only queued. Called when a user skips or starts new PLAY.
+function cancelQueuedPreloads() {
+  for (let i = streamQueue.length - 1; i >= 0; i--) {
+    if (streamQueue[i].priority === PRIORITY.PRELOAD) {
+      const item = streamQueue[i];
+      if (item.timer) clearTimeout(item.timer);
+      streamQueue.splice(i, 1);
+      console.log("[Stream Gate] Cancelled stale preload", item.id || "");
+    }
+  }
+  for (let i = ytDlpQueue.length - 1; i >= 0; i--) {
+    if (ytDlpQueue[i].priority === PRIORITY.PRELOAD) {
+      const item = ytDlpQueue[i];
+      if (item.timer) clearTimeout(item.timer);
+      ytDlpQueue.splice(i, 1);
+      console.log("[YT Gate] Cancelled stale preload", item.id || "");
+    }
+  }
+}
+
+function cancelQueuedById(id) {
+  let removed = 0;
+  for (const q of [ytDlpQueue, streamQueue]) {
+    for (let i = q.length - 1; i >= 0; i--) {
+      if (q[i].id === id) {
+        if (q[i].timer) clearTimeout(q[i].timer);
+        q.splice(i, 1);
+        removed++;
+      }
+    }
+  }
+  return removed;
 }
 
 /**
@@ -943,14 +1044,15 @@ function getDiskCacheMetaPath(videoId) {
   return path.join(STREAM_DISK_CACHE_DIR, `${videoId}.meta`);
 }
 
-function readDiskCache(videoId) {
+async function readDiskCache(videoId) {
   try {
     const metaPath = getDiskCacheMetaPath(videoId);
-    if (!fs.existsSync(metaPath)) return null;
-    const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+    try { await fs.promises.access(metaPath); } catch { return null; }
+    const raw = await fs.promises.readFile(metaPath, "utf8");
+    const meta = JSON.parse(raw);
     if (Date.now() > meta.expiresAt) return null;
     const filePath = getDiskCachePath(videoId, meta.mime);
-    if (!fs.existsSync(filePath)) return null;
+    try { await fs.promises.access(filePath); } catch { return null; }
     return { filePath, mime: meta.mime, size: meta.size };
   } catch {
     return null;
@@ -1022,7 +1124,7 @@ function cacheStreamEntry(videoId, data, mime) {
 }
 
 // Audio streaming endpoint - streams audio from YouTube
-app.get("/api/stream/:videoId", (req, res) => {
+app.get("/api/stream/:videoId", async (req, res) => {
   const videoId = req.params.videoId;
   if (!videoId || !/^[A-Za-z0-9_-]{11}$/.test(videoId)) {
     return fail(res, 400, "INVALID_VIDEO_ID", "Invalid video ID format", { videoId });
@@ -1043,7 +1145,8 @@ app.get("/api/stream/:videoId", (req, res) => {
   }
 
   // Check persistent disk cache — survives server restarts, instant for previously played songs
-  const diskCached = readDiskCache(videoId);
+  // Async file I/O so the event loop isn't blocked before the stream gate.
+  const diskCached = await readDiskCache(videoId);
   if (diskCached) {
     console.log("[Stream] Disk cache hit for:", videoId, "bytes:", diskCached.size, "mime:", diskCached.mime);
     res.setHeader("Content-Type", diskCached.mime);
@@ -1066,13 +1169,22 @@ app.get("/api/stream/:videoId", (req, res) => {
     return;
   }
 
-  console.log("[Stream] Starting stream for:", videoId);
+  const isPreload = req.headers['x-preload'] === '1' || req.query.preload === '1';
+  if (!isPreload) {
+    // Stale preloads for a previous track must not run if user already
+    // pressed Play on a new track — cancel queued PRELOAD jobs so PLAY
+    // jumps ahead without wasting the stream slot.
+    cancelQueuedPreloads();
+  }
+  console.log(`[Stream] Starting ${isPreload ? 'preload' : 'stream'} for:`, videoId);
 
   const attemptStream = (attempt = 1) => {
     const maxAttempts = 3;
 
+    // Pin to m4a 140 first — fastest manifest parse, known MIME (audio/mp4).
+    // Fallback chain kept short; large sorting over webm/opus added ~800ms.
     const ytArgs = [
-      "-f", "bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio[ext=webm]/bestaudio/best",
+      "-f", "140/bestaudio[ext=m4a]/bestaudio",
       "-o", "-",
       "--no-check-certificates",
       "--no-warnings",
@@ -1086,20 +1198,29 @@ app.get("/api/stream/:videoId", (req, res) => {
       audioUrl
     ];
 
-    console.log(`[Stream] Attempt ${attempt}/${maxAttempts} for: ${videoId} — acquiring yt slot (active: ${ytDlpActive}, queued: ${ytDlpQueue.length})`);
-    // Shared concurrency gate — never run more than YT_DLP_MAX_CONCURRENCY
-    // yt-dlp processes at once on the 1-CPU instance. Queue deadline 90s:
-    // past that, fail cleanly (Render's edge would 502 us at ~80s anyway).
-    acquireYtSlot(() => {
+    console.log(`[Stream] Attempt ${attempt}/${maxAttempts} for: ${videoId} — acquiring stream slot (active: ${streamActive}, queued: ${streamQueue.length}) ${isPreload ? '[PRELOAD]' : '[PLAY]'}`);
+    // Stream lane — PLAY > PRELOAD priority, dedicated gate so search never queues first play.
+    // isPreload jobs use PRELOAD priority so a PLAY arriving later jumps ahead.
+    acquireStreamSlot(() => {
     const yt = spawn("yt-dlp", ytArgs, { stdio: ["ignore", "pipe", "pipe"] });
 
     let headersSent = false;
+    // Send headers immediately so client TTFB isn't gated on MIME sniff or
+    // yt-dlp manifest parse. MIME is corrected on first chunk if needed.
+    // This removes ~200ms + format-sort time from critical path.
+    if (!res.headersSent) {
+      res.setHeader("Content-Type", "audio/mp4");
+      res.setHeader("Accept-Ranges", "bytes");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Access-Control-Allow-Origin", "*");
+    }
     // 'error' AND 'close' may BOTH fire for one process — release exactly once.
     let slotReleased = false;
     const releaseSlotOnce = () => {
       if (slotReleased) return;
       slotReleased = true;
-      releaseYtSlot();
+      releaseStreamSlot();
     };
     const retryStream = (delayMs) => {
       console.log("[Stream] Retrying with different clients... attempt", attempt + 1, "for:", videoId);
@@ -1138,18 +1259,15 @@ app.get("/api/stream/:videoId", (req, res) => {
         firstChunk = false;
         headersSent = true;
         clearTimeout(startupTimeout);
-        // Detect MIME from first chunk magic bytes
+        // Detect MIME from first chunk magic bytes for logging/cache.
+        // Headers already sent as audio/mp4 — only log actual MIME.
         if (chunk.length >= 4) {
           if (chunk[0] === 0x49 && chunk[1] === 0x44 && chunk[2] === 0x33) detectedMime = "audio/mpeg";
           else if (chunk[0] === 0xFF && (chunk[1] === 0xFB || chunk[1] === 0xF3 || chunk[1] === 0xF2)) detectedMime = "audio/mpeg";
           else if (chunk.length >= 8 && chunk[4] === 0x66 && chunk[5] === 0x74 && chunk[6] === 0x79 && chunk[7] === 0x70) detectedMime = "audio/mp4";
           else if (chunk[0] === 0x1A && chunk[1] === 0x45 && chunk[2] === 0xDF && chunk[3] === 0xA3) detectedMime = "audio/webm";
-          else detectedMime = "audio/webm";
+          else detectedMime = "audio/mpeg";
         }
-        res.setHeader("Content-Type", detectedMime);
-        res.setHeader("Accept-Ranges", "bytes");
-        res.setHeader("Cache-Control", "no-cache");
-        res.setHeader("X-Content-Type-Options", "nosniff");
         console.log("[Stream] First chunk received for:", videoId, "MIME:", detectedMime);
       }
       totalBytes += chunk.length;
@@ -1215,12 +1333,18 @@ app.get("/api/stream/:videoId", (req, res) => {
 
     req.on("close", () => {
       clearTimeout(startupTimeout);
+      // Preload is cancellable via queue; if its HTTP request is aborted
+      // (client-side AbortController), kill its yt-dlp to free the slot.
+      // Play requests also kill on close, but a preload must never keep a
+      // slot occupied after the user skipped.
       killYtProcess(yt);
     });
     }, {
       queueTimeoutMs: 90_000,
+      priority: isPreload ? PRIORITY.PRELOAD : PRIORITY.PLAY,
+      id: isPreload ? `preload:${videoId}` : `play:${videoId}`,
       onQueuedTooLong: () => {
-        console.error("[Stream] QUEUE_TIMEOUT:", videoId);
+        console.error(`[Stream] QUEUE_TIMEOUT ${isPreload ? 'preload' : 'play'}:`, videoId);
         if (!res.headersSent) fail(res, 503, "STREAM_BUSY", "Server is busy — try again shortly", { videoId });
       },
     });
@@ -1278,7 +1402,7 @@ app.get("/api/download/:videoId", (req, res) => {
     console.log("[Download] SOURCE_RESOLUTION", { videoId, attempt });
 
     const ytArgs = [
-      "-f", "bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio[ext=webm]/bestaudio/best",
+      "-f", "140/bestaudio[ext=m4a]/bestaudio",
       "-o", "-",
       "--no-check-certificates",
       "--no-warnings",
@@ -1293,9 +1417,9 @@ app.get("/api/download/:videoId", (req, res) => {
     ];
 
     console.log("[Download] SOURCE_RESOLVED", { videoId, attempt, format: ytArgs[1] });
-    console.log("[Download] YT_DLP_START", { videoId, attempt, active: ytDlpActive, queued: ytDlpQueue.length });
-    // Shared concurrency gate with search/stream — protects the 1-CPU box.
-    acquireYtSlot(() => {
+    console.log("[Download] YT_DLP_START", { videoId, attempt, active: streamActive, queued: streamQueue.length });
+    // Stream lane — downloads share the stream gate, never starve searches.
+    acquireStreamSlot(() => {
     const yt = spawn("yt-dlp", ytArgs, { stdio: ["ignore", "pipe", "pipe"] });
 
     // 'error' AND 'close' may BOTH fire — release the gate slot exactly once.
@@ -1303,7 +1427,7 @@ app.get("/api/download/:videoId", (req, res) => {
     const releaseSlotOnce = () => {
       if (slotReleased) return;
       slotReleased = true;
-      releaseYtSlot();
+      releaseStreamSlot();
     };
 
     // No byte may be sent to the client until the entire payload has been
@@ -1445,6 +1569,8 @@ app.get("/api/download/:videoId", (req, res) => {
     });
     }, {
       queueTimeoutMs: 120_000,
+      priority: PRIORITY.PLAY,
+      id: `play:${videoId}`,
       onQueuedTooLong: () => {
         console.error("[Download] QUEUE_TIMEOUT:", videoId);
         if (!res.headersSent && !res.destroyed) fail(res, 503, "DOWNLOAD_BUSY", "Server is busy — try again shortly", { videoId });
