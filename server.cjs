@@ -131,22 +131,23 @@ async function refreshProxyBeforeRetry() {
 // all hit their execFile timeout, while the same calls succeed sequentially
 // in ~6s. Two independent lanes prevent stream starvation:
 //
-//  • metadata lane (YT_DLP_MAX_CONCURRENCY=2) — search/trending/audio-info
-//  • stream lane  (STREAM_MAX_CONCURRENCY=1) — /stream and /download pipes
+//  • metadata lane (YT_DLP_MAX_CONCURRENCY=3) — search/trending/audio-info
+//  • stream lane  (STREAM_MAX_CONCURRENCY=2) — /stream and /download pipes
 //
-// Total max 3, but a stream is never queued behind a search batch. This
-// preserves WARP/rate-limit safety while removing the cold-first-play queue.
+// Total max 5, but a stream is never queued behind a search batch. This
+// preserves WARP/rate-limit safety while restoring v2.5.16 typing speed
+// (3 concurrent searches) and allowing playback+download in parallel.
 //
 // Priority scheduling (PLAY > PRELOAD > BACKGROUND):
 //   PLAY = interactive playback — must not wait behind background work
 //   PRELOAD = next-track prefetch — medium, cancellable if stale
 //   BACKGROUND = search/trending — lowest, may be starved by PLAY
 // Queues are priority-ordered (ascending) with FIFO inside same priority.
-const YT_DLP_MAX_CONCURRENCY = 2;
+const YT_DLP_MAX_CONCURRENCY = 3;
 let ytDlpActive = 0;
 const ytDlpQueue = [];
 
-const STREAM_MAX_CONCURRENCY = 1;
+const STREAM_MAX_CONCURRENCY = 2;
 let streamActive = 0;
 const streamQueue = [];
 

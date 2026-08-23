@@ -153,6 +153,8 @@ describe('youtubeSearch — server response normalization', () => {
 
   it('rejects with the server error when the server times out', async () => {
     mockedApiFetch.mockRejectedValueOnce(new Error('Request timed out'));
+    // Invidious fallback also fails quickly (mocked), so the whole search rejects
+    vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('Invidious failed'))));
 
     await expect(youtubeSearch('test timeout')).rejects.toThrow('Request timed out');
   });
