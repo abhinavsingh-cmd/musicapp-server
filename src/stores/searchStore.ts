@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { Song } from '../types/music';
-import { OfflineError, NetworkError, TimeoutError } from '../config/api';
+import { OfflineError, NetworkError, TimeoutError, RateLimitError } from '../config/api';
 import { searchProviders } from '../providers/search';
 import type { Track } from '../providers/types';
 import { metricsCollector } from '../services/metricsCollector';
@@ -16,7 +16,7 @@ export type DurationFilter = 'any' | 'short' | 'medium' | 'long';
  * Explicit search lifecycle. Every terminal outcome is distinct so the UI
  * can never conflate "no results" with a failure, and loading states are
  * always followed by one of: success / empty / error / timeout / network /
- * offline / cancelled.
+ * offline / rateLimited / cancelled.
  */
 export type SearchStatus =
   | 'idle'
@@ -33,10 +33,12 @@ export type SearchStatus =
   | 'network'
   /** TimeoutError — the backend did not answer in time. */
   | 'timeout'
+  /** RateLimitError — 429/503, retry with backoff. */
+  | 'rateLimited'
   | 'cancelled';
 
 /** States that represent a completed FAILURE (retryable, never a result). */
-const FAILURE_STATUSES: ReadonlySet<SearchStatus> = new Set(['error', 'offline', 'network', 'timeout']);
+const FAILURE_STATUSES: ReadonlySet<SearchStatus> = new Set(['error', 'offline', 'network', 'timeout', 'rateLimited']);
 
 export function isFailureStatus(status: SearchStatus): boolean {
   return FAILURE_STATUSES.has(status);
@@ -126,6 +128,12 @@ function getErrorMessage(err: unknown): string {
   if (err instanceof OfflineError) return 'You are offline. Check your connection.';
   if (err instanceof TimeoutError) return 'Search timed out. Try again.';
   if (err instanceof NetworkError) return 'Network error. Check your connection.';
+  if (err instanceof RateLimitError) {
+    const retrySec = err.retryAfterMs ? Math.ceil(err.retryAfterMs / 1000) : 0;
+    return retrySec > 0
+      ? `Server is busy (rate limited). Try again in ~${retrySec}s.`
+      : 'Server is busy (rate limited). Please try again shortly.';
+  }
   if (err instanceof Error && err.message) return err.message;
   return 'Search failed. Please try again.';
 }
@@ -139,6 +147,7 @@ function classifyError(err: unknown): SearchStatus {
   if (err instanceof OfflineError) return 'offline';
   if (err instanceof TimeoutError) return 'timeout';
   if (err instanceof NetworkError) return 'network';
+  if (err instanceof RateLimitError) return 'rateLimited';
   return 'error';
 }
 

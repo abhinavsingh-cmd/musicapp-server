@@ -11,10 +11,20 @@
  *     -> DownloadDescriptor | null   (URL + metadata for offline fetch)
  *   playableToEngineParams(playable)
  *     -> EnginePlayParams (pure mapping — the engine switches on `mode`)
+ *
+ * Provider health is tracked automatically: successful resolutions improve
+ * health scores, while 429/503/timeout/network errors degrade them.
  */
 
 import { toTrack } from './adapters';
 import { providerRegistry } from './registry';
+import { healthTracker } from './healthTracker';
+import {
+  safeProviderCall,
+  RESOLVE_TIMEOUT_MS,
+  DOWNLOAD_TIMEOUT_MS,
+  kindToHealthEvent,
+} from './safeProviderCall';
 import { logger } from '../utils/logger';
 import {
   DownloadDescriptor,
@@ -167,16 +177,29 @@ export async function resolvePlayableSource(
 
   const provider = await ensureProvider(track.provider);
   if (provider) {
-    try {
-      const resolved = await provider.resolveStream(track, options);
+    const label = `${track.provider}.resolveStream`;
+    const result = await safeProviderCall(
+      () => provider.resolveStream(track, options),
+      label,
+      RESOLVE_TIMEOUT_MS,
+    );
+
+    if (result.ok) {
+      const resolved = result.value;
       if (resolved) {
+        healthTracker.record(track.provider, 'success');
         if (resolved.kind === 'stream') {
           return toStreamSource(resolved.track ?? track, resolved.streamUrl, resolved.expiresInMs, resolved.isPreview);
         }
         return resolved;
       }
-    } catch (err) {
-      logger.error('[Providers] resolveStream failed for', track.provider, track.id, err);
+    } else {
+      // Record health event for classified failures
+      const healthEvent = kindToHealthEvent(result.kind);
+      if (healthEvent) {
+        healthTracker.record(track.provider, healthEvent);
+      }
+      logger.error('[Providers] resolveStream failed for', track.provider, track.id, result.message);
     }
   }
 
@@ -200,11 +223,25 @@ export async function resolveDownloadDescriptor(
 ): Promise<DownloadDescriptor | null> {
   const provider = await ensureProvider(track.provider);
   if (provider?.resolveDownload) {
-    try {
-      const descriptor = await provider.resolveDownload(track);
-      if (descriptor) return descriptor;
-    } catch (err) {
-      logger.error('[Providers] resolveDownload failed for', track.provider, track.id, err);
+    const label = `${track.provider}.resolveDownload`;
+    const result = await safeProviderCall(
+      () => provider.resolveDownload!(track),
+      label,
+      DOWNLOAD_TIMEOUT_MS,
+    );
+
+    if (result.ok) {
+      const descriptor = result.value;
+      if (descriptor) {
+        healthTracker.record(track.provider, 'success');
+        return descriptor;
+      }
+    } else {
+      const healthEvent = kindToHealthEvent(result.kind);
+      if (healthEvent) {
+        healthTracker.record(track.provider, healthEvent);
+      }
+      logger.error('[Providers] resolveDownload failed for', track.provider, track.id, result.message);
     }
   }
 

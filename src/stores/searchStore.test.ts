@@ -172,6 +172,76 @@ describe('rapid sequential searches', () => {
   });
 });
 
+// ---- Out-of-order regression: "weeknd" -> "weeknd blinding lights" ----
+
+describe('out-of-order regression', () => {
+  it('"weeknd blinding lights" result must not be overwritten by late "weeknd" result', async () => {
+    // 1) Search "weeknd" — its YT request is in flight.
+    const p1 = useSearchStore.getState().search('weeknd');
+    await flush();
+    expect((searchProviders as Mock).mock.calls.map((c) => c[0])).toEqual(['weeknd']);
+
+    // 2) Immediately search "weeknd blinding lights" — supersedes the first.
+    const p2 = useSearchStore.getState().search('weeknd blinding lights');
+    await flush();
+    expect((searchProviders as Mock).mock.calls.map((c) => c[0])).toEqual(['weeknd', 'weeknd blinding lights']);
+
+    // 3) The NEWER response arrives first (fast network for the second query).
+    pending.get('weeknd blinding lights')!.resolve(
+      ytResult([makeTrack('blinding-lights', 'Blinding Lights')]),
+    );
+    await flush();
+    await p2;
+
+    const sAfterNew = useSearchStore.getState();
+    expect(sAfterNew.debouncedQuery).toBe('weeknd blinding lights');
+    expect(sAfterNew.ytResults.map((r) => r.id)).toEqual(['blinding-lights']);
+    expect(sAfterNew.ytStatus).toBe('success');
+
+    // 4) The OLDER response arrives LAST — must be discarded, never overwrite.
+    pending.get('weeknd')!.resolve(ytResult([makeTrack('stale-weeknd', 'Stale Result')]));
+    await flush();
+    await p1;
+
+    const sFinal = useSearchStore.getState();
+    expect(sFinal.debouncedQuery).toBe('weeknd blinding lights');
+    expect(sFinal.ytResults.map((r) => r.id)).toEqual(['blinding-lights']);
+    expect(sFinal.ytStatus).toBe('success');
+  });
+
+  it('stale "weeknd" abort error never surfaces as an error to the user', async () => {
+    void useSearchStore.getState().search('weeknd');
+    await flush();
+
+    void useSearchStore.getState().search('weeknd blinding lights');
+    await flush();
+
+    // The older request is aborted — its AbortError must be swallowed.
+    pending.get('weeknd')!.reject(new DOMException('Aborted', 'AbortError'));
+    pending.get('weeknd blinding lights')!.resolve(
+      ytResult([makeTrack('blinding-lights', 'Blinding Lights')]),
+    );
+    await flush();
+
+    const s = useSearchStore.getState();
+    expect(s.error).toBeNull();
+    expect(s.ytStatus).toBe('success');
+    expect(s.ytResults.map((r) => r.id)).toEqual(['blinding-lights']);
+  });
+
+  it('stale request controller is aborted when a newer search starts', async () => {
+    void useSearchStore.getState().search('weeknd');
+    await flush();
+    const firstCall = (searchProviders as Mock).mock.calls[0];
+    const firstSignal: AbortSignal = firstCall[1].signal;
+    expect(firstSignal.aborted).toBe(false);
+
+    void useSearchStore.getState().search('weeknd blinding lights');
+    await flush();
+    expect(firstSignal.aborted).toBe(true);
+  });
+});
+
 // ---- Cancellation ----
 
 describe('cancellation', () => {

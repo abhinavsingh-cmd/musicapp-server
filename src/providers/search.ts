@@ -9,9 +9,20 @@
  *
  * Failures are isolated per provider: one provider's network error is
  * reported on its own result entry and never rejects the whole search.
+ *
+ * Provider health is tracked automatically: successful searches improve
+ * health scores, while 429/503/timeout/network errors degrade them.
+ * Unhealthy providers are searched after healthy ones, improving overall
+ * search reliability.
  */
 
 import { providerRegistry } from './registry';
+import { healthTracker } from './healthTracker';
+import {
+  safeProviderCall,
+  SEARCH_TIMEOUT_MS,
+  kindToHealthEvent,
+} from './safeProviderCall';
 import { logger } from '../utils/logger';
 import { ProviderId, SearchOptions, Track, TrackProvider } from './types';
 // Ensure built-in providers are registered (idempotent). Static import: the
@@ -49,9 +60,14 @@ function searchableProviders(filter?: ProviderId[]): TrackProvider[] {
 /**
  * Search every registered provider that supports search.
  *
- * Results arrive in registry order with one entry per provider. A provider
- * that throws produces `{ tracks: [], error }` instead of rejecting the
- * aggregate — callers decide how to surface or ignore individual failures.
+ * Results arrive in health-sorted order with one entry per provider.
+ * A provider that throws produces `{ tracks: [], error }` instead of
+ * rejecting the aggregate — callers decide how to surface or ignore
+ * individual failures.
+ *
+ * Provider health is tracked: successful searches are recorded as
+ * successes, while 429/503/timeout/network errors are recorded as
+ * failures. Unhealthy providers are deprioritized in the search order.
  */
 export async function searchProviders(
   query: string,
@@ -59,34 +75,55 @@ export async function searchProviders(
 ): Promise<ProviderSearchResult[]> {
   await ensureBuiltinProviders();
 
+  // Get searchable providers and sort by health (healthiest first)
   const targets = searchableProviders(options?.providers);
-  const settled = await Promise.allSettled(
-    targets.map(p => p.search(query, options)),
+  const sortedIds = healthTracker.sortByHealth(targets.map(p => p.id));
+  const sortedTargets = sortedIds
+    .map(id => targets.find(p => p.id === id))
+    .filter((p): p is TrackProvider => p !== undefined);
+
+  // Wrap each provider's search in safeProviderCall — one provider's timeout
+  // or exception can never block or crash the entire search.
+  const results = await Promise.all(
+    sortedTargets.map(p =>
+      safeProviderCall(
+        () => p.search(query, options),
+        `${p.id}.search`,
+        SEARCH_TIMEOUT_MS,
+      ),
+    ),
   );
 
-  return targets.map((provider, i) => {
-    const outcome = settled[i];
-    if (outcome.status === 'fulfilled') {
+  return sortedTargets.map((provider, i) => {
+    const outcome = results[i];
+
+    if (outcome.ok) {
+      healthTracker.record(provider.id, 'success');
       return {
         providerId: provider.id,
         providerName: provider.name,
         tracks: outcome.value ?? [],
       };
     }
-    const error =
-      outcome.reason instanceof Error
-        ? outcome.reason
-        : new Error(String(outcome.reason));
+
+    // Classify failure for health tracking
+    const healthEvent = kindToHealthEvent(outcome.kind);
+    if (healthEvent) {
+      healthTracker.record(provider.id, healthEvent);
+    }
+
     logger.warn(
       '[Providers] search failed for',
       provider.id,
-      error.message,
+      `(${outcome.kind})`,
+      outcome.message,
     );
+
     return {
       providerId: provider.id,
       providerName: provider.name,
       tracks: [],
-      error,
+      error: new Error(outcome.message),
     };
   });
 }

@@ -42,10 +42,10 @@ const HeroSection = memo(({ songCount, trendingSource, onPlayAll, onPlayTrending
       <AnimatePresence mode="wait">
         <motion.div
           key={heroIdx}
-          initial={reduceMotion ? false : { opacity: 0 }}
-          animate={reduceMotion ? false : { opacity: 1 }}
-          exit={reduceMotion ? false : { opacity: 0 }}
-          transition={reduceMotion ? false : { duration: 0.6, ease: 'easeInOut' }}
+          initial={reduceMotion ? undefined : { opacity: 0 }}
+          animate={reduceMotion ? undefined : { opacity: 1 }}
+          exit={reduceMotion ? undefined : { opacity: 0 }}
+          transition={reduceMotion ? undefined : { duration: 0.6, ease: 'easeInOut' }}
           className={`absolute inset-0 bg-gradient-to-br ${HERO_GRADIENTS[heroIdx]}`}
         />
       </AnimatePresence>
@@ -61,27 +61,27 @@ const HeroSection = memo(({ songCount, trendingSource, onPlayAll, onPlayTrending
       )}
       
       <motion.div 
-        initial={reduceMotion ? false : { opacity: 0, y: 30 }}
-        animate={reduceMotion ? false : { opacity: 1, y: 0 }}
-        transition={reduceMotion ? false : { duration: 0.5, delay: 0.1 }}
+        initial={reduceMotion ? undefined : { opacity: 0, y: 30 }}
+        animate={reduceMotion ? undefined : { opacity: 1, y: 0 }}
+        transition={reduceMotion ? undefined : { duration: 0.5, delay: 0.1 }}
         className="relative z-10 px-4 sm:px-8 py-12 sm:py-16 max-w-2xl"
       >
         <motion.div 
-          initial={reduceMotion ? false : { opacity: 0, scale: 0.9 }}
-          animate={reduceMotion ? false : { opacity: 1, scale: 1 }}
-          transition={reduceMotion ? false : { delay: 0.2 }}
+          initial={reduceMotion ? undefined : { opacity: 0, scale: 0.9 }}
+          animate={reduceMotion ? undefined : { opacity: 1, scale: 1 }}
+          transition={reduceMotion ? undefined : { delay: 0.2 }}
           className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white/10 text-white/90 text-sm font-medium mb-4 sm:mb-6"
-          whileHover={reduceMotion ? false : { scale: 1.05 }}
-          whileTap={reduceMotion ? false : { scale: 0.95 }}
+          whileHover={reduceMotion ? undefined : { scale: 1.05 }}
+          whileTap={reduceMotion ? undefined : { scale: 0.95 }}
         >
           <Sparkles size={14} className="text-violet-300" />
           <span>{trendingTagline(songCount, trendingSource)}</span>
         </motion.div>
         
         <motion.h1 
-          initial={reduceMotion ? false : { opacity: 0, y: 20 }}
-          animate={reduceMotion ? false : { opacity: 1, y: 0 }}
-          transition={reduceMotion ? false : { delay: 0.3 }}
+          initial={reduceMotion ? undefined : { opacity: 0, y: 20 }}
+          animate={reduceMotion ? undefined : { opacity: 1, y: 0 }}
+          transition={reduceMotion ? undefined : { delay: 0.3 }}
           className="text-3xl sm:text-5xl font-black text-white mb-3 sm:mb-4 leading-tight"
         >
           Your Music,<br />
@@ -89,23 +89,23 @@ const HeroSection = memo(({ songCount, trendingSource, onPlayAll, onPlayTrending
         </motion.h1>
         
         <motion.p 
-          initial={reduceMotion ? false : { opacity: 0, y: 20 }}
-          animate={reduceMotion ? false : { opacity: 1, y: 0 }}
-          transition={reduceMotion ? false : { delay: 0.4 }}
+          initial={reduceMotion ? undefined : { opacity: 0, y: 20 }}
+          animate={reduceMotion ? undefined : { opacity: 1, y: 0 }}
+          transition={reduceMotion ? undefined : { delay: 0.4 }}
           className="text-white/70 text-sm sm:text-lg mb-6 sm:mb-8 max-w-md"
         >
           Stream trending hits from YouTube, discover new artists, create playlists.
         </motion.p>
         
         <motion.div 
-          initial={reduceMotion ? false : { opacity: 0, y: 20 }}
-          animate={reduceMotion ? false : { opacity: 1, y: 0 }}
-          transition={reduceMotion ? false : { delay: 0.5 }}
+          initial={reduceMotion ? undefined : { opacity: 0, y: 20 }}
+          animate={reduceMotion ? undefined : { opacity: 1, y: 0 }}
+          transition={reduceMotion ? undefined : { delay: 0.5 }}
           className="flex gap-3"
         >
           <motion.button
-            whileHover={reduceMotion ? false : { scale: 1.05, boxShadow: '0 20px 40px rgba(255, 255, 255, 0.2)' }}
-            whileTap={reduceMotion ? false : { scale: 0.95 }}
+            whileHover={reduceMotion ? undefined : { scale: 1.05, boxShadow: '0 20px 40px rgba(255, 255, 255, 0.2)' }}
+            whileTap={reduceMotion ? undefined : { scale: 0.95 }}
             onClick={onPlayAll}
             className="flex items-center gap-2 px-6 sm:px-8 py-3 sm:py-3.5 rounded-full bg-white text-gray-900 font-bold text-sm sm:text-base transition-all duration-300"
           >
@@ -114,8 +114,8 @@ const HeroSection = memo(({ songCount, trendingSource, onPlayAll, onPlayTrending
           </motion.button>
           
           <motion.button
-            whileHover={reduceMotion ? false : { scale: 1.05 }}
-            whileTap={reduceMotion ? false : { scale: 0.95 }}
+            whileHover={reduceMotion ? undefined : { scale: 1.05 }}
+            whileTap={reduceMotion ? undefined : { scale: 0.95 }}
             onClick={onPlayTrending}
             className="flex items-center gap-2 px-6 sm:px-8 py-3 sm:py-3.5 rounded-full bg-white/10 text-white font-bold text-sm sm:text-base transition-all duration-300"
           >

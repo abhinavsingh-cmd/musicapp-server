@@ -269,11 +269,15 @@ describe('downloadsStore — download lifecycle', () => {
     const p = useDownloadsStore.getState().downloadSong(MOCK_SONG);
     await vi.advanceTimersByTimeAsync(50);
     await p;
-    await vi.advanceTimersByTimeAsync(1100);
-    await vi.advanceTimersByTimeAsync(3100);
+    // Wait for all retries with generous timing to account for jitter
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(10000);
+    await vi.advanceTimersByTimeAsync(20000);
     await vi.advanceTimersByTimeAsync(50);
 
-    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    // 1 initial + 3 retries = 4 total attempts
+    expect(fetchSpy).toHaveBeenCalledTimes(4);
     const state = useDownloadsStore.getState();
     expect(state.failedDownloads.length).toBe(1);
     expect(state.failedDownloads[0].message).toContain('500');
@@ -305,8 +309,8 @@ describe('downloadsStore — automatic retry', () => {
     expect(useDownloadsStore.getState().failedDownloads.length).toBe(0);
     expect(fetchSpy).toHaveBeenCalledTimes(1);
 
-    // The retry fires after the 1s backoff
-    await vi.advanceTimersByTimeAsync(1100);
+    // The retry fires after the backoff (with jitter, so use generous timing)
+    await vi.advanceTimersByTimeAsync(5000);
     await vi.advanceTimersByTimeAsync(50);
 
     expect(fetchSpy).toHaveBeenCalledTimes(2);
@@ -339,12 +343,15 @@ describe('downloadsStore — automatic retry', () => {
     const p = useDownloadsStore.getState().downloadSong(MOCK_SONG);
     await vi.advanceTimersByTimeAsync(50);
     await p;
-    await vi.advanceTimersByTimeAsync(1100); // retry 1 fires (~t=1050)
-    await vi.advanceTimersByTimeAsync(3100); // retry 2 fires (~t=4060) + flush
+    // Wait for all retries with generous timing to account for jitter
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(10000);
+    await vi.advanceTimersByTimeAsync(20000);
     await vi.advanceTimersByTimeAsync(50);
 
-    // 1 original + 2 auto-retries, then a preserved failure reason
-    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    // 1 initial + 3 retries = 4 total attempts
+    expect(fetchSpy).toHaveBeenCalledTimes(4);
     const state = useDownloadsStore.getState();
     expect(state.failedDownloads.length).toBe(1);
     expect(state.failedDownloads[0].message).toMatch(/network error/i);
@@ -364,6 +371,7 @@ describe('downloadsStore — automatic retry', () => {
 
     await vi.advanceTimersByTimeAsync(10_000);
 
+    // Only the initial attempt should have been made (no retries after cancel)
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(useDownloadsStore.getState().failedDownloads.length).toBe(0);
     expect(useDownloadsStore.getState().downloads.length).toBe(0);
@@ -375,17 +383,21 @@ describe('downloadsStore — automatic retry', () => {
       .mockRejectedValueOnce(new TypeError('Failed to fetch'))
       .mockRejectedValueOnce(new TypeError('Failed to fetch'))
       .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
       .mockResolvedValue(successResponse());
     vi.stubGlobal('fetch', fetchSpy);
 
     const p = useDownloadsStore.getState().downloadSong(MOCK_SONG);
     await vi.advanceTimersByTimeAsync(50);
     await p;
-    await vi.advanceTimersByTimeAsync(1100);
-    await vi.advanceTimersByTimeAsync(3100);
+    // Wait for all retries with generous timing to account for jitter
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(10000);
+    await vi.advanceTimersByTimeAsync(20000);
     await vi.advanceTimersByTimeAsync(50);
 
-    // Budget exhausted — failure is now visible
+    // Budget exhausted — failure is now visible (1 initial + 3 retries = 4 attempts)
     expect(useDownloadsStore.getState().failedDownloads.length).toBe(1);
 
     // Manual retry gets a fresh budget and succeeds

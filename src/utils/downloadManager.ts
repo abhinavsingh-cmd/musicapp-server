@@ -20,10 +20,11 @@ import type { Track } from '../providers/types';
 import { logger } from './logger';
 
 const DB_NAME = 'music-app-offline';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const STORE_SONGS = 'songs';
 const STORE_THUMBS = 'thumbnails';
 const STORE_META = 'meta';
+const STORE_DOWNLOAD_STATE = 'downloadState';
 
 const MAX_CACHE_SIZE = 500 * 1024 * 1024; // 500 MB soft limit
 const MIN_AUDIO_SIZE = 10 * 1024; // 10 KB — anything smaller is not a valid audio file
@@ -52,14 +53,12 @@ export interface DownloadErrorInfo {
   message: string;
   transient: boolean;
   metadata?: Record<string, unknown>;
+  retryAfterMs?: number;
+  cause?: unknown;
 }
 
 function stageLog(stage: string, track: { title: string; id: string; provider?: string; externalId?: string }, meta?: Record<string, unknown>) {
   logger.debug(`[Download] ${stage}`, { title: track.title, id: track.id, provider: track.provider, externalId: track.externalId || 'NONE', ...meta });
-}
-
-function stageWarn(stage: string, track: { title: string; id: string }, meta?: Record<string, unknown>) {
-  logger.warn(`[Download] ${stage}`, { title: track.title, id: track.id, ...meta });
 }
 
 function stageError(stage: string, track: { title: string; id: string }, err: unknown, meta?: Record<string, unknown>) {
@@ -70,6 +69,44 @@ function downloadFailureInfo(info: DownloadErrorInfo): Error {
   const err = new Error(info.message, info.cause !== undefined ? { cause: info.cause } : undefined) as Error & DownloadErrorInfo;
   Object.assign(err, info);
   return err;
+}
+
+/**
+ * Parse the Retry-After header from an HTTP response.
+ * Returns milliseconds to wait, or undefined if the header is absent/invalid.
+ * Handles both seconds-based and HTTP-date formats.
+ */
+export function parseRetryAfter(header: string | null): number | undefined {
+  if (!header) return undefined;
+  const trimmed = header.trim();
+  // Try numeric seconds first
+  const seconds = Number(trimmed);
+  if (!isNaN(seconds) && seconds >= 0) {
+    return Math.min(seconds * 1000, 300_000); // Cap at 5 minutes
+  }
+  // Try HTTP-date format (e.g., "Wed, 21 Oct 2015 07:28:00 GMT")
+  const date = Date.parse(trimmed);
+  if (!isNaN(date)) {
+    const ms = date - Date.now();
+    return ms > 0 ? Math.min(ms, 300_000) : undefined; // Cap at 5 minutes
+  }
+  return undefined;
+}
+
+/**
+ * Calculate exponential backoff with jitter for retry delays.
+ * @param attempt - Current attempt number (0-indexed)
+ * @param baseMs - Base delay in milliseconds
+ * @param maxMs - Maximum delay in milliseconds
+ * @returns Delay in milliseconds with jitter applied
+ */
+export function exponentialBackoffWithJitter(attempt: number, baseMs = 1000, maxMs = 30_000): number {
+  // Exponential backoff: base * 2^attempt
+  const exponential = baseMs * Math.pow(2, attempt);
+  // Apply jitter: random value between 0 and 50% of the exponential delay
+  const jitter = Math.random() * (exponential * 0.5);
+  // Return capped value with jitter
+  return Math.min(exponential + jitter, maxMs);
 }
 
 /**
@@ -120,6 +157,9 @@ function openDB(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(STORE_META)) {
         db.createObjectStore(STORE_META, { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains(STORE_DOWNLOAD_STATE)) {
+        db.createObjectStore(STORE_DOWNLOAD_STATE, { keyPath: 'key' });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -182,6 +222,65 @@ async function txClear(db: IDBDatabase, store: string): Promise<void> {
     req.onsuccess = () => resolve();
     req.onerror = () => reject(req.error);
   });
+}
+
+// ---------------------------------------------------------------------------
+// Download state persistence (failed downloads, queue, retry state)
+// ---------------------------------------------------------------------------
+
+export interface PersistedDownloadState {
+  key: string;
+  failedDownloads: Array<{ songId: string; youtubeId: string; message: string; timestamp: number }>;
+  downloadQueue: Array<{ songId: string; youtubeId: string; title: string; artist: string; genre: string; duration: number; coverArt: string; addedAt: number }>;
+  retryState: Record<string, { attempts: number; cooldownUntil?: number }>;
+  updatedAt: number;
+}
+
+/**
+ * Persist download state (failed downloads, queue, retry state) to IndexedDB.
+ * This allows recovery after app restart.
+ */
+export async function persistDownloadState(state: Omit<PersistedDownloadState, 'updatedAt'>): Promise<void> {
+  try {
+    const db = await openDB();
+    const entry: PersistedDownloadState = {
+      ...state,
+      updatedAt: Date.now(),
+    };
+    await txPut(db, STORE_DOWNLOAD_STATE, entry);
+  } catch (err) {
+    logger.error('[Downloads] Failed to persist download state:', err);
+  }
+}
+
+/**
+ * Load persisted download state from IndexedDB.
+ */
+export async function loadPersistedDownloadState(): Promise<PersistedDownloadState | null> {
+  try {
+    const db = await openDB();
+    const result = await txGet<PersistedDownloadState>(db, STORE_DOWNLOAD_STATE, 'main');
+    // Only return if recent (within 24 hours)
+    if (result && Date.now() - result.updatedAt < 24 * 60 * 60 * 1000) {
+      return result;
+    }
+    return null;
+  } catch (err) {
+    logger.error('[Downloads] Failed to load persisted download state:', err);
+    return null;
+  }
+}
+
+/**
+ * Clear persisted download state from IndexedDB.
+ */
+export async function clearPersistedDownloadState(): Promise<void> {
+  try {
+    const db = await openDB();
+    await txDelete(db, STORE_DOWNLOAD_STATE, 'main');
+  } catch (err) {
+    logger.error('[Downloads] Failed to clear persisted download state:', err);
+  }
 }
 
 export async function clearAllDownloads(): Promise<void> {
@@ -268,12 +367,6 @@ export type DownloadState = 'idle' | 'downloading' | 'paused' | 'completed' | 'f
  */
 export function isTransientDownloadError(err: unknown): boolean {
   return !!(err && typeof err === 'object' && (err as { transient?: boolean }).transient === true);
-}
-
-function downloadFailure(message: string, opts?: { transient?: boolean; cause?: unknown }): Error {
-  const err = new Error(message, opts?.cause !== undefined ? { cause: opts.cause } : undefined);
-  (err as { transient?: boolean }).transient = opts?.transient ?? false;
-  return err;
 }
 
 /**
@@ -508,7 +601,7 @@ export async function downloadSongWithProgress(
     try { detail = (await res.clone().json())?.message || ''; } catch {}
     // Map common statuses to human-readable causes so the Downloads UI shows
     // the real reason instead of a bare status code.
-    let reason: DownloadFailureReason = 'HTTP_ERROR';
+    let reason: DownloadFailureReason;
     let httpReason: string;
     switch (res.status) {
       case 403:
@@ -530,11 +623,13 @@ export async function downloadSongWithProgress(
           : 'Download failed';
     }
     const transient = res.status === 429 || res.status >= 500;
+    const retryAfterMs = transient ? parseRetryAfter(res.headers.get('retry-after')) : undefined;
     throw downloadFailureInfo({
       stage: 'HTTP_RESPONSE',
       reason,
       message: `${httpReason} (HTTP ${res.status})${detail ? ' — ' + detail : ''}`,
       transient,
+      retryAfterMs,
       metadata: { status: res.status, detail },
     });
   }

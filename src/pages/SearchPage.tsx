@@ -231,6 +231,7 @@ export const SearchPage: React.FC = memo(() => {
       case 'timeout': return 'YouTube search timed out. Try again.';
       case 'network': return 'Could not reach YouTube — network error.';
       case 'offline': return 'You are offline — YouTube search is unavailable.';
+      case 'rateLimited': return 'YouTube search rate limited. Please try again shortly.';
       case 'error': return err || 'YouTube search failed (server error). Try again.';
       default: return err || 'YouTube search failed.';
     }
@@ -422,6 +423,16 @@ export const SearchPage: React.FC = memo(() => {
         </div>
       )}
 
+      {status === 'rateLimited' && error && (
+        <div className="flex items-center gap-3 text-amber-400 py-4 px-4 rounded-xl bg-amber-500/10 border border-amber-500/20">
+          <AlertCircle size={18} />
+          <span className="text-sm">{error}</span>
+          <button onClick={() => search(query)} className="ml-auto text-xs text-amber-300 hover:text-white underline">
+            Retry
+          </button>
+        </div>
+      )}
+
       {status === 'error' && error && (
         <div className="flex items-center gap-3 text-red-400 py-4 px-4 rounded-xl bg-red-500/10 border border-red-500/20">
           <AlertCircle size={18} />
@@ -571,18 +582,27 @@ export const SearchPage: React.FC = memo(() => {
             </div>
           )}
 
-          {/* YouTube-only failure: library results stay visible; the dead
+{/* YouTube-only failure: library results stay visible; the dead
               YouTube backend is surfaced explicitly instead of masquerading
               as "no results". */}
-          {isFailureStatus(ytStatus) && status === 'success' && (
-            <div className="flex items-center gap-3 text-red-400 py-3 px-4 rounded-xl bg-red-500/10 border border-red-500/20">
-              <AlertCircle size={18} />
-              <span className="text-sm">{ytFailureMessage(ytStatus, error)}</span>
-              <button onClick={() => search(query)} className="ml-auto text-xs text-red-300 hover:text-white underline">
-                Retry
-              </button>
-            </div>
-          )}
+            {(ytStatus === 'error' || ytStatus === 'network' || ytStatus === 'timeout' || ytStatus === 'offline') && status === 'success' && (
+              <div className="flex items-center gap-3 text-red-400 py-3 px-4 rounded-xl bg-red-500/10 border border-red-500/20">
+                <AlertCircle size={18} />
+                <span className="text-sm">{ytFailureMessage(ytStatus, error)}</span>
+                <button onClick={() => search(query)} className="ml-auto text-xs text-red-300 hover:text-white underline">
+                  Retry
+                </button>
+              </div>
+            )}
+            {ytStatus === 'rateLimited' && status === 'success' && (
+              <div className="flex items-center gap-3 text-amber-400 py-3 px-4 rounded-xl bg-amber-500/10 border border-amber-500/20">
+                <AlertCircle size={18} />
+                <span className="text-sm">{ytFailureMessage(ytStatus, error)}</span>
+                <button onClick={() => search(query)} className="ml-auto text-xs text-amber-300 hover:text-white underline">
+                  Retry
+                </button>
+              </div>
+            )}
         </div>
         </ErrorBoundary>
       )}

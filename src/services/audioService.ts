@@ -86,6 +86,42 @@ function logPerf(label: string, startMark: string) {
 // CDN preconnect + IFrame API script prefetch). The engine invokes it via
 // the registry below without knowing which provider it is warming.
 
+/**
+ * Classify an error as transient (retryable) or permanent.
+ * Transient: network errors, timeouts, server errors (5xx), buffering stalls
+ * Permanent: format not supported, video not found, region blocked, invalid ID
+ */
+export function isTransientError(err: unknown): boolean {
+  if (!err) return false;
+  const message = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
+  const name = err instanceof Error ? err.name : '';
+
+  // Non-retryable format/encoding errors
+  if (name === 'NotSupportedError' || name === 'EncodingError') return false;
+  if (message.includes('format not supported') || message.includes('encoding error')) return false;
+
+  // Non-retryable content errors (4xx equivalent)
+  if (message.includes('video not found') || message.includes('video not available') ||
+      message.includes('video removed') || message.includes('private video') ||
+      message.includes('not embeddable') || message.includes('cannot embed') ||
+      message.includes('region') || message.includes('invalid') ||
+      message.includes('no youtube id') || message.includes('no playable id') ||
+      message.includes('no audio source')) return false;
+
+  // Transient: network, timeout, server errors (5xx), buffering
+  if (message.includes('network') || message.includes('timeout') ||
+      message.includes('failed to fetch') || message.includes('connection') ||
+      message.includes('server error') || message.includes('500') ||
+      message.includes('502') || message.includes('503') || message.includes('504') ||
+      message.includes('buffering') || message.includes('stalled') ||
+      message.includes('expired') || message.includes('403') || message.includes('416')) {
+    return true;
+  }
+
+  // Default to transient for unknown errors (safer to retry once)
+  return true;
+}
+
 export class AudioService {
   private htmlAudio: HTMLAudioElement | null = null;
   private useYoutubePlayer = false;
@@ -675,9 +711,18 @@ export class AudioService {
     const playbackId = this.currentPlaybackId;
     if (!song || !this.useNativePlayer) return;
 
-    if (track && this.nativeParams && this.nativeRetryCount < 2) {
+    const MAX_NATIVE_RETRIES = 2;
+    const BASE_NATIVE_RETRY_DELAY_MS = 1_000;
+    const MAX_NATIVE_RETRY_DELAY_MS = 5_000;
+
+    if (track && this.nativeParams && this.nativeRetryCount < MAX_NATIVE_RETRIES) {
       this.nativeRetryCount++;
-      log(`Native stream failed — re-resolving (attempt ${this.nativeRetryCount}/2)`);
+      // Bounded exponential backoff with jitter
+      const delay = Math.min(BASE_NATIVE_RETRY_DELAY_MS * Math.pow(2, this.nativeRetryCount - 1), MAX_NATIVE_RETRY_DELAY_MS);
+      const jitter = Math.random() * 300;
+      log(`Native stream failed — re-resolving (attempt ${this.nativeRetryCount}/${MAX_NATIVE_RETRIES}) after ${Math.round(delay + jitter)}ms`);
+      await new Promise(r => setTimeout(r, delay + jitter));
+      
       let fresh = await this.reExtractFreshParams(track, this.nativeParams);
       if (!fresh) {
         const playable = await resolvePlayableSource(track, { force: true });
@@ -750,6 +795,8 @@ export class AudioService {
     isRecovery = false,
   ): Promise<void> {
     const MAX_RETRIES = 3;
+    const BASE_RETRY_DELAY_MS = 500;
+    const MAX_RETRY_DELAY_MS = 5_000;
     // Proxy/extracted URLs need more time to start streaming than local files
     // /stream/ and /proxy-audio/ endpoints run yt-dlp server-side — first
     // play can take 20-25s on a cold start. The HTML engine must wait long
@@ -872,7 +919,12 @@ export class AudioService {
       if (!canplayOk) {
         logError(`⏱ canplay timeout on attempt ${attempt}/${MAX_RETRIES}`);
         if (attempt < MAX_RETRIES) {
-          log('Retrying...');
+          // Bounded exponential backoff with jitter for transient failures
+          const delay = Math.min(BASE_RETRY_DELAY_MS * Math.pow(2, attempt - 1), MAX_RETRY_DELAY_MS);
+          const jitter = Math.random() * 200;
+          log(`Retrying in ${Math.round(delay + jitter)}ms...`);
+          await new Promise(r => setTimeout(r, delay + jitter));
+          
           // The stream URL is likely stale/expired (403/416 upstream) — force a
           // fresh resolution so the next attempt doesn't reuse the bad URL.
           const fresh = await this.reExtractFreshParams(track, params);
@@ -918,13 +970,19 @@ export class AudioService {
         const errMsg = err instanceof Error ? err.message : String(err);
         logError(`✗ play() failed attempt ${attempt}/${MAX_RETRIES}:`, { name: errName, message: errMsg });
 
-        if (errName === 'NotSupportedError' || errName === 'EncodingError') {
-          this.emitPlaybackError(song, `Unable to play "${song.title}" — format not supported`);
+        // Non-retryable format/encoding errors — fail immediately without wasting retries
+        if (!isTransientError(err)) {
+          this.emitPlaybackError(song, `Unable to play "${song.title}" — ${errMsg}`);
           return;
         }
 
         if (attempt < MAX_RETRIES) {
-          log('Retrying...');
+          // Bounded exponential backoff with jitter for transient failures
+          const delay = Math.min(BASE_RETRY_DELAY_MS * Math.pow(2, attempt - 1), MAX_RETRY_DELAY_MS);
+          const jitter = Math.random() * 200;
+          log(`Retrying in ${Math.round(delay + jitter)}ms...`);
+          await new Promise(r => setTimeout(r, delay + jitter));
+          
           const fresh = await this.reExtractFreshParams(track, params);
           if (fresh) params = fresh;
           continue;
@@ -965,6 +1023,8 @@ export class AudioService {
     markId: string,
   ): Promise<void> {
     const MAX_YT_RETRIES = 3;
+    const BASE_YT_RETRY_DELAY_MS = 500;
+    const MAX_YT_RETRY_DELAY_MS = 5_000;
 
     // Single ownership chokepoint against two engines playing at once.
     this.claimEngine('youtube');
@@ -1073,10 +1133,13 @@ export class AudioService {
         logError(`✗ playYouTube attempt ${attempt}/${MAX_YT_RETRIES} FAILED:`, msg);
 
         if (attempt < MAX_YT_RETRIES) {
-          log(`Retrying in ${500 * attempt}ms...`);
+          // Bounded exponential backoff with jitter
+          const delay = Math.min(BASE_YT_RETRY_DELAY_MS * Math.pow(2, attempt - 1), MAX_YT_RETRY_DELAY_MS);
+          const jitter = Math.random() * 300;
+          log(`Retrying in ${Math.round(delay + jitter)}ms...`);
           this.stopYouTubePlayer();
           youtubePlayerService.destroy();
-          await new Promise(r => setTimeout(r, 500 * attempt));
+          await new Promise(r => setTimeout(r, delay + jitter));
           continue;
         }
 

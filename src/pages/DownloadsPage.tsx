@@ -349,13 +349,13 @@ const DownloadsPage: React.FC = () => {
                     <span>{formatSize(d.size)}</span>
                   </div>
                 </div>
-                <button
-                  onClick={(e) => { e.stopPropagation(); handleRemove(d.id); }}
-                  className="p-2 rounded-lg text-gray-500 opacity-0 group-hover:opacity-100 hover:text-red-400 hover:bg-red-500/10 transition-all"
-                  title="Remove"
-                >
-                  <Trash2 size={14} />
-                </button>
+<button
+                onClick={(e) => { e.stopPropagation(); handleRemove(d.id); }}
+                className="p-2 rounded-lg text-gray-500 hover:text-red-400 hover:bg-red-500/10 transition-all sm:opacity-0 sm:group-hover:opacity-100"
+                title="Remove"
+              >
+                <Trash2 size={14} />
+              </button>
                 {isActive && isPlaying && (
                   <div className="playing-indicator text-violet-400 flex items-end gap-[2px] h-4">
                     {[1, 2, 3].map((i) => (

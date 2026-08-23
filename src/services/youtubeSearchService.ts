@@ -12,7 +12,7 @@
  */
 
 import { YTSong } from '../stores/searchStore';
-import { api, apiFetch, raceWithDeadline } from '../config/api';
+import { api, apiFetch, raceWithDeadline, RateLimitError, TimeoutError, NetworkError } from '../config/api';
 
 const INVIDIOUS_INSTANCES: string[] = [
   // Public Invidious instances are mostly dead as of 2026.
@@ -21,10 +21,6 @@ const INVIDIOUS_INSTANCES: string[] = [
 
 export const SEARCH_TIMEOUT_MS = 8000;
 
-// ── Search result cache ────────────────────────────────────────────────────
-// Cache server search results to avoid re-searching for the same query.
-// The server-side yt-dlp search through WARP takes 5-15s per call — caching
-// makes repeat searches (e.g. typing, switching tabs) instant.
 const searchCache = new Map<string, { results: YTSong[]; expiresAt: number }>();
 const SEARCH_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const SEARCH_CACHE_MAX = 50;
@@ -43,6 +39,52 @@ function setCachedSearch(query: string, results: YTSong[]): void {
     if (oldest !== undefined) searchCache.delete(oldest);
   }
   searchCache.set(key, { results, expiresAt: Date.now() + SEARCH_CACHE_TTL_MS });
+}
+
+// ── Rate limit cooldown ────────────────────────────────────────────────────
+// Track repeated 429/503 failures and enter a temporary cooldown to avoid
+// hammering the server. This complements the per-request retry logic by
+// preventing new search attempts while the server recovers.
+// 
+// Cooldown state is per-query and resets after the cooldown expires or
+// when a new search succeeds. This avoids hammering a rate-limited server
+// while still allowing cached results to be shown.
+
+interface CooldownEntry {
+  expiresAt: number;
+  retryAfterMs?: number;
+}
+
+const cooldownCache = new Map<string, CooldownEntry>();
+
+function getCooldown(query: string): CooldownEntry | null {
+  const entry = cooldownCache.get(query.toLowerCase().trim());
+  if (!entry) return null;
+  if (Date.now() >= entry.expiresAt) {
+    cooldownCache.delete(query.toLowerCase().trim());
+    return null;
+  }
+  return entry;
+}
+
+function setCooldown(query: string, retryAfterMsParam?: number): void {
+  const key = query.toLowerCase().trim();
+  
+  // Use Retry-After if provided, otherwise exponential backoff
+  const effectiveRetryMs = retryAfterMsParam 
+    ? Math.min(retryAfterMsParam, 5 * 60 * 1000) 
+    : (cooldownCache.get(query.toLowerCase().trim())?.expiresAt ?? Date.now()) + 30_000 - Date.now();
+  
+  const expiresAt = Date.now() + Math.min(effectiveRetryMs, 5 * 60 * 1000);
+  
+  cooldownCache.set(key, { 
+    expiresAt,
+    retryAfterMs: retryAfterMsParam ?? 30_000
+  });
+}
+
+function clearCooldown(query: string): void {
+  cooldownCache.delete(query.toLowerCase().trim());
 }
 
 /** Clear the search result cache. Used by tests and manual refresh. */
@@ -207,6 +249,18 @@ function logError(...args: any[]) {
   if (import.meta.env.DEV) console.error('[YTSearch]', ...args);
 }
 
+function cleanTitle(title: string): string {
+  return title
+    .replace(/[()[\]{}]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function toSafeNumber(value: unknown): number {
+  const num = Number(value);
+  return Number.isFinite(num) && num >= 0 ? num : 0;
+}
+
 /**
  * Check if a title matches any blacklist pattern.
  * Returns true if the result should be EXCLUDED.
@@ -311,6 +365,18 @@ export async function youtubeSearch(
     return cached;
   }
 
+  // Check cooldown before making request
+  const cooldown = getCooldown(query);
+  if (cooldown) {
+    log(`Cooldown active for query: ${query}, expires in ${cooldown.expiresAt - Date.now()}ms`);
+    throw new RateLimitError(
+      'Service temporarily unavailable',
+      429,
+      api(`/youtube/search?q=${encodeURIComponent(query)}`),
+      cooldown.expiresAt - Date.now()
+    );
+  }
+
   // Simplified query enhancement — only add 'music' if not present.
   // The old approach added 'official audio song' to every query, which
   // bloated the yt-dlp search string and slowed it down significantly.
@@ -324,16 +390,25 @@ export async function youtubeSearch(
   // That is a legitimate "no results" — never an error.
   let serverDefinitive = false;
 
-  // PRIMARY: Use server endpoint (yt-dlp YouTube search).
+  // PRIMARY: Use server endpoint (yt-dlp YouTube search) with retry logic for rate limiting.
   // NOTE: must go through api() — a hardcoded relative URL silently 404s
   // whenever the API is served from a different host (production), which
   // made search look broken while reporting no error.
-  try {
-    const url = api(`/youtube/search?q=${encodeURIComponent(musicQuery)}`);
-    // 20s budget: server-side yt-dlp takes 5-15s, plus a Render cold start
-    // can add several seconds. The old 12s aborted mid-search and made
-    // search feel broken.
-    const result = await apiFetch(url, { timeout: 20_000, retries: 1, signal });
+  
+  // Retry configuration for rate limiting
+  const maxRetries = 3;
+  let attempt = 0;
+  let lastRateLimitError: RateLimitError | null = null;
+
+  while (attempt < maxRetries) {
+    if (signal?.aborted) return [];
+
+    try {
+      const url = api(`/youtube/search?q=${encodeURIComponent(musicQuery)}`);
+      // 20s budget: server-side yt-dlp takes 5-15s, plus a Render cold start
+      // can add several seconds. The old 12s aborted mid-search and made
+      // search feel broken.
+      const result = await apiFetch(url, { timeout: 20_000, retries: 0, signal });
 
     // Malformed-response protection: a body that isn't valid JSON, or isn't
     // the expected shape, falls through to the Invidious fallback — it can
@@ -391,6 +466,7 @@ export async function youtubeSearch(
         if (normalized.length > 0) {
           log(`Server search returned ${normalized.length} results`);
           setCachedSearch(query, normalized);
+          clearCooldown(query); // Clear cooldown on successful response
           return normalized;
         }
         // Valid envelope, zero usable rows — the server answered
@@ -400,12 +476,51 @@ export async function youtubeSearch(
         serverError ??= new Error('Malformed search response');
       }
     }
-  } catch (err) {
-    if (signal?.aborted) return [];
-    serverError = err instanceof Error ? err : new Error(String(err));
-    logError('Server search failed, falling back to Invidious:', err);
+  } catch (err: any) {
+      if (signal?.aborted) return [];
+      
+      // Handle rate limit errors with retry logic
+      if (err instanceof RateLimitError) {
+        // Set cooldown to prevent hammering the server
+        setCooldown(query, err.retryAfterMs);
+        
+        attempt++;
+        if (attempt >= maxRetries) {
+          // Exhausted retries - fall through to fallback
+          lastRateLimitError = err;
+          break;
+        }
+        // Exponential backoff with jitter, respecting Retry-After header
+        const baseDelay = err.retryAfterMs ?? 2000 * Math.pow(2, attempt - 1);
+        const jitter = Math.floor(Math.random() * 1000);
+        const delay = Math.min(baseDelay + jitter, 30_000);
+        log(`Rate limited (attempt ${attempt}/${maxRetries}), retrying in ${delay}ms`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue; // Retry
+      }
+      
+      // Check for other transient errors (timeout, network) - use cached results if available
+      if (isTransientHttpError(err)) {
+        const cached = getCachedSearch(query);
+        if (cached) {
+          log(`Transient error, returning cached results for: ${query}`);
+          return cached;
+        }
+      }
+      
+      // Non-rate-limit error - break to fallback
+      if (signal?.aborted) return [];
+      serverError = err instanceof Error ? err : new Error(String(err));
+      logError('Server search failed, falling back to Invidious:', err);
+      break;
+    }
   }
 
+  // If we exhausted retries due to rate limiting, store the last error
+  if (lastRateLimitError && !serverError) {
+    serverError = lastRateLimitError;
+  }
+  
   // FALLBACK: Race Invidious instances
   const promises = INVIDIOUS_INSTANCES.map(instance =>
     searchViaInstance(instance, musicQuery, signal).then(results => {
@@ -424,28 +539,29 @@ export async function youtubeSearch(
     // Only a definitive server answer makes this a real "no results" state.
     // Everything else is a genuine failure and must surface as an error.
     if (serverDefinitive) return [];
+    // If we hit rate limits and exhausted retries, include that info
+    if (lastRateLimitError) {
+      const retryAfterSec = lastRateLimitError.retryAfterMs ? Math.ceil(lastRateLimitError.retryAfterMs / 1000) : 0;
+      // Enhance the error message while preserving the original error
+      lastRateLimitError.message = `YouTube search rate limited (retries exhausted). ${retryAfterSec > 0 ? `Try again in ~${retryAfterSec}s` : 'Please try again later.'}`;
+      throw lastRateLimitError;
+    }
     throw serverError ?? new Error('YouTube search unavailable');
   }
 }
 
 /**
- * Coerce an arbitrary server value to a finite, non-negative number.
- * Servers have returned durations/viewCounts as strings, null, and even
- * missing entirely — downstream math and rendering require real numbers.
+ * Check if an error is a transient HTTP error that should trigger cache fallback.
+ * Transient HTTP errors are those that are temporary and likely to succeed on retry:
+ * - RateLimitError (429/503)
+ * - TimeoutError
+ * - NetworkError
  */
-function toSafeNumber(value: unknown): number {
-  const n = typeof value === 'string' ? Number(value) : value;
-  return typeof n === 'number' && Number.isFinite(n) && n >= 0 ? n : 0;
-}
-
-function cleanTitle(title: string): string {
-  return title
-    .replace(/\(official\s*(music\s*)?video\)/gi, '')
-    .replace(/\(lyrics?\)/gi, '')
-    .replace(/\[official\s*(music\s*)?video\]/gi, '')
-    .replace(/\(audio\)/gi, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+function isTransientHttpError(err: unknown): boolean {
+  if (err instanceof RateLimitError) return true;
+  if (err instanceof TimeoutError) return true;
+  if (err instanceof NetworkError) return true;
+  return false;
 }
 
 function getBestThumbnail(thumbnails: any[] | undefined, videoId: string): string {

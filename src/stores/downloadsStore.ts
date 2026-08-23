@@ -15,6 +15,10 @@ import {
   repairDownloads,
   isValidBlob,
   isTransientDownloadError,
+  exponentialBackoffWithJitter,
+  persistDownloadState,
+  loadPersistedDownloadState,
+  clearPersistedDownloadState,
   DownloadedSong,
   DownloadProgress,
 } from '../utils/downloadManager';
@@ -83,13 +87,14 @@ let activeDownloadCount = 0;
 //
 // Network blips, dropped connections and truncated transfers should not
 // require a manual retry tap. Transient failures (see
-// isTransientDownloadError) are retried automatically with backoff; the
-// original error reason is preserved and only surfaced after the final
-// attempt fails. Deterministic failures (expired link, 404, non-audio
-// payload) are never auto-retried.
+// isTransientDownloadError) are retried automatically with exponential
+// backoff and jitter; the original error reason is preserved and only
+// surfaced after the final attempt fails. Deterministic failures (expired
+// link, 404, non-audio payload) are never auto-retried.
 // ---------------------------------------------------------------------------
-const MAX_AUTO_RETRIES = 2;
-const RETRY_DELAYS_MS = [1000, 3000];
+const MAX_AUTO_RETRIES = 3;
+const BASE_RETRY_DELAY_MS = 1000;
+const MAX_RETRY_DELAY_MS = 30_000;
 const retryAttempts = new Map<string, number>();
 const pendingRetries = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -109,6 +114,45 @@ function cancelRetryTimer(key: string): void {
     clearTimeout(timer);
     pendingRetries.delete(key);
   }
+}
+
+// Debounce timer for persisting state
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Persist current download state (failed downloads, queue, retry state) to IndexedDB.
+ * Debounced to avoid excessive writes.
+ */
+function schedulePersistState(): void {
+  if (persistTimer) clearTimeout(persistTimer);
+  persistTimer = setTimeout(async () => {
+    const state = useDownloadsStore.getState();
+    // Convert retryAttempts Map to plain object for persistence
+    const retryState: Record<string, { attempts: number }> = {};
+    for (const [key, attempts] of retryAttempts.entries()) {
+      retryState[key] = { attempts };
+    }
+    await persistDownloadState({
+      key: 'main',
+      failedDownloads: state.failedDownloads.map(f => ({
+        songId: f.song.id,
+        youtubeId: f.song.youtubeId || f.song.id,
+        message: f.message,
+        timestamp: f.timestamp,
+      })),
+      downloadQueue: state.downloadQueue.map(q => ({
+        songId: q.song.id,
+        youtubeId: q.song.youtubeId || q.song.id,
+        title: q.song.title,
+        artist: q.song.artist,
+        genre: q.song.genre,
+        duration: q.song.duration,
+        coverArt: q.song.coverArt,
+        addedAt: q.addedAt,
+      })),
+      retryState,
+    });
+  }, 500); // Debounce 500ms
 }
 
 export const useDownloadsStore = create<DownloadsState>((set, get) => ({
@@ -138,7 +182,66 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
       const valid = all.filter(d => isValidBlob(d.audioBlob));
       valid.sort((a, b) => b.downloadedAt - a.downloadedAt);
       const cacheSize = await getCacheSize();
-      set({ downloads: valid, loading: false, cacheSize });
+      
+      // Load persisted state (failed downloads, queue, retry state)
+      const persistedState = await loadPersistedDownloadState();
+      let failedDownloads: Array<{ song: Song; message: string; timestamp: number }> = [];
+      let downloadQueue: Array<{ song: Song; addedAt: number }> = [];
+      
+      if (persistedState) {
+        // Restore failed downloads
+        failedDownloads = persistedState.failedDownloads.map(f => ({
+          song: {
+            id: f.songId,
+            youtubeId: f.youtubeId,
+            title: '',
+            artist: '',
+            genre: '',
+            duration: 0,
+            coverArt: '',
+            album: '',
+            audioUrl: '',
+            releaseYear: 0,
+          },
+          message: f.message,
+          timestamp: f.timestamp,
+        }));
+        
+        // Restore download queue
+        downloadQueue = persistedState.downloadQueue.map(q => ({
+          song: {
+            id: q.songId,
+            youtubeId: q.youtubeId,
+            title: q.title,
+            artist: q.artist,
+            genre: q.genre,
+            duration: q.duration,
+            coverArt: q.coverArt,
+            album: '',
+            audioUrl: '',
+            releaseYear: 0,
+          },
+          addedAt: q.addedAt,
+        }));
+        
+        // Restore retry state
+        for (const [key, retryInfo] of Object.entries(persistedState.retryState)) {
+          retryAttempts.set(key, retryInfo.attempts);
+        }
+        
+        logger.debug('[DownloadsStore] Loaded persisted state:', { 
+          failedCount: failedDownloads.length, 
+          queueCount: downloadQueue.length 
+        });
+      }
+      
+      set({ 
+        downloads: valid, 
+        loading: false, 
+        cacheSize,
+        failedDownloads,
+        downloadQueue,
+      });
     } catch {
       set({ loading: false });
     }
@@ -178,6 +281,7 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
         set((s) => ({
           downloadQueue: [...s.downloadQueue, { song, addedAt: Date.now() }],
         }));
+        schedulePersistState();
         // Show notification
         sendDownloadNotification(`"${song.title}" added to download queue`);
       }
@@ -284,11 +388,12 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
       logger.error('Download failed:', e);
       
       // Extract structured error info from downloadManager
-      const err = e as Error & { stage?: string; reason?: string; metadata?: Record<string, unknown>; transient?: boolean };
+      const err = e as Error & { stage?: string; reason?: string; metadata?: Record<string, unknown>; transient?: boolean; retryAfterMs?: number };
       const msg = err.message || 'Download failed';
       const stage = err.stage || 'UNKNOWN';
       const reason = err.reason || 'UNKNOWN';
       const transient = err.transient ?? isTransientDownloadError(e);
+      const retryAfterMs = err.retryAfterMs;
 
       // Log with stage/reason for debugging
       logger.error(`[DownloadsStore] Download failed at ${stage}: ${reason}`, { 
@@ -306,8 +411,10 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
       const attempts = retryAttempts.get(key) || 0;
       if (transient && attempts < MAX_AUTO_RETRIES && !cancelledKeys.has(key) && navigator.onLine) {
         retryAttempts.set(key, attempts + 1);
-        const delay = RETRY_DELAYS_MS[Math.min(attempts, RETRY_DELAYS_MS.length - 1)];
-        logger.warn(`[DownloadsStore] Transient failure for "${song.title}" at ${stage} (${reason}) — auto-retry ${attempts + 1}/${MAX_AUTO_RETRIES} in ${delay}ms`);
+        schedulePersistState();
+        // Use Retry-After if present, otherwise use exponential backoff with jitter
+        const delay = retryAfterMs ?? exponentialBackoffWithJitter(attempts, BASE_RETRY_DELAY_MS, MAX_RETRY_DELAY_MS);
+        logger.warn(`[DownloadsStore] Transient failure for "${song.title}" at ${stage} (${reason}) — auto-retry ${attempts + 1}/${MAX_AUTO_RETRIES} in ${delay}ms${retryAfterMs ? ' (Retry-After)' : ''}`);
         cancelRetryTimer(key);
         pendingRetries.set(key, setTimeout(() => {
           pendingRetries.delete(key);
@@ -340,6 +447,9 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
           failedDownloads: [...s.failedDownloads, { song, message: detailedMsg, timestamp: Date.now() }],
         };
       });
+
+      // Persist state for recovery after restart
+      schedulePersistState();
 
       // Show error notification
       sendDownloadNotification(`Failed to download "${song.title}": ${detailedMsg}`);
@@ -409,6 +519,7 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
         (f.song.youtubeId || f.song.id) !== key
       ),
     }));
+    schedulePersistState();
     get().downloadSong(song);
   },
 
@@ -422,7 +533,10 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
     });
   },
 
-  clearFailed: () => set({ failedDownloads: [] }),
+  clearFailed: () => {
+    set({ failedDownloads: [] });
+    schedulePersistState();
+  },
 
   isDownloaded: (youtubeId) => {
     const state = get();
@@ -488,6 +602,7 @@ export const useDownloadsStore = create<DownloadsState>((set, get) => ({
       activeDownloadCount = 0;
 
       await clearAllDownloads();
+      await clearPersistedDownloadState();
 
       // Clear memory cache and state
       set({

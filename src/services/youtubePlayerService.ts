@@ -296,7 +296,12 @@ class YouTubePlayerService {
     // Retry on transient errors (2 = invalid params could be timing, 5 = html5 error)
     if ((errorCode === 2 || errorCode === 5) && this.retryCount < this.maxRetries && this.currentLoadSong) {
       this.retryCount++;
-      log(`Retryable error ${errorCode}, retrying... attempt ${this.retryCount}/${this.maxRetries}`);
+      // Bounded exponential backoff with jitter
+      const BASE_RETRY_DELAY_MS = 1_000;
+      const MAX_RETRY_DELAY_MS = 10_000;
+      const delay = Math.min(BASE_RETRY_DELAY_MS * Math.pow(2, this.retryCount - 1), MAX_RETRY_DELAY_MS);
+      const jitter = Math.random() * 500;
+      log(`Retryable error ${errorCode}, retrying... attempt ${this.retryCount}/${this.maxRetries} in ${Math.round(delay + jitter)}ms`);
       // Capture the identity of the session that FAILED — the timer must only
       // ever retry THIS video. Reading currentLoadSong at fire time could
       // restart a NEWER track from 0 (stale promise/timer race).
@@ -314,7 +319,7 @@ class YouTubePlayerService {
             this.emit('error', message);
           }
         }
-      }, 1000 * this.retryCount); // Exponential backoff
+      }, delay + jitter);
       return;
     }
 

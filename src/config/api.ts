@@ -41,6 +41,26 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * HTTP 429 (Too Many Requests) or 503 (Service Unavailable) — transient
+ * server-side capacity issues that should be retried with backoff.
+ * Distinct from NetworkError (client-side) and SERVER_ERROR (5xx other than 503).
+ */
+export class RateLimitError extends ApiError {
+  public retryAfterMs?: number;
+
+  constructor(
+    message: string,
+    status: number,
+    url: string,
+    retryAfterMs?: number,
+  ) {
+    super(message, status, 'RATE_LIMIT', url);
+    this.name = 'RateLimitError';
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
 export class NetworkError extends ApiError {
   constructor(url: string, networkError?: Error) {
     super('Network error — check your connection', 0, 'NETWORK', url);
@@ -64,12 +84,39 @@ export class OfflineError extends ApiError {
   }
 }
 
+function isRateLimitStatus(status: number): boolean {
+  return status === 429 || status === 503;
+}
+
+/**
+ * Extract Retry-After header value in milliseconds.
+ * Supports both seconds (seconds) and HTTP-date formats.
+ */
+function getRetryAfterMs(headers: Headers): number | undefined {
+  const retryAfter = headers.get('Retry-After');
+  if (!retryAfter) return undefined;
+
+  // Retry-After can be seconds (integer) or HTTP-date
+  const seconds = Number(retryAfter);
+  if (!Number.isNaN(seconds)) {
+    return seconds * 1000;
+  }
+
+  // Try parsing as HTTP-date
+  const date = new Date(retryAfter);
+  if (!Number.isNaN(date.getTime())) {
+    return Math.max(0, date.getTime() - Date.now());
+  }
+
+  return undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 
 const DEFAULT_TIMEOUT = 15_000;
-const MAX_RETRIES = 1;
+const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 400;
 
 // ---------------------------------------------------------------------------
@@ -351,6 +398,17 @@ async function _doFetch(
       );
 
       if (res.ok) return res;
+
+      // Handle 429/503 specifically with Retry-After support
+      if (isRateLimitStatus(res.status)) {
+        const retryAfterMs = getRetryAfterMs(res.headers);
+        throw new RateLimitError(
+          `Rate limited: ${res.status} ${res.statusText}`,
+          res.status,
+          url,
+          retryAfterMs,
+        );
+      }
 
       if (res.status >= 400 && res.status < 500 && res.status !== 429) {
         throw new ApiError(

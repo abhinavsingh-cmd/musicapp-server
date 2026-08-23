@@ -571,6 +571,33 @@ describe('download failure classification', () => {
     expect(isTransientDownloadError(err)).toBe(false);
     expect(err.message).toMatch(/invalid/i);
   });
+
+  it('includes Retry-After header in error for 429 responses', async () => {
+    fetchSpy.mockResolvedValue(new Response(null, {
+      status: 429,
+      headers: { 'Retry-After': '30' },
+    }));
+    const err = await downloadSongWithProgress(MOCK_SONG).catch((e) => e);
+    expect(isTransientDownloadError(err)).toBe(true);
+    expect((err as any).retryAfterMs).toBe(30_000);
+  });
+
+  it('includes Retry-After header in error for 5xx responses', async () => {
+    fetchSpy.mockResolvedValue(new Response(null, {
+      status: 503,
+      headers: { 'Retry-After': '60' },
+    }));
+    const err = await downloadSongWithProgress(MOCK_SONG).catch((e) => e);
+    expect(isTransientDownloadError(err)).toBe(true);
+    expect((err as any).retryAfterMs).toBe(60_000);
+  });
+
+  it('does not include Retry-After for non-transient errors', async () => {
+    fetchSpy.mockResolvedValue(new Response(null, { status: 404 }));
+    const err = await downloadSongWithProgress(MOCK_SONG).catch((e) => e);
+    expect(isTransientDownloadError(err)).toBe(false);
+    expect((err as any).retryAfterMs).toBeUndefined();
+  });
 });
 
 describe('download edge cases', () => {
