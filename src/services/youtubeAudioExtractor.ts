@@ -157,33 +157,55 @@ export async function extractAudioUrl(youtubeId: string): Promise<string | null>
 }
 
 /**
- * Return the server-side streaming URL for a YouTube video.
- *
- * The /stream endpoint handles extraction AND download through a single
- * yt-dlp invocation (same WARP connection = same exit IP = works).
- * Calling /audio-info first was wasting 5-20s on a SEPARATE yt-dlp
- * extraction just to validate the video — then ignoring the extracted
- * URLs and returning /stream anyway. Skipping it saves one full
- * extraction round-trip per first play.
- *
- * The stream endpoint fails fast (<2s) for invalid/deleted videos,
- * so validation happens naturally through the player's retry logic.
+ * Lightweight extraction via GET /api/extract/:id — returns short-lived
+ * googlevideo URL for optimistic native direct play. Short timeout (6s),
+ * reuses server WARP yt-dlp, cached briefly. Never returns /stream as
+ * if it were a direct URL — that distinction is kept for fallback logic.
  */
+const DIRECT_EXTRACT_TIMEOUT_MS = 6000;
+
 async function fetchFromServer(youtubeId: string): Promise<ServerResult> {
-  // Validate the youtubeId format before returning a stream URL.
   if (!youtubeId || !/^[a-zA-Z0-9_-]{11}$/.test(youtubeId)) {
     return { failure: { kind: 'permanent', reason: 'invalid_id' } };
   }
 
-  // Return the stream URL directly. The server's /stream endpoint does
-  // extraction + download in one yt-dlp invocation — no separate
-  // audio-info extraction needed. Cold start ~20s; cached ~1-2s.
-  //
-  // We skip the old HEAD check to /audio-info because it added 3-5s
-  // latency to EVERY play (and 10s when retried), making songs feel
-  // broken on slow connections. Invalid/deleted videos are caught by
-  // the player's canplay timeout → retry → error path instead.
-  return { url: api(`/stream/${youtubeId}`) };
+  const url = api(`/extract/${youtubeId}`);
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), DIRECT_EXTRACT_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: { Accept: 'application/json' },
+    });
+    if (!res.ok) {
+      // Try to parse JSON error for permanent vs transient
+      let reason = `http_${res.status}`;
+      let kind: FailureKind = 'transient';
+      try {
+        const j = await res.json();
+        const code = j?.code || '';
+        if (code === 'INVALID_VIDEO_ID' || res.status === 400) { kind = 'permanent'; reason = 'invalid_id'; }
+        else if (res.status === 404) { kind = 'permanent'; reason = 'not_found'; }
+      } catch {}
+      return { failure: { kind, reason } };
+    }
+    const data: any = await res.json();
+    const direct = data?.details?.url || data?.url || '';
+    if (!direct || typeof direct !== 'string' || !direct.startsWith('http')) {
+      return { failure: { kind: 'transient', reason: 'no_url' } };
+    }
+    return { url: direct };
+  } catch (e: any) {
+    const isAbort = e?.name === 'AbortError';
+    return { failure: { kind: 'transient', reason: isAbort ? 'timeout' : 'network' } };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+/** Fallback stream URL — server-piped WARP path, not a direct googlevideo URL. */
+export function getStreamFallbackUrl(youtubeId: string): string {
+  return api(`/stream/${youtubeId}`);
 }
 
 /**

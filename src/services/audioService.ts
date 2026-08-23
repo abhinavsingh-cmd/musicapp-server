@@ -528,17 +528,12 @@ export class AudioService {
       this.pendingStartTime = startTime && isFinite(startTime) && startTime > 0 ? startTime : 0;
       log('▶ play() called:', { title: song.title, provider: track.provider, externalId: track.externalId || 'NONE', startTime: this.pendingStartTime });
 
-      // Start foreground service FIRST — before any audio work — so the app
-      // process is protected by Android from being killed during backgrounding.
-      // Must await so the service is guaranteed running before audio starts.
-      if (isNativePlatform()) {
-        try {
-          const result = await backgroundAudio.startService({ title: song.title, artist: song.artist });
-          log('Foreground service started:', result);
-        } catch (err) {
-          logError('Failed to start foreground service:', err);
-        }
-      }
+      // Parallelize independent startup: foreground service + provider resolution
+      // (service protects process, resolution extracts URL — no dependency).
+      const isNative = isNativePlatform();
+      const servicePromise = isNative
+        ? backgroundAudio.startService({ title: song.title, artist: song.artist }).then(r => log('Foreground service started:', r)).catch(e => logError('Failed to start foreground service:', e))
+        : Promise.resolve();
 
       this.stopCurrentPlayback();
 
@@ -552,14 +547,19 @@ export class AudioService {
       });
       this.emit('loaded', { song, playlist, index: startIndex, playbackId });
 
-      // Resolve a playable source through the track's provider. The engine
-      // never inspects provider ids or endpoints — only the normalized
-      // PlayableSource shape.
-      const playable = await resolvePlayableSource(track);
+      // Resolve source — single attempt for direct, fallback to /stream is handled
+      // by provider (force) and audioService recovery (bounded). No nested loops.
+      const tExtractStart = performance.now();
+      const [, playable] = await Promise.all([
+        servicePromise,
+        (async () => resolvePlayableSource(track))(),
+      ]) as [unknown, Awaited<ReturnType<typeof resolvePlayableSource>>];
+      const tExtractMs = Math.round(performance.now() - tExtractStart);
       if (this.currentPlaybackId !== playbackId) return;
 
       if (!playable) {
         logError('NO AUDIO SOURCE for:', song.title);
+        console.log(`[Playback] videoId=${track.externalId} source=none directExtractionMs=${tExtractMs} result=failed reason=no_source`);
         this.setState({ error: 'No audio source available', isLoading: false });
         this.emit('error', 'No audio source available');
         this.emitEnded();
@@ -567,6 +567,11 @@ export class AudioService {
       }
 
       const params = playableToEngineParams(playable);
+      // Diagnostics — production-safe, no URLs/cookies
+      if (params.mode === 'html') {
+        const srcType = params.src.includes('googlevideo.com') ? 'direct' : params.src.includes('/stream/') ? 'stream' : 'other';
+        console.log(`[Playback] videoId=${track.externalId} source=${srcType} directExtractionMs=${tExtractMs} result=pending`);
+      }
       if (params.mode === 'iframe') {
         log('No direct stream — using embedded player (provider:', track.provider + ')');
         providerRegistry.get(track.provider)?.preconnect?.();

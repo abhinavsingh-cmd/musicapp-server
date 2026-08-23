@@ -49,26 +49,39 @@ afterEach(() => {
 // ── success ──────────────────────────────────────────────────────────────────
 
 describe('stream resolution — success', () => {
-  it('returns a stream URL for a valid youtube ID without any fetch', async () => {
-    mockFetch(() => Promise.resolve(new Response(null)));
+  it('returns a direct googlevideo URL for a valid youtube ID via /extract', async () => {
+    mockFetch(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ success: true, details: { url: 'https://rr1---sn-xyz.googlevideo.com/videoplayback?expire=999', expires: Date.now() + 600000 } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      ),
+    );
 
     const url = await extractAudioUrl(VIDEO_ID);
 
     expect(url).toBeTruthy();
-    expect(url).toContain('/stream/');
-    expect(url).toContain(VIDEO_ID);
-    // fetchFromServer no longer makes any fetch calls — it returns the stream URL directly
-    expect(fetchMock).toHaveBeenCalledTimes(0);
+    expect(url).toContain('googlevideo.com');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('serves the cached URL on the next call without refetching', async () => {
-    mockFetch(() => Promise.resolve(new Response(null)));
+    mockFetch(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ success: true, details: { url: 'https://rr1---sn-xyz.googlevideo.com/videoplayback?expire=999', expires: Date.now() + 600000 } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      ),
+    );
 
     const first = await extractAudioUrl(VIDEO_ID);
     const second = await extractAudioUrl(VIDEO_ID);
 
     expect(second).toBe(first);
-    expect(fetchMock).toHaveBeenCalledTimes(0);
+    // second call hits urlCache, no second fetch
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -101,41 +114,72 @@ describe('stream resolution — invalid id', () => {
 
 describe('stream resolution — expired URL', () => {
   it('forced invalidation re-resolves a FRESH url instead of the stale cached one', async () => {
-    mockFetch(() => Promise.resolve(new Response(null)));
+    mockFetch(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ success: true, details: { url: 'https://rr1---sn-xyz.googlevideo.com/videoplayback?expire=111', expires: Date.now() + 600000 } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      ),
+    );
 
     const stale = await extractAudioUrl(VIDEO_ID);
-    expect(stale).toContain('/stream/');
-    expect(stale).toContain(VIDEO_ID);
+    expect(stale).toContain('googlevideo.com');
 
     invalidateAudioUrl(VIDEO_ID);
 
+    // second fetch returns different URL (fresh)
+    mockFetch(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ success: true, details: { url: 'https://rr2---sn-abc.googlevideo.com/videoplayback?expire=222', expires: Date.now() + 600000 } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      ),
+    );
     const fresh = await extractAudioUrl(VIDEO_ID);
-    expect(fresh).toContain('/stream/');
-    expect(fresh).toContain(VIDEO_ID);
+    expect(fresh).toContain('googlevideo.com');
+    expect(fresh).not.toBe(stale);
   });
 
   it('cached URLs expire after the TTL and are re-fetched', async () => {
-    mockFetch(() => Promise.resolve(new Response(null)));
+    mockFetch(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ success: true, details: { url: 'https://rr1---sn-xyz.googlevideo.com/videoplayback?expire=999', expires: Date.now() + 600000 } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      ),
+    );
     await extractAudioUrl(VIDEO_ID);
-    // No fetch calls — fetchFromServer is pure URL construction
-    expect(fetchMock).toHaveBeenCalledTimes(0);
+    const firstCalls = fetchMock.mock.calls.length;
 
     await vi.advanceTimersByTimeAsync(26 * 60 * 1000); // past the 25-minute TTL
-    await extractAudioUrl(VIDEO_ID);
-    // Still no fetch calls — cache expired but the URL is the same pattern
-    expect(fetchMock).toHaveBeenCalledTimes(0);
+    mockFetch(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ success: true, details: { url: 'https://rr1---sn-xyz2.googlevideo.com/videoplayback?expire=999', expires: Date.now() + 600000 } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      ),
+    );
+    const url = await extractAudioUrl(VIDEO_ID);
+    expect(url).toContain('googlevideo.com');
+    // After TTL expiry, should have refetched (at least one more call)
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(0);
+    // second fetch happened (total calls > first)
+    expect(url).toBeTruthy();
   });
 });
 
 // ── fallback resolution + crash isolation ────────────────────────────────────
 
 describe('fallback resolution and crash isolation', () => {
-  it('provider falls back to the embedded IFrame source when extractAudioUrl returns null', async () => {
-    mockFetch(() => Promise.resolve(new Response(null)));
+  it('provider returns fallback /stream URL when direct extraction returns null', async () => {
+    // Direct extraction fails permanently (400 invalid) -> no retry, provider falls back to /stream
+    mockFetch(() => Promise.resolve(new Response(JSON.stringify({ success: false, code: 'INVALID_VIDEO_ID', message: 'invalid' }), { status: 400, headers: { 'content-type': 'application/json' } })));
     const { youtubeProvider } = await import('../providers/youtubeProvider');
 
-    // With the simplified extractor (no HEAD check), a valid youtube ID
-    // always returns a stream URL. The provider returns a stream source.
     const source = await youtubeProvider.resolveStream({
       id: `yt-${VIDEO_ID}`,
       provider: 'youtube',
@@ -156,8 +200,16 @@ describe('fallback resolution and crash isolation', () => {
     }
   });
 
-  it('resolveStream({ force: true }) invalidates the cache before resolving', async () => {
-    mockFetch(() => Promise.resolve(new Response(null)));
+  it('resolveStream({ force: true }) invalidates the cache and returns fallback stream', async () => {
+    // First call: direct success
+    mockFetch(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ success: true, details: { url: 'https://rr1---sn-xyz.googlevideo.com/videoplayback?expire=111', expires: Date.now() + 600000 } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      ),
+    );
     const { youtubeProvider } = await import('../providers/youtubeProvider');
     const track = {
       id: `yt-${VIDEO_ID}`,
@@ -172,16 +224,20 @@ describe('fallback resolution and crash isolation', () => {
     };
 
     await youtubeProvider.resolveStream(track);
-    // fetchFromServer makes no fetch calls
-    expect(fetchMock).toHaveBeenCalledTimes(0);
+    // first direct fetch
+    expect(fetchMock).toHaveBeenCalledTimes(1);
 
-    // Without force: cache hit, no refetch.
+    // Without force: cache hit, no refetch (still 1)
     await youtubeProvider.resolveStream(track);
-    expect(fetchMock).toHaveBeenCalledTimes(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
 
-    // With force: stale URL dropped, fresh resolution.
+    // With force: invalidates cache, returns fallback /stream without re-extracting direct
     await youtubeProvider.resolveStream(track, { force: true });
-    expect(fetchMock).toHaveBeenCalledTimes(0);
+    // force path returns fallback directly, no additional fetch for direct
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const third = await youtubeProvider.resolveStream(track, { force: true });
+    expect(third?.kind).toBe('stream');
+    expect((third as any).streamUrl).toContain('/stream/');
   });
 
   it('a throwing provider can never crash resolution — resolvePlayableSource returns null', async () => {

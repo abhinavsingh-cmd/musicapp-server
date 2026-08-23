@@ -37,6 +37,7 @@ import { getRecommendations } from '../services/recommendationService';
 vi.mock('../services/youtubeAudioExtractor', () => ({
   extractAudioUrl: vi.fn(),
   invalidateAudioUrl: vi.fn(),
+  getStreamFallbackUrl: vi.fn((id: string) => `https://server.example.com/api/stream/${id}`),
 }));
 vi.mock('../services/youtubeSearchService', () => ({
   youtubeSearch: vi.fn(),
@@ -235,23 +236,24 @@ describe('resolvePlayableSource', () => {
     }
   });
 
-  it('falls back to an embedded iframe source when extraction fails', async () => {
+  it('falls back to server /stream URL when direct extraction fails', async () => {
     mockedExtract.mockResolvedValue(null);
     const playable = await resolvePlayableSource(toTrack(YOUTUBE_SONG));
-    expect(playable?.kind).toBe('iframe');
-    if (playable?.kind === 'iframe') {
-      expect(playable.videoId).toBe('dQw4w9WgXcQ');
+    expect(playable?.kind).toBe('stream');
+    if (playable?.kind === 'stream') {
+      expect(playable.streamUrl).toContain('/stream/');
+      expect(playable.streamUrl).toContain('dQw4w9WgXcQ');
     }
   });
 
   it('re-resolves fresh when force is requested', async () => {
     mockedExtract.mockResolvedValue('https://server.example.com/api/proxy-audio?url=v1');
     await resolvePlayableSource(toTrack(YOUTUBE_SONG));
-    mockedExtract.mockResolvedValue('https://server.example.com/api/proxy-audio?url=v2');
     const playable = await resolvePlayableSource(toTrack(YOUTUBE_SONG), { force: true });
     expect(mockedInvalidate).toHaveBeenCalledWith('dQw4w9WgXcQ');
     if (playable?.kind === 'stream') {
-      expect(playable.streamUrl).toContain('url=v2');
+      expect(playable.streamUrl).toContain('/stream/');
+      expect(playable.streamUrl).toContain('dQw4w9WgXcQ');
     }
   });
 

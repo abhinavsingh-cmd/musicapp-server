@@ -218,10 +218,17 @@ public class MusicForegroundService extends Service implements MediaPlayer.OnPre
             requestAudioFocus();
             updateNativePlaybackState(PlaybackState.STATE_BUFFERING);
         } catch (Exception e) {
-            System.err.println("[MusicForegroundService] playAudioUrl failed: " + e.getMessage());
+            System.err.println("[MusicForegroundService] playAudioUrl failed: " + e.getMessage() + " gen=" + playbackGeneration);
+            cancelPrepareTimeout();
             isBuffering = false;
+            isPrepared = false;
+            isPlaying = false;
+            preparedGeneration = -1;
+            pendingAudioUrl = null;
+            // Reset to Idle so next setDataSource is valid (Error -> Idle)
+            try { if (mediaPlayer != null) mediaPlayer.reset(); } catch (Exception ignored) {}
             updateNativePlaybackState(PlaybackState.STATE_ERROR);
-            BackgroundAudioPlugin.notifyMediaAction("error", -1);
+            BackgroundAudioPlugin.notifyMediaAction("error", -1, playbackGeneration);
         }
     }
 
@@ -469,15 +476,23 @@ public class MusicForegroundService extends Service implements MediaPlayer.OnPre
 
     @Override
     public boolean onError(MediaPlayer mp, int what, int extra) {
-        System.err.println("[MusicForegroundService] Native MediaPlayer error: what=" + what + ", extra=" + extra);
+        // Defensive generation: invalidate any pending prepare for this session so
+        // old callbacks cannot control the next song. Every MediaPlayer transition
+        // must be valid: Error -> Idle (reset) -> next play can prepare again.
+        System.err.println("[MusicForegroundService] Native MediaPlayer error: what=" + what + ", extra=" + extra + " gen=" + playbackGeneration);
         cancelPrepareTimeout();
+        // Invalidate the stale prepare generation so onPrepared from this session never fires.
+        preparedGeneration = -1;
         isBuffering = false;
         isPrepared = false;
         isPlaying = false;
+        // Do not keep a broken session as active — JS will fallback to /stream or skip.
+        // Keep nativeEngineActive false so JS-pushed state is not ignored.
+        pendingAudioUrl = null;
+        try { if (mp != null) mp.reset(); } catch (Exception ignored) {}
         updateNativePlaybackState(PlaybackState.STATE_ERROR);
-        // Notify JS layer of error
-        BackgroundAudioPlugin.notifyMediaAction("error", -1);
-        return true; // Handled
+        BackgroundAudioPlugin.notifyMediaAction("error", -1, playbackGeneration);
+        return true; // Handled — we reset to Idle, next playAudioUrl can setDataSource again
     }
 
     @Override
@@ -1104,9 +1119,29 @@ private void registerHeadsetReceiver() {
 
     @Override
     public void onTaskRemoved(Intent rootIntent) {
-        // The user explicitly dismissed the task — stop playback cleanly so
-        // audio never becomes a headless zombie with no controlling UI.
-        // (Minimizing / locking / screen-off never triggers this callback.)
+        // Requirement: music must CONTINUE when task is removed from Recents
+        // (Home, minimize, lock, shade, switch app, swipe away) unless user
+        // pressed explicit Stop. onTaskRemoved is also called for rotation
+        // config changes on some OEMs — never destroy playback here.
+        boolean hasActivePlayback = isPlaying || isBuffering || nativeEngineActive || (currentUrl != null && !currentUrl.isEmpty());
+        if (hasActivePlayback) {
+            // Keep foreground, MediaSession, wakeLock, notification alive.
+            // Re-ensure foreground in case OS had demoted it briefly.
+            try {
+                startForeground(NOTIFICATION_ID, buildNotification(currentTitle, currentArtist, currentAlbum));
+            } catch (Exception ignored) {}
+            acquireWakeLock();
+            startKeepAlive();
+            if (mediaSession != null) {
+                try { mediaSession.setActive(true); } catch (Exception ignored) {}
+            }
+            // Do NOT stopSelf, do NOT clear snapshot, do NOT null instance.
+            // Let the service survive task removal; explicit Stop will terminate.
+            super.onTaskRemoved(rootIntent);
+            return;
+        }
+        // No active track — allow cleanup (paused with no track, or already stopped).
+        // Preserve pause-not-destroy: if paused but has track, we kept it above.
         stopPlayback();
         clearSnapshot();
         instance = null;

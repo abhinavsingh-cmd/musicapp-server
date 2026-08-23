@@ -1616,6 +1616,45 @@ function getFreshAudioUrl(videoId) {
   });
 }
 
+// Lightweight extraction — returns short-lived googlevideo URL without piping audio.
+// Used as optimistic fast path for Android native MediaPlayer; fallback is /api/stream.
+app.get("/api/extract/:videoId", (req, res) => {
+  const videoId = req.params.videoId;
+  if (!videoId || !/^[A-Za-z0-9_-]{11}$/.test(videoId)) {
+    return fail(res, 400, "INVALID_VIDEO_ID", "Invalid video ID format", { videoId });
+  }
+  // Serve from existing freshAudioUrlCache if still fresh (10m TTL)
+  const cached = freshAudioUrlCache.get(videoId);
+  if (cached && Date.now() - cached.at < FRESH_URL_TTL_MS) {
+    return ok(res, { url: cached.url, expires: cached.at + FRESH_URL_TTL_MS, cached: true }, "Extracted URL (cached)");
+  }
+  // Lightweight yt-dlp --get-url — 8s timeout, no audio piping, reuses WARP infrastructure
+  runYtDlp([
+    "-f", "bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio/best",
+    "--get-url",
+    "--no-warnings",
+    "--no-check-certificates",
+    "--age-limit", "18",
+    ...YT_EXTRACTOR_ARGS,
+    ...YT_COOKIES_ARGS,
+    ...YT_PROXY_ARGS,
+    "https://www.youtube.com/watch?v=" + videoId
+  ], { timeout: 8000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+    if (err) {
+      console.error("[Extract] failed for", videoId, err.message);
+      return fail(res, 502, "YT_DLP_ERROR", "Failed to extract URL", { videoId, detail: err.message.slice(0, 500) });
+    }
+    const url = String(stdout || "").trim().split("\n").pop()?.trim() || "";
+    if (!url || !url.startsWith("http")) {
+      return fail(res, 502, "YT_DLP_ERROR", "No URL returned", { videoId });
+    }
+    freshAudioUrlCache.set(videoId, { url, at: Date.now() });
+    // Also map for proxy-audio refresh if this URL later 403s
+    audioUrlVideoMap.set(url, videoId);
+    return ok(res, { url, expires: Date.now() + FRESH_URL_TTL_MS, cached: false }, "Extracted URL");
+  }, PRIORITY.PLAY);
+});
+
 // Get audio info (for preloading stream URL)
 app.get("/api/audio-info/:videoId", (req, res) => {
   const videoId = req.params.videoId;

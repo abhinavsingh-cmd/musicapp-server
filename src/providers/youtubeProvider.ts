@@ -20,7 +20,7 @@ import { api } from '../config/api';
 import { lyricsService } from '../services/lyricsService';
 import { trendingService } from '../services/trendingService';
 import { youtubeSearch } from '../services/youtubeSearchService';
-import { extractAudioUrl, invalidateAudioUrl } from '../services/youtubeAudioExtractor';
+import { extractAudioUrl, invalidateAudioUrl, getStreamFallbackUrl } from '../services/youtubeAudioExtractor';
 import { YTSong } from '../stores/searchStore';
 import { toTrack } from './adapters';
 import {
@@ -122,12 +122,22 @@ class YouTubeProvider implements TrackProvider {
   ): Promise<PlayableSource | null> {
     if (!isValidYoutubeId(track.externalId)) return null;
 
+    // Force means the optimistic direct URL already failed (403/timeout) —
+    // don't waste another 6s re-trying direct; go straight to reliable fallback.
     if (options?.force) {
       invalidateAudioUrl(track.externalId);
+      return {
+        kind: 'stream',
+        track,
+        streamUrl: getStreamFallbackUrl(track.externalId!),
+        isLocalFile: false,
+        expiresInMs: STREAM_TTL_MS,
+      };
     }
 
     const url = await extractAudioUrl(track.externalId);
     if (url) {
+      // url is a short-lived direct googlevideo URL (optimistic fast path)
       return {
         kind: 'stream',
         track,
@@ -137,11 +147,14 @@ class YouTubeProvider implements TrackProvider {
       };
     }
 
-    // No direct stream available — offer the embedded IFrame path instead.
+    // No direct — return WARP-piped fallback. Both native and web use it;
+    // iframe is reserved as final fallback after stream retries (audioService).
     return {
-      kind: 'iframe',
+      kind: 'stream',
       track,
-      videoId: track.externalId,
+      streamUrl: getStreamFallbackUrl(track.externalId!),
+      isLocalFile: false,
+      expiresInMs: STREAM_TTL_MS,
     };
   }
 

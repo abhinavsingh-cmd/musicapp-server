@@ -94,15 +94,14 @@ export async function warmNextTrackServerCache(
   const controller = new AbortController();
   serverPreloadAbort = controller;
   try {
-    const res = await fetch(api(`/stream/${id}?preload=1`), {
+    // Lightweight extract warm — does NOT pipe 5MB audio. Populates
+    // server freshAudioUrlCache (10m) so Next's direct URL is cached.
+    const res = await fetch(api(`/extract/${id}`), {
       signal: controller.signal,
-      headers: { 'X-Preload': '1', Accept: '*/*' },
+      headers: { 'X-Preload': '1', Accept: 'application/json' },
     });
     if (!res.ok) return;
-    // Drain body to let server finish and populate its memory/disk cache.
-    // We discard bytes — only the server-side cache matters for Next.
-    // Use arrayBuffer to ensure full consumption; abort frees slot if stale.
-    await res.arrayBuffer().catch(() => {});
+    await res.json().catch(() => {});
   } catch (e: any) {
     if (e?.name === 'AbortError') return;
     // best-effort — silent

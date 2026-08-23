@@ -43,7 +43,7 @@ describe('warmNextTrackServerCache — single next-track preload', () => {
     await warmNextTrackServerCache(next, { isDownloaded: () => false });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0];
-    expect(url).toContain('/api/stream/abcdefghijk');
+    expect(url).toContain('/api/extract/abcdefghijk');
     expect((init.headers as any)['X-Preload']).toBe('1');
     expect(init.signal).toBeDefined();
   });
