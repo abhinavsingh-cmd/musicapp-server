@@ -162,7 +162,7 @@ export async function extractAudioUrl(youtubeId: string): Promise<string | null>
  * reuses server WARP yt-dlp, cached briefly. Never returns /stream as
  * if it were a direct URL — that distinction is kept for fallback logic.
  */
-const DIRECT_EXTRACT_TIMEOUT_MS = 6000;
+const DIRECT_EXTRACT_TIMEOUT_MS = 12_000;
 
 async function fetchFromServer(youtubeId: string): Promise<ServerResult> {
   if (!youtubeId || !/^[a-zA-Z0-9_-]{11}$/.test(youtubeId)) {

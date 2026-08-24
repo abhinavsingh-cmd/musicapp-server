@@ -1619,6 +1619,8 @@ function getFreshAudioUrl(videoId) {
 
 // Lightweight extraction — returns short-lived googlevideo URL without piping audio.
 // Used as optimistic fast path for Android native MediaPlayer; fallback is /api/stream.
+// Uses the SAME proven yt-dlp invocation as /audio-info (--dump-json): --get-url
+// failed 4/4 in production while --dump-json succeeded — parse formats instead.
 app.get("/api/extract/:videoId", (req, res) => {
   const videoId = req.params.videoId;
   if (!videoId || !/^[A-Za-z0-9_-]{11}$/.test(videoId)) {
@@ -1629,31 +1631,48 @@ app.get("/api/extract/:videoId", (req, res) => {
   if (cached && Date.now() - cached.at < FRESH_URL_TTL_MS) {
     return ok(res, { url: cached.url, expires: cached.at + FRESH_URL_TTL_MS, cached: true }, "Extracted URL (cached)");
   }
-  // Lightweight yt-dlp --get-url — 8s timeout, no audio piping, reuses WARP infrastructure
-  runYtDlp([
-    "-f", "bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio/best",
-    "--get-url",
-    "--no-warnings",
-    "--no-check-certificates",
-    "--age-limit", "18",
-    ...YT_EXTRACTOR_ARGS,
-    ...YT_COOKIES_ARGS,
-    ...YT_PROXY_ARGS,
-    "https://www.youtube.com/watch?v=" + videoId
-  ], { timeout: 8000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
-    if (err) {
-      console.error("[Extract] failed for", videoId, err.message);
-      return fail(res, 502, "YT_DLP_ERROR", "Failed to extract URL", { videoId, detail: err.message.slice(0, 500) });
-    }
-    const url = String(stdout || "").trim().split("\n").pop()?.trim() || "";
-    if (!url || !url.startsWith("http")) {
-      return fail(res, 502, "YT_DLP_ERROR", "No URL returned", { videoId });
-    }
-    freshAudioUrlCache.set(videoId, { url, at: Date.now() });
-    // Also map for proxy-audio refresh if this URL later 403s
-    audioUrlVideoMap.set(url, videoId);
-    return ok(res, { url, expires: Date.now() + FRESH_URL_TTL_MS, cached: false }, "Extracted URL");
-  }, PRIORITY.PLAY);
+  const attemptExtract = (attempt = 1) => {
+    const maxAttempts = 2;
+    runYtDlp([
+      "-f", "bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio/best",
+      "--dump-json",
+      "--no-warnings",
+      "--no-check-certificates",
+      "--age-limit", "18",
+      ...YT_EXTRACTOR_ARGS,
+      ...YT_COOKIES_ARGS,
+      ...YT_PROXY_ARGS,
+      "https://www.youtube.com/watch?v=" + videoId
+    ], { timeout: 25000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+      if (err) {
+        console.error("[Extract] failed for", videoId, "attempt", attempt, err.message);
+        if (attempt < maxAttempts) {
+          return setTimeout(async () => {
+            await refreshProxyBeforeRetry();
+            attemptExtract(attempt + 1);
+          }, retryDelayMs(attempt));
+        }
+        return fail(res, 502, "YT_DLP_ERROR", "Failed to extract URL", { videoId, detail: err.message.slice(0, 500) });
+      }
+      try {
+        const info = JSON.parse(stdout);
+        const formats = (info.formats || []).filter(f => f.acodec !== "none" && f.url && String(f.url).startsWith("http"));
+        if (formats.length === 0) {
+          return fail(res, 502, "NO_FORMATS", "No audio formats returned", { videoId });
+        }
+        formats.sort((a, b) => (b.abr || 0) - (a.abr || 0));
+        const url = formats[0].url;
+        freshAudioUrlCache.set(videoId, { url, at: Date.now() });
+        // Map ALL format URLs so proxy-audio can refresh on later 403
+        for (const f of formats) audioUrlVideoMap.set(f.url, videoId);
+        return ok(res, { url, expires: Date.now() + FRESH_URL_TTL_MS, cached: false }, "Extracted URL");
+      } catch (e) {
+        console.error("[Extract] parse error for", videoId, e.message);
+        return fail(res, 502, "PARSE_ERROR", "Failed to parse extraction", { videoId, detail: e.message.slice(0, 300) });
+      }
+    }, PRIORITY.PLAY);
+  };
+  attemptExtract();
 });
 
 // Get audio info (for preloading stream URL)
