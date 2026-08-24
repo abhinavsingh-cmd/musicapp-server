@@ -137,11 +137,14 @@ class YouTubeProvider implements TrackProvider {
 
     const url = await extractAudioUrl(track.externalId);
     if (url) {
-      // url is a short-lived direct googlevideo URL (optimistic fast path)
+      // v2.5.16 instant path — proxy via server simple fetch (WARP-aware, fast),
+      // not direct device fetch (IP-locked) and not heavy /stream pipe.
+      // This is the instant playback that felt like direct YouTube.
+      const proxyUrl = api(`/proxy-audio?url=${encodeURIComponent(url)}&videoId=${track.externalId}`);
       return {
         kind: 'stream',
         track,
-        streamUrl: url,
+        streamUrl: proxyUrl,
         isLocalFile: false,
         expiresInMs: STREAM_TTL_MS,
       };
