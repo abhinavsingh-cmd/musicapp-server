@@ -848,8 +848,10 @@ export class AudioService {
     const MAX_RETRIES = 3;
     const BASE_RETRY_DELAY_MS = 500;
     const MAX_RETRY_DELAY_MS = 5_000;
-    // /stream/ endpoint runs yt-dlp server-side — cold start takes ~10s.
-    const CANPLAY_TIMEOUT_MS = initialParams.src.includes('/stream/') ? 15_000 : 8_000;
+    // /stream/ endpoint runs yt-dlp server-side — Render cold start 30-60s + yt-dlp 6-10s.
+    // Must outlive server startupTimeout (25s) + retry backoff, otherwise
+    // the HTML engine aborts while the server is still extracting.
+    const CANPLAY_TIMEOUT_MS = initialParams.src.includes('/stream/') || initialParams.src.includes('/proxy-audio') ? 35_000 : 10_000;
 
     // Single ownership chokepoint: whatever engine owned the previous track
     // is released before this one claims playback.

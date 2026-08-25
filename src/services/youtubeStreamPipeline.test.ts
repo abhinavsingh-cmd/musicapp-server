@@ -201,7 +201,8 @@ describe('fallback resolution and crash isolation', () => {
   });
 
   it('resolveStream({ force: true }) invalidates the cache and returns fallback stream', async () => {
-    // First call: direct success
+    // youtubeProvider now always returns /stream fallback for reliability
+    // (extract→proxy is IP-locked), so no direct fetch via extractAudioUrl is used.
     mockFetch(() =>
       Promise.resolve(
         new Response(JSON.stringify({ success: true, details: { url: 'https://rr1---sn-xyz.googlevideo.com/videoplayback?expire=111', expires: Date.now() + 600000 } }), {
@@ -223,19 +224,20 @@ describe('fallback resolution and crash isolation', () => {
       externalId: VIDEO_ID,
     };
 
-    await youtubeProvider.resolveStream(track);
-    // first direct fetch
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const first = await youtubeProvider.resolveStream(track);
+    expect(first?.kind).toBe('stream');
+    expect((first as any).streamUrl).toContain('/stream/');
+    // No direct extraction fetch — always fallback
+    expect(fetchMock).toHaveBeenCalledTimes(0);
 
-    // Without force: cache hit, no refetch (still 1)
-    await youtubeProvider.resolveStream(track);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Second call without force: still fallback, still no fetch
+    const second = await youtubeProvider.resolveStream(track);
+    expect(second?.kind).toBe('stream');
+    expect(fetchMock).toHaveBeenCalledTimes(0);
 
-    // With force: invalidates cache, returns fallback /stream without re-extracting direct
-    await youtubeProvider.resolveStream(track, { force: true });
-    // force path returns fallback directly, no additional fetch for direct
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // With force: still fallback, no additional fetch
     const third = await youtubeProvider.resolveStream(track, { force: true });
+    expect(fetchMock).toHaveBeenCalledTimes(0);
     expect(third?.kind).toBe('stream');
     expect((third as any).streamUrl).toContain('/stream/');
   });

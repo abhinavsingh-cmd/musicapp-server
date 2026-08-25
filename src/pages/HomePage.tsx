@@ -137,7 +137,7 @@ export const HomePage: React.FC = memo(() => {
   useEffect(() => {
     performanceMonitor.trackRender('HomePage', performance.now() - renderStart);
     renderMonitor.trackRender('HomePage', performance.now() - renderStart);
-  }, []);
+  }, [renderStart]);
   const songs = useSongsStore((s) => s.songs);
   const [trending, setTrending] = useState<Song[]>(initialTrending.songs);
   const [trendingLoading, setTrendingLoading] = useState(false);

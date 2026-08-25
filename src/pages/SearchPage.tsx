@@ -179,6 +179,7 @@ export const SearchPage: React.FC = memo(() => {
 
   const handlePlayYT = useCallback((r: YTSong) => {
     if (!r || !r.id) return;
+    setShowSuggestions(false);
     const songs: Song[] = (ytResults || [])
       .filter((item) => item && item.id)
       .map((item) => ({
@@ -255,6 +256,7 @@ export const SearchPage: React.FC = memo(() => {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onFocus={() => setShowSuggestions(true)}
+          onBlur={() => setTimeout(() => setShowSuggestions(false), 180)}
           placeholder="Search songs, artists, albums..."
           className="w-full pl-12 pr-20 py-3 rounded-2xl bg-[#1a1a2e] border border-white/5 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-violet-500 transition-all"
         />

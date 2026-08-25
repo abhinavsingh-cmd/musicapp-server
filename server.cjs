@@ -467,6 +467,8 @@ app.get("/api/genre/:genre", (req, res) => {
 
 // YouTube Search endpoint
 const MUSIC_SKIP_WORDS = [
+  'new songs of the week', 'songs of the week', 'new music friday', 'songs this week',
+  'top hits today', 'viral hits', 'most popular songs', 'billboard hot',
   'lyrics video', 'lyric video', 'karaoke', 'instrumental', 'cover by',
   'live performance', 'live at', 'performs', 'acoustic session',
   'reaction', 'react to', 'reacting', 'my reaction',
@@ -522,7 +524,9 @@ function isMusicResult(r) {
   if (title.length < 3 || title.length > 200) return false;
   if (/^\d+$/.test(title.trim())) return false;
   if (lower.includes('subscribe') && lower.includes('channel')) return false;
-  if (r.channel && /compilation|playlist|mix|best of|top \d/i.test(r.channel)) return false;
+  if (r.channel && /compilation|playlist|mix|best of|top \d|inmusic/i.test(r.channel)) return false;
+  // Explicit compilation/weekly roundup titles that are not individual songs
+  if (/new songs of the week|songs of the week|new music friday/i.test(lower)) return false;
   return true;
 }
 
@@ -1252,14 +1256,15 @@ app.get("/api/stream/:videoId", async (req, res) => {
         attemptStream(attempt + 1);
       }, delayMs);
     };
-    // 15s covers yt-dlp extraction on a warm instance (~3-6s) with headroom;
-    // the client-side canplay timeout (8s) races this, so keeping it tight
-    // ensures fast failure → recovery on the client side.
+    // 25s covers yt-dlp extraction on a warm instance (~3-6s) plus Render cold-start
+    // (30-60s) and WARP handshake latency. Client now waits 45s, so server has
+    // headroom to retry without being killed prematurely. Faster failure still
+    // happens via yt-dlp exit code retries.
     let startupTimeout = setTimeout(() => {
       if (!headersSent) {
         killYtProcess(yt);
         if (!res.headersSent) {
-          console.error("[Stream] Timed out after 15s for:", videoId, "attempt", attempt);
+          console.error("[Stream] Timed out after 25s for:", videoId, "attempt", attempt);
           if (attempt < maxAttempts) {
             retryStream(retryDelayMs(attempt));
           } else {
@@ -1267,7 +1272,7 @@ app.get("/api/stream/:videoId", async (req, res) => {
           }
         }
       }
-    }, 15000);
+    }, 25000);
 
     let firstChunk = true;
     let totalBytes = 0;
@@ -1797,9 +1802,13 @@ app.get("/api/jiosaavn", async (req, res) => {
   }
 });
 
+// Playlists are client-localStorage only, but the API advertises the route — return 200 to avoid 404 noise
+app.get("/api/playlists", (_req, res) => ok(res, { playlists: [] }, "Playlists are managed locally"));
+app.get("/api/playlists/:id/songs", (req, res) => ok(res, { songs: [], playlistId: req.params.id }, "Playlist songs are managed locally"));
+
 // API root
 app.get("/api", (req, res) => {
-  return ok(res, { songs: songs.length, version: "1.2.0", endpoints: ["/api/songs", "/api/search", "/api/genre/:genre", "/api/youtube/search", "/api/youtube/trending", "/api/charts/trending.json", "/api/stream/:videoId", "/api/download/:videoId", "/api/audio-info/:videoId", "/api/lyrics/:videoId", "/api/playlists", "/api/playlists/:id/songs", "/api/health"] }, "API ready");
+  return ok(res, { songs: songs.length, version: "2.5.73", endpoints: ["/api/songs", "/api/search", "/api/genre/:genre", "/api/youtube/search", "/api/youtube/trending", "/api/charts/trending.json", "/api/stream/:videoId", "/api/download/:videoId", "/api/audio-info/:videoId", "/api/lyrics/:videoId", "/api/playlists", "/api/playlists/:id/songs", "/api/health"] }, "API ready");
 });
 
 // Catch-all 404 — always return JSON, never HTML

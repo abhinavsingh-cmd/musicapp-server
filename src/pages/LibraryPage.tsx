@@ -160,7 +160,7 @@ export const LibraryPage: React.FC = () => {
   }
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-6 space-y-6" style={{ paddingTop: 'max(1.5rem, env(safe-area-inset-top, 0px))' }}>
       <div className="flex items-center gap-3">
         <button onClick={goBack} className="p-2 rounded-xl hover:bg-white/5 transition-colors text-gray-400 hover:text-white" aria-label="Go back">
           <ArrowLeft size={20} />

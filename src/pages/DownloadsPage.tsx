@@ -105,7 +105,7 @@ const DownloadsPage: React.FC = () => {
             Downloads
           </h1>
           <p className="text-gray-400 text-sm mt-1">
-            {downloads.length} songs · {formatSize(totalSize || cacheSize)}
+            {downloads.length} songs · {formatSize(downloads.length > 0 ? totalSize : 0)}{downloads.length === 0 && cacheSize > 1024*1024 ? ` · ${formatSize(cacheSize)} cache` : ''}
           </p>
         </div>
         <div className="flex items-center gap-2">

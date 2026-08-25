@@ -26,6 +26,8 @@ export const CreatePlaylistPage: React.FC = () => {
 
   const handleFile = (file: File) => {
     if (!file.type.startsWith('image/')) return;
+    // 8 MB hard limit prevents OOM on low-end Android WebViews
+    if (file.size > 8 * 1024 * 1024) return;
     const reader = new FileReader();
     reader.onload = (e) => setCoverPreview(e.target?.result as string);
     reader.readAsDataURL(file);

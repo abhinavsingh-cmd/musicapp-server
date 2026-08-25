@@ -18,7 +18,9 @@ export const MainContent = memo(() => {
   const { openSidebar } = useLayout();
   return (
     <main className="flex-1 overflow-y-auto relative">
-      <header className={cn(
+      <header 
+        style={{ paddingTop: 'env(safe-area-inset-top, 0px)' }}
+        className={cn(
         "h-16 border-b border-white/10 flex items-center justify-between px-4 sm:px-6 relative z-20",
         "bg-[#121220] lg:pl-64"
       )}>

@@ -46,6 +46,12 @@ export const LayoutProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     return () => window.removeEventListener('resize', handleResize);
   }, [handleResize]);
 
+  // Keep sidebar open on desktop; auto-close on mobile when breakpoint changes
+  useEffect(() => {
+    if (breakpoint === 'desktop') setSidebarOpen(true);
+    else if (breakpoint === 'mobile') setSidebarOpen(false);
+  }, [breakpoint]);
+
   const openSidebar = useCallback(() => setSidebarOpen(true), []);
   const closeSidebar = useCallback(() => setSidebarOpen(false), []);
   const toggleSidebar = useCallback(() => setSidebarOpen(prev => !prev), []);

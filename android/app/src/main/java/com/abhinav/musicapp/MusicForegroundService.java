@@ -71,11 +71,10 @@ public class MusicForegroundService extends Service implements MediaPlayer.OnPre
     private int preparedGeneration = -1;
     private long pendingStartPositionMs = 0;
     private String currentUrl = null;
-    // Prepare watchdog: a stream whose server never sends bytes (cold Render
-    // instance, dead upstream) leaves MediaPlayer in preparing state FOREVER —
-    // it retries network reads every ~3s indefinitely. This timer converts the
-    // silent hang into an 'error' notification so JS can smart-replace or skip.
-    private static final long PREPARE_TIMEOUT_MS = 25_000;
+    // Prepare watchdog: Render free tier cold-start is 30-60s, yt-dlp extraction
+    // adds 6-10s, WARP handshake 2-3s. 45s gives headroom without hanging forever.
+    // Server startupTimeout is 25s + retries, so client must outlive server.
+    private static final long PREPARE_TIMEOUT_MS = 45_000;
     private Runnable prepareTimeoutRunnable;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     // Audio focus bookkeeping — resume only happens when the pre-interruption

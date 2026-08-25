@@ -29,6 +29,8 @@ export const CreateAlbumPage: React.FC = () => {
   const handleCoverChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
+      if (file.size > 8 * 1024 * 1024) return;
+      if (!file.type.startsWith('image/')) return;
       const reader = new FileReader();
       reader.onload = (e) => {
         const result = e.target?.result as string;
@@ -54,6 +56,8 @@ export const CreateAlbumPage: React.FC = () => {
   };
 
   const handleFile = (file: File) => {
+    if (file.size > 8 * 1024 * 1024) return;
+    if (!file.type.startsWith('image/')) return;
     const reader = new FileReader();
     reader.onload = (e) => {
       const result = e.target?.result as string;
