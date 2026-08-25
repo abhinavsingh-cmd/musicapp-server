@@ -4,6 +4,7 @@ import { AuthProvider } from './contexts/AuthContext';
 import { LayoutProvider } from './contexts/LayoutContext';
 import { AppLayout } from './features/layout/AppLayout';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { SplashScreen } from './components/ui/splash-screen';
 import { useAudioStore } from './stores/audioStore';
 import { useDownloadsStore } from './stores/downloadsStore';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
@@ -92,6 +93,7 @@ const App: React.FC = () => {
     <ErrorBoundary level="app">
       <AuthProvider>
         <LayoutProvider>
+          <SplashScreen />
           <Routes>
             <Route path="/login" element={<LazyRoute element={<LoginPage />} />} />
             <Route element={<AppLayout />}>

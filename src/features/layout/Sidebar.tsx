@@ -176,11 +176,13 @@ const GuestProfile = memo(function GuestProfile({ onClose }: { onClose?: () => v
 export const Sidebar = memo(({ className, isOpen = true, onClose }: SidebarProps) => {
   const location = useLocation();
   const { user, logout } = useAuth();
-  const { closeSidebar } = useLayout();
+  const { closeSidebar, breakpoint } = useLayout();
 
   const handleClose = () => {
     onClose?.();
-    closeSidebar();
+    if (breakpoint !== 'desktop') {
+      closeSidebar();
+    }
   };
 
   return (

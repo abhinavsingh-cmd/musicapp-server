@@ -20,14 +20,13 @@ import { api } from '../config/api';
 import { lyricsService } from '../services/lyricsService';
 import { trendingService } from '../services/trendingService';
 import { youtubeSearch } from '../services/youtubeSearchService';
-import { extractAudioUrl, invalidateAudioUrl, getStreamFallbackUrl } from '../services/youtubeAudioExtractor';
+import { invalidateAudioUrl, getStreamFallbackUrl } from '../services/youtubeAudioExtractor';
 import { YTSong } from '../stores/searchStore';
 import { toTrack } from './adapters';
 import {
   DownloadDescriptor,
   PlayableSource,
   ProviderCapabilities,
-  ResolveStreamOptions,
   SearchOptions,
   Track,
   TrackProvider,
@@ -118,40 +117,14 @@ class YouTubeProvider implements TrackProvider {
 
   async resolveStream(
     track: Track,
-    options?: ResolveStreamOptions,
   ): Promise<PlayableSource | null> {
     if (!isValidYoutubeId(track.externalId)) return null;
 
-    // Force means the optimistic direct URL already failed (403/timeout) —
-    // don't waste another 6s re-trying direct; go straight to reliable fallback.
-    if (options?.force) {
-      invalidateAudioUrl(track.externalId);
-      return {
-        kind: 'stream',
-        track,
-        streamUrl: getStreamFallbackUrl(track.externalId!),
-        isLocalFile: false,
-        expiresInMs: STREAM_TTL_MS,
-      };
-    }
-
-    const url = await extractAudioUrl(track.externalId);
-    if (url) {
-      // v2.5.16 instant path — proxy via server simple fetch (WARP-aware, fast),
-      // not direct device fetch (IP-locked) and not heavy /stream pipe.
-      // This is the instant playback that felt like direct YouTube.
-      const proxyUrl = api(`/proxy-audio?url=${encodeURIComponent(url)}&videoId=${track.externalId}`);
-      return {
-        kind: 'stream',
-        track,
-        streamUrl: proxyUrl,
-        isLocalFile: false,
-        expiresInMs: STREAM_TTL_MS,
-      };
-    }
-
-    // No direct — return WARP-piped fallback. Both native and web use it;
-    // iframe is reserved as final fallback after stream retries (audioService).
+    // Go straight to /stream endpoint. The proxy-audio path (extract → googlevideo
+    // URL → proxy) fails when WARP is DOWN because URLs are IP-locked. The /stream
+    // endpoint handles yt-dlp extraction + caching server-side. On a warm cache hit
+    // (preloaded next track), playback starts in <100ms.
+    invalidateAudioUrl(track.externalId);
     return {
       kind: 'stream',
       track,

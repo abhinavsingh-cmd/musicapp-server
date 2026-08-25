@@ -93,24 +93,77 @@ export async function warmNextTrackServerCache(
   serverPreloadTargetId = id;
   const controller = new AbortController();
   serverPreloadAbort = controller;
+  // Timeout: /stream cold start can take ~10-15s on Render.
+  const timeout = setTimeout(() => controller.abort(), 25_000);
   try {
-    // Lightweight extract warm — does NOT pipe 5MB audio. Populates
-    // server freshAudioUrlCache (10m) so Next's direct URL is cached.
-    const res = await fetch(api(`/extract/${id}`), {
+    // Pre-download the full audio into server disk/memory cache via /stream.
+    // When the user taps play next, /stream hits the cache → instant playback.
+    const res = await fetch(api(`/stream/${id}`), {
       signal: controller.signal,
-      headers: { 'X-Preload': '1', Accept: 'application/json' },
+      headers: { 'X-Preload': '1' },
     });
     if (!res.ok) return;
-    await res.json().catch(() => {});
+    await res.arrayBuffer();
+    if (import.meta.env.DEV) console.log(`[Preload] ✅ Next track cached: ${id}`);
   } catch (e: any) {
     if (e?.name === 'AbortError') return;
     // best-effort — silent
   } finally {
+    clearTimeout(timeout);
     if (serverPreloadAbort === controller) {
       serverPreloadAbort = null;
       serverPreloadTargetId = null;
     }
   }
+}
+
+/**
+ * Pre-extract stream URLs for multiple upcoming tracks in parallel.
+ * Each call is a lightweight yt-dlp --dump-json (~2-4s) that populates
+ * the server's freshAudioUrlCache. When the user taps play, the URL is
+ * already cached → proxy-audio starts instantly (<1s).
+ *
+ * This does NOT cancel the single-slot warmNextTrackServerCache — the two
+ * mechanisms coexist: warm handles the IMMEDIATE next track (with abort
+ * support), while this handles the 2nd and 3rd tracks in the queue.
+ */
+let preExtractAbort: AbortController | null = null;
+
+export function cancelPreExtracts(): void {
+  try { preExtractAbort?.abort(); } catch {}
+  preExtractAbort = null;
+}
+
+export async function preExtractNextUrls(
+  songs: Song[],
+  opts: { isDownloaded?: (s: Song) => boolean } = {},
+): Promise<void> {
+  cancelPreExtracts();
+  const ytIds = songs
+    .filter(s => {
+      if (opts.isDownloaded?.(s)) return false;
+      const track = toTrack(s);
+      return track.externalId && /^[a-zA-Z0-9_-]{11}$/.test(track.externalId);
+    })
+    .map(s => toTrack(s).externalId!);
+  if (ytIds.length === 0) return;
+
+  const controller = new AbortController();
+  preExtractAbort = controller;
+  // Fire all extracts in parallel — server yt-dlp runs them via its queue.
+  await Promise.allSettled(
+    ytIds.map(async (id) => {
+      try {
+        const res = await fetch(api(`/extract/${id}`), {
+          signal: controller.signal,
+          headers: { Accept: 'application/json' },
+        });
+        if (!res.ok) return;
+        await res.json().catch(() => {});
+      } catch {}
+    })
+  );
+  if (import.meta.env.DEV) console.log(`[Preload] ✅ Pre-extracted ${ytIds.length} URLs`);
 }
 
 function prewarmAudioElement(url: string): void {

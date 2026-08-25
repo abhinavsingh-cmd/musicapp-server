@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useGoBack } from '../hooks/useGoBack';
+import { useDebounce } from '../hooks/useDebounce';
 import { useAudioStore } from '../stores/audioStore';
 import { usePlaylistStore } from '../stores/playlistStore';
 import { useSongsStore } from '../stores/songsStore';
@@ -20,6 +21,7 @@ const tabs = [
 
 export const LibraryPage: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
+  const debouncedQuery = useDebounce(searchQuery, 200);
   const [activeTab, setActiveTab] = useState<'songs' | 'albums' | 'playlists'>('songs');
   const [viewMode, setViewMode] = useState<'list' | 'grid'>('list');
   const [lastFetchAttempt, setLastFetchAttempt] = useState(0);
@@ -65,10 +67,10 @@ export const LibraryPage: React.FC = () => {
   }, [ensureLoaded]);
 
   const filteredSongs = useMemo(() => songs.filter(song =>
-    (song.title || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
-    (song.artist || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
-    (song.genre || '').toLowerCase().includes(searchQuery.toLowerCase())
-  ), [songs, searchQuery]);
+    (song.title || '').toLowerCase().includes(debouncedQuery.toLowerCase()) ||
+    (song.artist || '').toLowerCase().includes(debouncedQuery.toLowerCase()) ||
+    (song.genre || '').toLowerCase().includes(debouncedQuery.toLowerCase())
+  ), [songs, debouncedQuery]);
 
   const albums = useMemo(() => {
     const artistMap = new Map<string, Song[]>();
@@ -94,8 +96,8 @@ export const LibraryPage: React.FC = () => {
   }, [songs]);
 
   const filteredAlbums = useMemo(() => albums.filter(a =>
-    a.artist.toLowerCase().includes(searchQuery.toLowerCase()) || a.title.toLowerCase().includes(searchQuery.toLowerCase())
-  ), [albums, searchQuery]);
+    a.artist.toLowerCase().includes(debouncedQuery.toLowerCase()) || a.title.toLowerCase().includes(debouncedQuery.toLowerCase())
+  ), [albums, debouncedQuery]);
 
   const handlePlayAlbum = (album: Album) => {
     const albumSongs = songs.filter(s => album.songIds.includes(s.id));

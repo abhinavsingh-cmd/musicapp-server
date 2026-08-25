@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useGoBack } from '../hooks/useGoBack';
+import { useShallow } from 'zustand/react/shallow';
 import {
   Search, X, Play, Music, Globe, Loader2,
   SlidersHorizontal, Clock, ArrowDownAZ, TrendingUp, Sparkles,
@@ -122,14 +123,17 @@ export const SearchPage: React.FC = memo(() => {
   const suggestions = useSearchStore((s) => s.suggestions);
   const libraryResults = useSearchStore((s) => s.libraryResults);
   const ytResults = useSearchStore((s) => s.ytResults);
-  const setFilter = useSearchStore((s) => s.setFilter);
-  const setSort = useSearchStore((s) => s.setSort);
-  const setDurationFilter = useSearchStore((s) => s.setDurationFilter);
-  const setGenreFilter = useSearchStore((s) => s.setGenreFilter);
-  const search = useSearchStore((s) => s.search);
-  const loadMore = useSearchStore((s) => s.loadMore);
-  const clear = useSearchStore((s) => s.clear);
-  const cancelSearch = useSearchStore((s) => s.cancelSearch);
+  const actions = useSearchStore(useShallow((s) => ({
+    setFilter: s.setFilter,
+    setSort: s.setSort,
+    setDurationFilter: s.setDurationFilter,
+    setGenreFilter: s.setGenreFilter,
+    search: s.search,
+    loadMore: s.loadMore,
+    clear: s.clear,
+    cancelSearch: s.cancelSearch,
+  })));
+  const { setFilter, setSort, setDurationFilter, setGenreFilter, search, loadMore, clear, cancelSearch } = actions;
 
   // Cancel any in-flight search when unmounting
   useEffect(() => () => cancelSearch(), [cancelSearch]);

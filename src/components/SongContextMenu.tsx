@@ -123,7 +123,7 @@ export default function SongContextMenu({ song, position, onClose, onArtistClick
     <div className="fixed inset-0 z-[100]" onContextMenu={(e) => e.preventDefault()}>
       <div
         ref={menuRef}
-        className="absolute bg-[#1a1a2e] border border-white/10 rounded-2xl shadow-2xl shadow-black/50 py-2 min-w-[220px] max-h-[80vh] overflow-y-auto backdrop-blur-xl"
+        className="absolute bg-[#1a1a2e]/95 border border-white/10 rounded-2xl shadow-2xl shadow-black/50 py-2 min-w-[220px] max-h-[80vh] overflow-y-auto"
         style={{
           left: Math.min(position.x, window.innerWidth - 240),
           top: Math.min(position.y, window.innerHeight - (showPlaylistPicker ? 400 : 380)),

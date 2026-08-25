@@ -12,6 +12,8 @@ const OfflineIndicator = lazy(() => import('../offline/OfflineIndicator').then(m
 
 const PlayerFallback = () => <div className="h-24" />;
 
+const noop = () => {};
+
 export const AppLayout: React.FC = memo(() => {
   const { sidebarOpen } = useLayout();
   useBackNavigation();
@@ -28,7 +30,7 @@ export const AppLayout: React.FC = memo(() => {
       </Suspense>
       
       <ErrorBoundary level="section" fallback={<div className="w-64 bg-[var(--color-surface)] border-r border-[var(--color-border)] h-full" />}>
-        <Sidebar isOpen={sidebarOpen} onClose={() => {}} />
+        <Sidebar isOpen={sidebarOpen} onClose={noop} />
       </ErrorBoundary>
       
       <div className={cn(

@@ -28,7 +28,7 @@ registerLocalCopyResolver((track) => {
   }
 });
 
-const LOADING_TIMEOUT_MS = 30_000;
+const LOADING_TIMEOUT_MS = 15_000;
 let loadingTimeoutId: ReturnType<typeof setTimeout> | null = null;
 let initPromise: Promise<void> | null = null;
 

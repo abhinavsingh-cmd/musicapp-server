@@ -29,7 +29,7 @@ function isLocalSrc(url: string): boolean {
 // 'error' — without this guard the player would spin forever instead of
 // recovering through the session's single bounded recovery (fresh stream
 // resolution → embedded IFrame fallback).
-const HTML_STALL_TIMEOUT_MS = 30_000;
+const HTML_STALL_TIMEOUT_MS = 15_000;
 
 interface AudioState {
   currentSong: Song | null;
@@ -379,9 +379,11 @@ export class AudioService {
       this.emit('playing');
       this.emit('play', { song: this.state.currentSong, playbackId: this.currentPlaybackId });
       if (this.streamStartTime > 0 && this.state.currentSong) {
+        const totalLatencyMs = Math.round(performance.now() - this.streamStartTime);
+        console.log(`[Playback] ✅ PLAYING — totalLatency=${totalLatencyMs}ms (${(totalLatencyMs / 1000).toFixed(2)}s) song="${this.state.currentSong.title}"`);
         metricsCollector.pushStreamLatency({
           songId: this.state.currentSong.id,
-          duration: performance.now() - this.streamStartTime,
+          duration: totalLatencyMs,
           timestamp: Date.now(),
         });
       }
@@ -778,6 +780,10 @@ export class AudioService {
     if (st.duration > 0) this.state.duration = st.duration / 1000;
 
     if (st.isPlaying && !this.state.isPlaying) {
+      if (this.streamStartTime > 0 && this.state.currentSong) {
+        const totalLatencyMs = Math.round(performance.now() - this.streamStartTime);
+        console.log(`[Playback] ✅ NATIVE PLAYING — totalLatency=${totalLatencyMs}ms (${(totalLatencyMs / 1000).toFixed(2)}s) song="${this.state.currentSong.title}"`);
+      }
       this.setState({ isPlaying: true, isLoading: false, error: null });
       this.consecutiveFailures = 0;
       this.emit('playing');
@@ -807,7 +813,7 @@ export class AudioService {
     // play can take 20-25s on a cold start. The HTML engine must wait long
     // enough for the server to respond; the native engine doesn't use this
     // timer, but the fallback path does.
-    const CANPLAY_TIMEOUT_MS = initialParams.src.includes('/stream/') || initialParams.src.includes('/proxy-audio') ? 30_000 : 8_000;
+    const CANPLAY_TIMEOUT_MS = initialParams.src.includes('/stream/') || initialParams.src.includes('/proxy-audio') ? 8_000 : 8_000;
 
     // Single ownership chokepoint: whatever engine owned the previous track
     // is released before this one claims playback.

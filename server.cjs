@@ -1007,6 +1007,15 @@ app.get("/api/health", (req, res) => {
         uptime: Math.round(uptime) + "s",
         pid: process.pid,
       },
+      streamCache: {
+        memoryHits: streamCacheStats.memoryHits,
+        diskHits: streamCacheStats.diskHits,
+        misses: streamCacheStats.misses,
+        preloads: streamCacheStats.preloads,
+        hitRate: ((streamCacheStats.memoryHits + streamCacheStats.diskHits) / Math.max(1, streamCacheStats.memoryHits + streamCacheStats.diskHits + streamCacheStats.misses) * 100).toFixed(1) + '%',
+        memoryBytes: streamCacheBytes,
+        memoryEntries: streamCache.size,
+      },
       responseTimeMs: Date.now() - start,
     }, "Health check complete");
   });
@@ -1021,11 +1030,16 @@ app.get("/api/health", (req, res) => {
 // never be exhausted by cached audio.
 const streamCache = new Map(); // videoId -> { data: Buffer, mime: string, expiresAt: number }
 const STREAM_CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
-const STREAM_CACHE_MAX_ENTRY_BYTES = 6 * 1024 * 1024; // only songs <= 6MB are cached
-const STREAM_CACHE_MAX_TOTAL_BYTES = 36 * 1024 * 1024; // hard heap budget for the cache
+const STREAM_CACHE_MAX_ENTRY_BYTES = 10 * 1024 * 1024; // songs <= 10MB are cached in memory
+const STREAM_CACHE_MAX_TOTAL_BYTES = 50 * 1024 * 1024; // hard heap budget for the cache
 let streamCacheBytes = 0;
 
+// ── Cache stats (for observability) ────────────────────────────────────────
+const streamCacheStats = { memoryHits: 0, diskHits: 0, misses: 0, preloads: 0 };
+
 // ── Persistent file cache ──────────────────────────────────────────────────
+const STREAM_DISK_CACHE_DIR = "/tmp/stream-cache";
+const STREAM_DISK_CACHE_MAX_AGE_MS = 4 * 60 * 60 * 1000; // 4 hours — keeps playlist hits warm across sessions
 // Survives server restarts. Stores to /tmp/stream-cache/<videoId>.{webm,m4a,mp3}
 // Uses symlinks for atomic writes. Max 200MB total on disk.
 function initDiskCache() {
@@ -1136,7 +1150,8 @@ app.get("/api/stream/:videoId", async (req, res) => {
   // Check memory cache first — instant response for repeat plays.
   const cached = streamCache.get(videoId);
   if (cached && cached.expiresAt > Date.now()) {
-    console.log("[Stream] Memory cache hit for:", videoId, "bytes:", cached.data.length, "mime:", cached.mime);
+    streamCacheStats.memoryHits++;
+    console.log("[Stream] Memory cache hit for:", videoId, "bytes:", cached.data.length, "mime:", cached.mime, "(stats:", JSON.stringify(streamCacheStats) + ")");
     res.setHeader("Content-Type", cached.mime);
     res.setHeader("Accept-Ranges", "bytes");
     res.setHeader("Cache-Control", "public, max-age=900");
@@ -1149,7 +1164,8 @@ app.get("/api/stream/:videoId", async (req, res) => {
   // Async file I/O so the event loop isn't blocked before the stream gate.
   const diskCached = await readDiskCache(videoId);
   if (diskCached) {
-    console.log("[Stream] Disk cache hit for:", videoId, "bytes:", diskCached.size, "mime:", diskCached.mime);
+    streamCacheStats.diskHits++;
+    console.log("[Stream] Disk cache hit for:", videoId, "bytes:", diskCached.size, "mime:", diskCached.mime, "(stats:", JSON.stringify(streamCacheStats) + ")");
     res.setHeader("Content-Type", diskCached.mime);
     res.setHeader("Accept-Ranges", "bytes");
     res.setHeader("Cache-Control", "public, max-age=900");
@@ -1177,7 +1193,9 @@ app.get("/api/stream/:videoId", async (req, res) => {
     // jumps ahead without wasting the stream slot.
     cancelQueuedPreloads();
   }
-  console.log(`[Stream] Starting ${isPreload ? 'preload' : 'stream'} for:`, videoId);
+  streamCacheStats.misses++;
+  if (isPreload) streamCacheStats.preloads++;
+  console.log(`[Stream] Starting ${isPreload ? 'preload' : 'stream'} for:`, videoId, `(stats: ${JSON.stringify(streamCacheStats)})`);
 
   const attemptStream = (attempt = 1) => {
     const maxAttempts = 3;
@@ -1230,14 +1248,14 @@ app.get("/api/stream/:videoId", async (req, res) => {
         attemptStream(attempt + 1);
       }, delayMs);
     };
-    // 45s covers Render cold start + yt-dlp extraction on a warm instance
-    // (~6-10s) with headroom; the client-side canplay timeout (30s) races
-    // this, so keeping it bounded prevents a long wait before erroring.
+    // 15s covers yt-dlp extraction on a warm instance (~3-6s) with headroom;
+    // the client-side canplay timeout (8s) races this, so keeping it tight
+    // ensures fast failure → recovery on the client side.
     let startupTimeout = setTimeout(() => {
       if (!headersSent) {
         killYtProcess(yt);
         if (!res.headersSent) {
-          console.error("[Stream] Timed out after 45s for:", videoId, "attempt", attempt);
+          console.error("[Stream] Timed out after 15s for:", videoId, "attempt", attempt);
           if (attempt < maxAttempts) {
             retryStream(retryDelayMs(attempt));
           } else {
@@ -1245,7 +1263,7 @@ app.get("/api/stream/:videoId", async (req, res) => {
           }
         }
       }
-    }, 45000);
+    }, 15000);
 
     let firstChunk = true;
     let totalBytes = 0;
@@ -1587,7 +1605,7 @@ app.get("/api/download/:videoId", (req, res) => {
 const audioUrlVideoMap = new Map();
 // videoId -> { url, at } — recently refreshed URLs, so retry storms reuse them
 const freshAudioUrlCache = new Map();
-const FRESH_URL_TTL_MS = 10 * 60 * 1000;
+const FRESH_URL_TTL_MS = 30 * 60 * 1000; // 30min — keeps pre-extracted URLs warm across a listening session
 
 // Run yt-dlp once more to fetch a fresh direct audio URL for a video.
 // Returns null on failure; caches successful results briefly.
@@ -1912,11 +1930,20 @@ app.get("/api/proxy-audio", (req, res) => {
 
         if (upstream.status === 403 || upstream.status === 416 || upstream.status === 502) {
           if (!refreshed && videoId) {
+            freshAudioUrlCache.delete(videoId);
             const fresh = await getFreshAudioUrl(videoId);
             if (fresh && fresh !== url) {
               console.log("[ProxyAudio] Refreshing stale URL for", videoId, "after HTTP", upstream.status);
               return pipeToClient(fresh, { refreshed: true, includeRange });
             }
+          }
+          // Proxy and refresh both failed — fall back to inline yt-dlp stream pipe
+          if (videoId) {
+            console.log("[ProxyAudio] Falling back to /stream pipe for:", videoId);
+            req.removeListener("close", cleanup);
+            // Redirect to /api/stream which handles extraction + caching
+            req.url = `/api/stream/${videoId}`;
+            return app.handle(req, res);
           }
           if (upstream.status === 416 && includeRange) {
             console.log("[ProxyAudio] Retrying", videoId || "stream", "without Range after 416");

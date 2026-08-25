@@ -36,7 +36,7 @@ const TRANSIENT_FAIL_TTL_MS = 60 * 1000;
 
 // Cache extracted URLs to avoid repeated network calls
 const urlCache = new Map<string, { url: string; expiresAt: number }>();
-const CACHE_TTL_MS = 25 * 60 * 1000; // 25 minutes
+const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 // Failed ids with an expiry — a failure blocks retries only until the TTL
 // lapses (or until invalidateAudioUrl clears it), never for the whole session.
@@ -162,7 +162,7 @@ export async function extractAudioUrl(youtubeId: string): Promise<string | null>
  * reuses server WARP yt-dlp, cached briefly. Never returns /stream as
  * if it were a direct URL — that distinction is kept for fallback logic.
  */
-const DIRECT_EXTRACT_TIMEOUT_MS = 12_000;
+const DIRECT_EXTRACT_TIMEOUT_MS = 4_000;
 
 async function fetchFromServer(youtubeId: string): Promise<ServerResult> {
   if (!youtubeId || !/^[a-zA-Z0-9_-]{11}$/.test(youtubeId)) {
