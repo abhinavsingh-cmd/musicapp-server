@@ -19,6 +19,10 @@ export function SplashScreen({
 
   const totalAnimMs = (WORDS.length - 1) * 800 + 2000 + 500;
 
+  const dismiss = useCallback(() => {
+    setExiting(true);
+  }, []);
+
   useEffect(() => {
     const t = setTimeout(() => setShowButton(true), totalAnimMs);
     return () => clearTimeout(t);
@@ -33,11 +37,7 @@ export function SplashScreen({
     }
     const t = setTimeout(() => dismiss(), remaining);
     return () => clearTimeout(t);
-  }, [showButton, autoDismissMs, totalAnimMs]);
-
-  const dismiss = useCallback(() => {
-    setExiting(true);
-  }, []);
+  }, [showButton, autoDismissMs, totalAnimMs, dismiss]);
 
   const handleTransitionEnd = useCallback(() => {
     if (exiting) {

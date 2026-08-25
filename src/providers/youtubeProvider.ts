@@ -20,7 +20,7 @@ import { api } from '../config/api';
 import { lyricsService } from '../services/lyricsService';
 import { trendingService } from '../services/trendingService';
 import { youtubeSearch } from '../services/youtubeSearchService';
-import { invalidateAudioUrl, getStreamFallbackUrl } from '../services/youtubeAudioExtractor';
+import { extractAudioUrl, invalidateAudioUrl, getStreamFallbackUrl } from '../services/youtubeAudioExtractor';
 import { YTSong } from '../stores/searchStore';
 import { toTrack } from './adapters';
 import {
@@ -28,6 +28,7 @@ import {
   PlayableSource,
   ProviderCapabilities,
   SearchOptions,
+  ResolveStreamOptions,
   Track,
   TrackProvider,
 } from './types';
@@ -117,14 +118,31 @@ class YouTubeProvider implements TrackProvider {
 
   async resolveStream(
     track: Track,
+    options?: ResolveStreamOptions,
   ): Promise<PlayableSource | null> {
     if (!isValidYoutubeId(track.externalId)) return null;
 
-    // Go straight to /stream endpoint. The proxy-audio path (extract → googlevideo
-    // URL → proxy) fails when WARP is DOWN because URLs are IP-locked. The /stream
-    // endpoint handles yt-dlp extraction + caching server-side. On a warm cache hit
-    // (preloaded next track), playback starts in <100ms.
-    invalidateAudioUrl(track.externalId);
+    // Keep a valid direct googlevideo URL across plays. Re-extracting on every
+    // tap was the main source of startup latency. The direct URL is consumed by
+    // native MediaPlayer on Android and starts immediately; /stream remains a
+    // resilient server-piped fallback when extraction is unavailable.
+    if (options?.force) invalidateAudioUrl(track.externalId);
+    if (!options?.force) {
+      const direct = await extractAudioUrl(track.externalId);
+      if (direct) {
+        // Proxy via server so the browser doesn't hit IP-locked googlevideo CDN.
+        // The server's /proxy-audio fetches with its own IP and pipes to client.
+        const proxyUrl = api(`/proxy-audio?url=${encodeURIComponent(direct)}&videoId=${track.externalId}`);
+        return {
+          kind: 'stream',
+          track,
+          streamUrl: proxyUrl,
+          isLocalFile: false,
+          expiresInMs: STREAM_TTL_MS,
+        };
+      }
+    }
+
     return {
       kind: 'stream',
       track,

@@ -651,7 +651,21 @@ export class AudioService {
       startPositionMs,
       volume: this.state.volume,
     });
-    if (this.currentPlaybackId !== playbackId) return;
+    if (this.currentPlaybackId !== playbackId) {
+      // A stale play command can finish after a newer command has already
+      // claimed the service. Do not let that late native request keep the old
+      // song alive; only stop it when the native generation/URL still belongs
+      // to this stale command, so a newer song cannot be stopped accidentally.
+      if (result.started) {
+        try {
+          const active = await backgroundAudio.getPlaybackState();
+          const sameGeneration = typeof result.generation === 'number' && result.generation >= 0 && active.generation === result.generation;
+          const sameUrl = !!active.url && active.url === params.src;
+          if (sameGeneration || sameUrl) await backgroundAudio.stopAudio();
+        } catch {}
+      }
+      return;
+    }
     this.pendingStartTime = 0;
 
     if (!result.started) {
@@ -813,7 +827,7 @@ export class AudioService {
     // play can take 20-25s on a cold start. The HTML engine must wait long
     // enough for the server to respond; the native engine doesn't use this
     // timer, but the fallback path does.
-    const CANPLAY_TIMEOUT_MS = initialParams.src.includes('/stream/') || initialParams.src.includes('/proxy-audio') ? 8_000 : 8_000;
+    const CANPLAY_TIMEOUT_MS = initialParams.src.includes('/stream/') || initialParams.src.includes('/proxy-audio') ? 15_000 : 8_000;
 
     // Single ownership chokepoint: whatever engine owned the previous track
     // is released before this one claims playback.
@@ -1019,7 +1033,7 @@ export class AudioService {
     track: Track,
     current: { mode: 'html'; src: string; isLocalFile: boolean; expiresInMs?: number },
   ): Promise<{ mode: 'html'; src: string; isLocalFile: boolean; expiresInMs?: number } | null> {
-    if (current.isLocalFile || !(current.src.includes('/proxy-audio') || current.src.includes('/stream/'))) return null;
+    if (current.isLocalFile || !(current.src.includes('/proxy-audio') || current.src.includes('/stream/') || current.src.includes('googlevideo.com'))) return null;
     const playable = await resolvePlayableSource(track, { force: true });
     if (!playable) return null;
     const fresh = playableToEngineParams(playable);

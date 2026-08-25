@@ -68,10 +68,10 @@ export function cancelNextTrackPreload(): void {
 }
 
 /**
- * Warm the server cache for the *single* next track in background.
- * - At most one concurrent fetch (previous is aborted).
- * - Never creates an audible player — only a network fetch with X-Preload
- *   so the server enqueues it at PRELOAD priority (PLAY jumps ahead).
+ * Warm the server's short-lived direct URL cache for the *single* next track.
+ * - At most one concurrent request (previous is aborted).
+ * - Never downloads or buffers the full audio file in the background.
+ * - Uses X-Preload so the server enqueues extraction below interactive PLAY.
  * - Never blocks current playback: abort frees the stream slot via req close.
  * - Downloaded or direct-stream tracks are skipped (no server work needed).
  * - Failures are silent (best-effort); stale preloads are cancelled by caller.
@@ -93,18 +93,17 @@ export async function warmNextTrackServerCache(
   serverPreloadTargetId = id;
   const controller = new AbortController();
   serverPreloadAbort = controller;
-  // Timeout: /stream cold start can take ~10-15s on Render.
-  const timeout = setTimeout(() => controller.abort(), 25_000);
+  // URL extraction is metadata-only and should not hold the client open for a
+  // full audio transfer. Keep this well below the interactive play timeout.
+  const timeout = setTimeout(() => controller.abort(), 15_000);
   try {
-    // Pre-download the full audio into server disk/memory cache via /stream.
-    // When the user taps play next, /stream hits the cache → instant playback.
-    const res = await fetch(api(`/stream/${id}`), {
+    const res = await fetch(api(`/extract/${id}`), {
       signal: controller.signal,
-      headers: { 'X-Preload': '1' },
+      headers: { Accept: 'application/json', 'X-Preload': '1' },
     });
     if (!res.ok) return;
-    await res.arrayBuffer();
-    if (import.meta.env.DEV) console.log(`[Preload] ✅ Next track cached: ${id}`);
+    await res.json().catch(() => {});
+    if (import.meta.env.DEV) console.log(`[Preload] ✅ Next track URL warmed: ${id}`);
   } catch (e: any) {
     if (e?.name === 'AbortError') return;
     // best-effort — silent

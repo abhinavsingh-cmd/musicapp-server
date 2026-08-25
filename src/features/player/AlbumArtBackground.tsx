@@ -12,10 +12,10 @@ import { useReducedMotion } from 'framer-motion';
 export const AlbumArtBackground: React.FC = memo(() => {
   const currentSong = useAudioStore((s) => s.currentSong);
   const shouldReduceMotion = useReducedMotion();
-  // Disable background entirely on Android Capacitor (WebView)
+  // Disable background entirely on Android Capacitor (WebView). Keep this
+  // return below all hooks so React never changes hook order between web and
+  // native renders.
   const isNative = typeof window !== 'undefined' && (window as any).Capacitor?.isNativePlatform();
-  
-  if (isNative) return null;
 
   const [active, setActive] = useState<'a' | 'b'>('a');
   const prevSongRef = useRef<string | null>(null);
@@ -55,6 +55,7 @@ export const AlbumArtBackground: React.FC = memo(() => {
   const slotAOpacity = active === 'a' ? 1 : 0;
   const slotBOpacity = active === 'b' ? 1 : 0;
 
+  if (isNative) return null;
   if (!coverUrl && !prevCoverUrl) return null;
 
   return (

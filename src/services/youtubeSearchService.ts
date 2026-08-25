@@ -317,7 +317,7 @@ export async function youtubeSearch(
     }
     const url = api(`/youtube/search?q=${encodeURIComponent(musicQuery)}`);
     const result = await apiFetch(url, { timeout: 12_000, retries: 0, signal });
-    let data: any = null;
+    let data: any;
     try {
       data = await raceWithDeadline(result.json(), 12_000, url);
     } catch (parseErr) {

@@ -356,13 +356,6 @@ function initAudioServiceHandler() {
           }
           break;
         }
-        case 'loaded': {
-          // NOTE: deliberately NO preloading here. Preloading during 'loaded'
-          // spawns concurrent yt-dlp extractions on the 1-CPU Render server,
-          // starving search/stream/download (the v2.5.54 regression).
-          // Preloading happens once playback starts ('play' below).
-          break;
-        }
         case 'playing': {
           clearNextSongRetry();
           consecutivePlayFailures = 0;

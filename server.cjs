@@ -1580,7 +1580,13 @@ app.get("/api/download/:videoId", (req, res) => {
       });
     });
 
-    req.on("close", () => {
+    // The incoming request can close normally before the buffered response is
+    // committed (especially with keep-alive). Only treat a response close
+    // before completion as a client disconnect; otherwise a healthy yt-dlp
+    // process gets killed mid-download and the client sees a false HTTPS/
+    // truncated-transfer error.
+    res.on("close", () => {
+      if (res.writableEnded || settled || killed) return;
       clearTimeout(startupTimeout);
       killed = true;
       attemptInFlight = false;
@@ -1688,7 +1694,7 @@ app.get("/api/extract/:videoId", (req, res) => {
         console.error("[Extract] parse error for", videoId, e.message);
         return fail(res, 502, "PARSE_ERROR", "Failed to parse extraction", { videoId, detail: e.message.slice(0, 300) });
       }
-    }, PRIORITY.PLAY);
+    }, req.headers['x-preload'] === '1' ? PRIORITY.PRELOAD : PRIORITY.PLAY);
   };
   attemptExtract();
 });

@@ -110,7 +110,7 @@ public class MusicForegroundService extends Service implements MediaPlayer.OnPre
 
     // ── Playback snapshot persistence ──
     // Survives Android service recreation: when the OS kills and restarts
-    // this START_STICKY service, onStartCommand(null) re-creates playback
+    // a service recreation, onStartCommand(null) can re-create playback
     // from the snapshot instead of showing a dead notification.
     private static final String PREFS_NAME = "music_playback_state";
     private static final String KEY_URL = "url";
@@ -1119,44 +1119,16 @@ private void registerHeadsetReceiver() {
 
     @Override
     public void onTaskRemoved(Intent rootIntent) {
-        // Requirement: music must CONTINUE when task is removed from Recents
-        // (Home, minimize, lock, shade, switch app, swipe away) unless user
-        // pressed explicit Stop. onTaskRemoved is also called for rotation
-        // config changes on some OEMs — never destroy playback here.
-        boolean hasActivePlayback = isPlaying || isBuffering || nativeEngineActive || (currentUrl != null && !currentUrl.isEmpty());
-        if (hasActivePlayback) {
-            // Keep foreground, MediaSession, wakeLock, notification alive.
-            // Re-ensure foreground in case OS had demoted it briefly.
-            try {
-                startForeground(NOTIFICATION_ID, buildNotification(currentTitle, currentArtist, currentAlbum));
-            } catch (Exception ignored) {}
-            acquireWakeLock();
-            startKeepAlive();
-            if (mediaSession != null) {
-                try { mediaSession.setActive(true); } catch (Exception ignored) {}
-            }
-            // Do NOT stopSelf, do NOT clear snapshot, do NOT null instance.
-            // Let the service survive task removal; explicit Stop will terminate.
-            super.onTaskRemoved(rootIntent);
-            return;
-        }
-        // No active track — allow cleanup (paused with no track, or already stopped).
-        // Preserve pause-not-destroy: if paused but has track, we kept it above.
+        // Swiping the app away is an explicit close, not a background/minimize
+        // transition. Stop and clear everything here so the foreground service
+        // cannot keep audio alive after the task is gone or resurrect it on the
+        // next launch. Background playback while minimized/locked is preserved
+        // because those paths do not call onTaskRemoved.
         stopPlayback();
         clearSnapshot();
+        endedPending = false;
         instance = null;
         BackgroundAudioPlugin.stopKeepAlive();
-        if (mediaSession != null) {
-            try { mediaSession.setActive(false); } catch (Exception ignored) {}
-            try { mediaSession.release(); } catch (Exception ignored) {}
-            mediaSession = null;
-        }
-        if (headsetReceiver != null) {
-            try { unregisterReceiver(headsetReceiver); } catch (Exception ignored) {}
-            headsetReceiver = null;
-        }
-        abandonAudioFocus();
-        releaseWakeLock();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE);
         } else {

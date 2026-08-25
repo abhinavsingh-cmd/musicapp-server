@@ -67,8 +67,8 @@ export type ProviderResult<T> = ProviderSuccess<T> | ProviderFailure;
 // Defaults
 // ---------------------------------------------------------------------------
 
-/** Reasonable timeout for stream resolution (cold start can be slow). */
-export const RESOLVE_TIMEOUT_MS = 10_000;
+/** Reasonable timeout for stream resolution (cold starts can be slow). */
+export const RESOLVE_TIMEOUT_MS = 30_000;
 
 /** Search is typically faster — shorter timeout. */
 export const SEARCH_TIMEOUT_MS = 20_000;

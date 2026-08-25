@@ -369,6 +369,15 @@ export function isTransientDownloadError(err: unknown): boolean {
   return !!(err && typeof err === 'object' && (err as { transient?: boolean }).transient === true);
 }
 
+function isTlsError(err: unknown): boolean {
+  const value = err as { message?: unknown; code?: unknown; cause?: unknown } | null;
+  const text = [value?.message, value?.code, (value?.cause as any)?.message, (value?.cause as any)?.code]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+  return /certificate|cert_|tls|ssl|https|unable to verify|self[- ]signed|handshake/.test(text);
+}
+
 /**
  * Race a promise against a hard deadline. `onTimeout` runs first so the
  * caller can cancel the underlying operation (abort the fetch, cancel the
@@ -582,7 +591,9 @@ export async function downloadSongWithProgress(
     throw downloadFailureInfo({
       stage: 'HTTP_REQUEST',
       reason: 'NETWORK_TIMEOUT',
-      message: `Network error: ${fetchErr?.message || fetchErr}`,
+      message: isTlsError(fetchErr)
+        ? 'Secure HTTPS connection failed while contacting the download server — please retry'
+        : `Network error: ${fetchErr?.message || fetchErr}`,
       transient: true,
       cause: fetchErr,
     });
