@@ -1,26 +1,35 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
-import { AnimatedPath, WORDS } from "./animated-path";
+import { useEffect, useState, useCallback } from "react";
+import { HandwritingSvg } from "./handwriting-svg";
 
 interface SplashScreenProps {
   onComplete?: () => void;
   autoDismissMs?: number;
 }
 
+const WORDS = ["Music", "App"];
+const WORD_DELAY_MS = 800;
+const WORD_DURATION_S = 2.0;
+
 export function SplashScreen({
   onComplete,
-  autoDismissMs = 8000,
+  autoDismissMs = 10000,
 }: SplashScreenProps) {
+  const [showSubtitle, setShowSubtitle] = useState(false);
   const [showButton, setShowButton] = useState(false);
   const [exiting, setExiting] = useState(false);
   const [hidden, setHidden] = useState(false);
-  const containerRef = useRef<HTMLDivElement>(null);
 
-  const totalAnimMs = (WORDS.length - 1) * 800 + 2000 + 500;
+  const totalAnimMs = WORDS.length * WORD_DELAY_MS + WORD_DURATION_S * 1000 + 500;
 
   const dismiss = useCallback(() => {
     setExiting(true);
+  }, []);
+
+  useEffect(() => {
+    const t = setTimeout(() => setShowSubtitle(true), WORD_DELAY_MS);
+    return () => clearTimeout(t);
   }, []);
 
   useEffect(() => {
@@ -50,9 +59,8 @@ export function SplashScreen({
 
   return (
     <div
-      ref={containerRef}
       onTransitionEnd={handleTransitionEnd}
-      className={`fixed inset-0 z-50 flex cursor-pointer flex-col items-center justify-center bg-black ${
+      className={`fixed inset-0 z-50 flex cursor-pointer flex-col items-center justify-center bg-[#0a0a14] ${
         exiting
           ? "-translate-y-full transition-transform duration-700 ease-[cubic-bezier(0.76,0,0.24,1)]"
           : "translate-y-0"
@@ -60,11 +68,21 @@ export function SplashScreen({
       style={{ willChange: "transform" }}
       onClick={dismiss}
     >
-      <div className="mb-10 flex items-center gap-2">
+      {/* Subtle background gradient */}
+      <div
+        className="absolute inset-0 opacity-30"
+        style={{
+          background:
+            "radial-gradient(ellipse at 30% 50%, rgba(139, 92, 246, 0.15) 0%, transparent 60%), radial-gradient(ellipse at 70% 50%, rgba(244, 63, 94, 0.1) 0%, transparent 60%)",
+        }}
+      />
+
+      {/* Icon */}
+      <div className="relative mb-8">
         <svg
           xmlns="http://www.w3.org/2000/svg"
-          width="20"
-          height="20"
+          width="28"
+          height="28"
           viewBox="0 0 24 24"
           fill="none"
           stroke="rgb(244 63 94)"
@@ -72,30 +90,42 @@ export function SplashScreen({
           strokeLinecap="round"
           strokeLinejoin="round"
         >
-          <path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-          <path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z" />
+          <path d="M9 18V5l12-2v13" />
+          <circle cx="6" cy="18" r="3" />
+          <circle cx="18" cy="16" r="3" />
         </svg>
-        <span className="text-sm font-medium text-white">Handwritten</span>
       </div>
 
-      <div className="flex flex-col items-center">
-        {WORDS.map((w: { word: string; d: string; viewBox: string }, i: number) => (
-          <AnimatedPath
-            key={w.word}
-            d={w.d}
-            viewBox={w.viewBox}
-            width={720}
-            height={120}
-            strokeWidth={2}
-            delay={i * 0.8}
-            duration={2}
+      {/* Handwritten "MusicApp" */}
+      <div className="relative flex flex-col items-center gap-1">
+        {WORDS.map((word, i) => (
+          <HandwritingSvg
+            key={word}
+            text={word}
+            width={400}
+            height={80}
+            fontSize={64}
+            strokeWidth={1.5}
+            duration={WORD_DURATION_S}
+            delay={i * WORD_DELAY_MS / 1000}
+            ease="easeInOut"
             className="text-rose-500"
           />
         ))}
       </div>
 
+      {/* Subtitle */}
+      <p
+        className={`relative mt-6 text-sm tracking-wide text-white/60 transition-all duration-700 ${
+          showSubtitle ? "opacity-100 translate-y-0" : "opacity-0 translate-y-4"
+        }`}
+      >
+        Your Music, Your Mood
+      </p>
+
+      {/* Continue button */}
       <div
-        className={`mt-12 overflow-hidden transition-all duration-500 ${
+        className={`relative mt-14 overflow-hidden transition-all duration-500 ${
           showButton ? "max-h-20 opacity-100" : "max-h-0 opacity-0"
         }`}
       >
