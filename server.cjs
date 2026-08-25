@@ -38,6 +38,17 @@ const YT_EXTRACTOR_ARGS = [
   "--force-ipv4",
   "--remote-components", "ejs:github",
 ];
+// Fast playback path. web_embedded returns the same audio formats with fewer
+// player-client requests (about 3–4s locally vs 4–5s for the full reliability
+// combo). Search/download endpoints retain the broader fallback combo above;
+// playback can fall back to the normal retry path if this client is unavailable
+// for a particular video.
+const YT_FAST_EXTRACTOR_ARGS = [
+  "--extractor-args",
+  "youtube:player_client=web_embedded;player_skip=webpage",
+  "--force-ipv4",
+  "--remote-components", "ejs:github",
+];
 const YT_COOKIES_ARGS = (() => {
   try { return fs.existsSync("/app/cookies.txt") ? ["--cookies", "/app/cookies.txt"] : []; }
   catch { return []; }
@@ -1199,18 +1210,21 @@ app.get("/api/stream/:videoId", async (req, res) => {
 
   const attemptStream = (attempt = 1) => {
     const maxAttempts = 3;
+    const extractorArgs = attempt === 1 ? YT_FAST_EXTRACTOR_ARGS : YT_EXTRACTOR_ARGS;
 
-    // Pin to m4a 140 first — fastest manifest parse, known MIME (audio/mp4).
-    // Fallback chain kept short; large sorting over webm/opus added ~800ms.
+    // Prefer WebM/Opus for playback: its metadata is available at the start
+    // of the container, so browsers and Android can begin decoding while the
+    // song is still arriving. M4A/format 140 commonly puts the moov atom at
+    // the end, forcing a full-song wait before `loadedmetadata` fires.
     const ytArgs = [
-      "-f", "140/bestaudio[ext=m4a]/bestaudio",
+      "-f", "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio",
       "-o", "-",
       "--no-check-certificates",
       "--no-warnings",
       "--no-playlist",
       "--no-part",
       "--age-limit", "18",
-      ...YT_EXTRACTOR_ARGS,
+      ...extractorArgs,
       ...YT_COOKIES_ARGS,
       ...YT_PROXY_ARGS,
       "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -1224,16 +1238,6 @@ app.get("/api/stream/:videoId", async (req, res) => {
     const yt = spawn("yt-dlp", ytArgs, { stdio: ["ignore", "pipe", "pipe"] });
 
     let headersSent = false;
-    // Send headers immediately so client TTFB isn't gated on MIME sniff or
-    // yt-dlp manifest parse. MIME is corrected on first chunk if needed.
-    // This removes ~200ms + format-sort time from critical path.
-    if (!res.headersSent) {
-      res.setHeader("Content-Type", "audio/mp4");
-      res.setHeader("Accept-Ranges", "bytes");
-      res.setHeader("Cache-Control", "no-cache");
-      res.setHeader("X-Content-Type-Options", "nosniff");
-      res.setHeader("Access-Control-Allow-Origin", "*");
-    }
     // 'error' AND 'close' may BOTH fire for one process — release exactly once.
     let slotReleased = false;
     const releaseSlotOnce = () => {
@@ -1286,6 +1290,16 @@ app.get("/api/stream/:videoId", async (req, res) => {
           else if (chunk.length >= 8 && chunk[4] === 0x66 && chunk[5] === 0x74 && chunk[6] === 0x79 && chunk[7] === 0x70) detectedMime = "audio/mp4";
           else if (chunk[0] === 0x1A && chunk[1] === 0x45 && chunk[2] === 0xDF && chunk[3] === 0xA3) detectedMime = "audio/webm";
           else detectedMime = "audio/mpeg";
+        }
+        // Set headers only after inspecting the first bytes. This keeps MIME
+        // accurate for the WebM-first stream while still sending headers
+        // before any audio data reaches the client.
+        if (!res.headersSent) {
+          res.setHeader("Content-Type", detectedMime);
+          res.setHeader("Accept-Ranges", "bytes");
+          res.setHeader("Cache-Control", "no-cache");
+          res.setHeader("X-Content-Type-Options", "nosniff");
+          res.setHeader("Access-Control-Allow-Origin", "*");
         }
         console.log("[Stream] First chunk received for:", videoId, "MIME:", detectedMime);
       }
@@ -1622,12 +1636,12 @@ function getFreshAudioUrl(videoId) {
       return resolve(cached.url);
     }
     runYtDlp([
-      "-f", "bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio/best",
+      "-f", "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio",
       "--get-url",
       "--no-warnings",
       "--no-check-certificates",
       "--age-limit", "18",
-      ...YT_EXTRACTOR_ARGS,
+      ...YT_FAST_EXTRACTOR_ARGS,
       ...YT_COOKIES_ARGS,
       ...YT_PROXY_ARGS,
       "https://www.youtube.com/watch?v=" + videoId
@@ -1643,8 +1657,9 @@ function getFreshAudioUrl(videoId) {
 
 // Lightweight extraction — returns short-lived googlevideo URL without piping audio.
 // Used as optimistic fast path for Android native MediaPlayer; fallback is /api/stream.
-// Uses the SAME proven yt-dlp invocation as /audio-info (--dump-json): --get-url
-// failed 4/4 in production while --dump-json succeeded — parse formats instead.
+// --get-url avoids serializing the full format manifest and is materially faster;
+// the second attempt switches to the broader client combo when a video rejects
+// the fast web_embedded client.
 app.get("/api/extract/:videoId", (req, res) => {
   const videoId = req.params.videoId;
   if (!videoId || !/^[A-Za-z0-9_-]{11}$/.test(videoId)) {
@@ -1657,13 +1672,14 @@ app.get("/api/extract/:videoId", (req, res) => {
   }
   const attemptExtract = (attempt = 1) => {
     const maxAttempts = 2;
+    const extractorArgs = attempt === 1 ? YT_FAST_EXTRACTOR_ARGS : YT_EXTRACTOR_ARGS;
     runYtDlp([
-      "-f", "bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio/best",
-      "--dump-json",
+      "-f", "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio",
+      "--get-url",
       "--no-warnings",
       "--no-check-certificates",
       "--age-limit", "18",
-      ...YT_EXTRACTOR_ARGS,
+      ...extractorArgs,
       ...YT_COOKIES_ARGS,
       ...YT_PROXY_ARGS,
       "https://www.youtube.com/watch?v=" + videoId
@@ -1679,16 +1695,13 @@ app.get("/api/extract/:videoId", (req, res) => {
         return fail(res, 502, "YT_DLP_ERROR", "Failed to extract URL", { videoId, detail: err.message.slice(0, 500) });
       }
       try {
-        const info = JSON.parse(stdout);
-        const formats = (info.formats || []).filter(f => f.acodec !== "none" && f.url && String(f.url).startsWith("http"));
-        if (formats.length === 0) {
+        const urls = String(stdout || "").trim().split(/\s+/).filter(u => u.startsWith("http"));
+        if (urls.length === 0) {
           return fail(res, 502, "NO_FORMATS", "No audio formats returned", { videoId });
         }
-        formats.sort((a, b) => (b.abr || 0) - (a.abr || 0));
-        const url = formats[0].url;
+        const url = urls[0];
         freshAudioUrlCache.set(videoId, { url, at: Date.now() });
-        // Map ALL format URLs so proxy-audio can refresh on later 403
-        for (const f of formats) audioUrlVideoMap.set(f.url, videoId);
+        audioUrlVideoMap.set(url, videoId);
         return ok(res, { url, expires: Date.now() + FRESH_URL_TTL_MS, cached: false }, "Extracted URL");
       } catch (e) {
         console.error("[Extract] parse error for", videoId, e.message);
@@ -1935,7 +1948,24 @@ app.get("/api/proxy-audio", (req, res) => {
         try { await upstream.body?.cancel(); } catch {}
 
         if (upstream.status === 403 || upstream.status === 416 || upstream.status === 502) {
-          if (!refreshed && videoId) {
+          // When WARP is unavailable, a googlevideo URL extracted by this
+          // server can still be rejected by the CDN's IP binding. Refreshing
+          // it immediately just launches another yt-dlp extraction and then
+          // fails the same way, adding 4–8 seconds before /stream can start.
+          // Go straight to the server-piped stream in that case. Keep the
+          // refresh path for WARP/range failures where it can genuinely help.
+          const canRefreshUrl = YT_PROXY_ARGS.length > 0 || upstream.status !== 403;
+          // A signed googlevideo URL can reject a byte-range request even
+          // though the same URL is still valid. Retry once without Range
+          // before launching a second yt-dlp extraction or the much slower
+          // server-piped fallback. This is especially important when WARP is
+          // unavailable: the browser's first request must not pay for two
+          // full YouTube resolutions just because the CDN rejected `bytes=0-`.
+          if (upstream.status === 403 && !refreshed && includeRange && videoId && !canRefreshUrl) {
+            console.log("[ProxyAudio] Retrying", videoId, "without Range after 403");
+            return pipeToClient(url, { refreshed: true, includeRange: false });
+          }
+          if (!refreshed && videoId && canRefreshUrl) {
             freshAudioUrlCache.delete(videoId);
             const fresh = await getFreshAudioUrl(videoId);
             if (fresh && fresh !== url) {
@@ -1999,7 +2029,12 @@ app.get("/api/proxy-audio", (req, res) => {
         // Never end cleanly on a truncated transfer: when Content-Length was
         // declared but fewer bytes arrived, destroy the socket so the client
         // sees a network error instead of saving a partial file as complete.
-        if (contentLength && bytesWritten !== Number(contentLength)) {
+        // Media elements routinely abandon an open-ended Range request after
+        // receiving enough bytes for metadata, then issue a new range. That
+        // is normal playback behavior—not a corrupt download. Only destroy
+        // non-range responses when their declared body is truncated; the
+        // download endpoint performs its own full-file integrity checks.
+        if (contentLength && bytesWritten !== Number(contentLength) && !clientRange) {
           console.error(`[ProxyAudio] Truncated stream (${bytesWritten}/${contentLength} bytes) — destroying response`);
           res.destroy();
         } else {
