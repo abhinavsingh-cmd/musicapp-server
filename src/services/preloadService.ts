@@ -120,7 +120,7 @@ export async function warmNextTrackServerCache(
  * Pre-extract stream URLs for multiple upcoming tracks in parallel.
  * Each call is a lightweight yt-dlp --dump-json (~2-4s) that populates
  * the server's freshAudioUrlCache. When the user taps play, the URL is
- * already cached → proxy-audio starts instantly (<1s).
+ * already cached → playback starts instantly.
  *
  * This does NOT cancel the single-slot warmNextTrackServerCache — the two
  * mechanisms coexist: warm handles the IMMEDIATE next track (with abort

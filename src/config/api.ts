@@ -279,7 +279,7 @@ export function getResponseCacheStats(): Record<string, number> {
     if (key.includes('/search')) stats.search++;
     else if (key.includes('/charts') || key.includes('/youtube')) stats.trending++;
     else if (key.includes('/lyrics')) stats.lyrics++;
-    else if (key.includes('/proxy-audio') || key.includes('/stream')) stats.stream++;
+    else if (key.includes('/stream')) stats.stream++;
     else stats.metadata++;
   }
   return stats;

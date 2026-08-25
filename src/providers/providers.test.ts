@@ -225,29 +225,26 @@ describe('resolvePlayableSource', () => {
     }
   });
 
-  it('resolves a YouTube stream via the provider (extraction)', async () => {
-    mockedExtract.mockResolvedValue('https://server.example.com/api/proxy-audio?url=googlevideo');
-    const playable = await resolvePlayableSource(toTrack(YOUTUBE_SONG));
-    expect(playable?.kind).toBe('stream');
-    if (playable?.kind === 'stream') {
-      expect(playable.streamUrl).toContain('/proxy-audio');
-      expect(playable.isLocalFile).toBe(false);
-      expect(playable.expiresInMs).toBe(25 * 60 * 1000);
-    }
-  });
-
-  it('falls back to server /stream URL when direct extraction fails', async () => {
-    mockedExtract.mockResolvedValue(null);
+  it('resolves a YouTube stream via /stream endpoint', async () => {
     const playable = await resolvePlayableSource(toTrack(YOUTUBE_SONG));
     expect(playable?.kind).toBe('stream');
     if (playable?.kind === 'stream') {
       expect(playable.streamUrl).toContain('/stream/');
       expect(playable.streamUrl).toContain('dQw4w9WgXcQ');
+      expect(playable.isLocalFile).toBe(false);
+      expect(playable.expiresInMs).toBe(25 * 60 * 1000);
+    }
+  });
+
+  it('always uses /stream endpoint (extract→proxy removed)', async () => {
+    const playable = await resolvePlayableSource(toTrack(YOUTUBE_SONG));
+    expect(playable?.kind).toBe('stream');
+    if (playable?.kind === 'stream') {
+      expect(playable.streamUrl).toContain('/stream/');
     }
   });
 
   it('re-resolves fresh when force is requested', async () => {
-    mockedExtract.mockResolvedValue('https://server.example.com/api/proxy-audio?url=v1');
     await resolvePlayableSource(toTrack(YOUTUBE_SONG));
     const playable = await resolvePlayableSource(toTrack(YOUTUBE_SONG), { force: true });
     expect(mockedInvalidate).toHaveBeenCalledWith('dQw4w9WgXcQ');
@@ -330,7 +327,7 @@ describe('the player consumes provider-independent tracks', () => {
 
       // All three are plain HTML-audio playables — the engine needs exactly
       // { mode, src, isLocalFile, expiresInMs } regardless of the source.
-      expect(ytParams).toEqual({ mode: 'html', src: expect.stringContaining('proxy-audio'), isLocalFile: false, expiresInMs: 25 * 60 * 1000 });
+      expect(ytParams).toEqual({ mode: 'html', src: expect.stringContaining('/stream/'), isLocalFile: false, expiresInMs: 25 * 60 * 1000 });
       expect(libParams).toEqual({ mode: 'html', src: 'https://cdn.example.com/audio/track.mp3', isLocalFile: false, expiresInMs: undefined });
       expect(mockParams).toEqual({ mode: 'html', src: 'https://mockcast.example.com/stream/track.mp3', isLocalFile: false, expiresInMs: 60_000 });
       expect(mockParams).toMatchObject({ mode: 'html', src: expect.any(String) });

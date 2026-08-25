@@ -122,7 +122,7 @@ class YouTubeProvider implements TrackProvider {
   ): Promise<PlayableSource | null> {
     if (!isValidYoutubeId(track.externalId)) return null;
 
-    // Always go to /stream — the extract→proxy-audio path is unreliable
+    // Always go to /stream — cached in memory/disk for instant replay.
     // (googlevideo URLs are IP-locked / token-expires too fast). The /stream
     // endpoint has memory+disk caching so sequential plays are instant (<50ms).
     // Cold start is ~10s (YouTube anti-bot 5s sleep + yt-dlp download),

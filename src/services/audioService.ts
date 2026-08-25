@@ -5,6 +5,7 @@ import { backgroundAudio } from './backgroundAudio';
 import { youtubePlayerService } from './youtubePlayerService';
 import { showToast } from '../utils/toast';
 import { metricsCollector } from './metricsCollector';
+import { playbackLatencyTracker } from './playbackLatencyTracker';
 import {
   resolvePlayableSource,
   resolveLocalCopy,
@@ -380,7 +381,16 @@ export class AudioService {
       this.emit('play', { song: this.state.currentSong, playbackId: this.currentPlaybackId });
       if (this.streamStartTime > 0 && this.state.currentSong) {
         const totalLatencyMs = Math.round(performance.now() - this.streamStartTime);
-        console.log(`[Playback] ✅ PLAYING — totalLatency=${totalLatencyMs}ms (${(totalLatencyMs / 1000).toFixed(2)}s) song="${this.state.currentSong.title}"`);
+        const srcType = this.htmlAudio?.src?.includes('googlevideo') ? 'direct' : 'stream';
+        playbackLatencyTracker.recordPlay({
+          songId: this.state.currentSong.id,
+          songTitle: this.state.currentSong.title,
+          artist: this.state.currentSong.artist || 'Unknown',
+          totalLatencyMs,
+          sourceType: srcType,
+          isRetry: false,
+          serverUrl: this.htmlAudio?.src || '',
+        });
         metricsCollector.pushStreamLatency({
           songId: this.state.currentSong.id,
           duration: totalLatencyMs,
@@ -459,6 +469,12 @@ export class AudioService {
 
   private emitPlaybackError(song: Song, message: string): void {
     logError('✗ PLAYBACK FAILED:', { title: song.title, message });
+    playbackLatencyTracker.recordFailure({
+      songId: song.id,
+      songTitle: song.title,
+      artist: song.artist || 'Unknown',
+      reason: message,
+    });
     this.consecutiveFailures++;
     this.setState({ error: message, isLoading: false, isPlaying: false });
     this.emit('error', message);
@@ -527,6 +543,7 @@ export class AudioService {
     try {
       const markId = `play_${song.id}_${Date.now()}`;
       this.streamStartTime = performance.now();
+      playbackLatencyTracker.startTap();
       this.pendingStartTime = startTime && isFinite(startTime) && startTime > 0 ? startTime : 0;
       log('▶ play() called:', { title: song.title, provider: track.provider, externalId: track.externalId || 'NONE', startTime: this.pendingStartTime });
 
@@ -557,6 +574,7 @@ export class AudioService {
         (async () => resolvePlayableSource(track))(),
       ]) as [unknown, Awaited<ReturnType<typeof resolvePlayableSource>>];
       const tExtractMs = Math.round(performance.now() - tExtractStart);
+      playbackLatencyTracker.markSourceResolved(tExtractMs);
       if (this.currentPlaybackId !== playbackId) return;
 
       if (!playable) {
@@ -796,7 +814,15 @@ export class AudioService {
     if (st.isPlaying && !this.state.isPlaying) {
       if (this.streamStartTime > 0 && this.state.currentSong) {
         const totalLatencyMs = Math.round(performance.now() - this.streamStartTime);
-        console.log(`[Playback] ✅ NATIVE PLAYING — totalLatency=${totalLatencyMs}ms (${(totalLatencyMs / 1000).toFixed(2)}s) song="${this.state.currentSong.title}"`);
+        playbackLatencyTracker.recordPlay({
+          songId: this.state.currentSong.id,
+          songTitle: this.state.currentSong.title,
+          artist: this.state.currentSong.artist || 'Unknown',
+          totalLatencyMs,
+          sourceType: 'native',
+          isRetry: false,
+          serverUrl: this.nativeParams?.src || '',
+        });
       }
       this.setState({ isPlaying: true, isLoading: false, error: null });
       this.consecutiveFailures = 0;
@@ -822,12 +848,8 @@ export class AudioService {
     const MAX_RETRIES = 3;
     const BASE_RETRY_DELAY_MS = 500;
     const MAX_RETRY_DELAY_MS = 5_000;
-    // Proxy/extracted URLs need more time to start streaming than local files
-    // /stream/ and /proxy-audio/ endpoints run yt-dlp server-side — first
-    // play can take 20-25s on a cold start. The HTML engine must wait long
-    // enough for the server to respond; the native engine doesn't use this
-    // timer, but the fallback path does.
-    const CANPLAY_TIMEOUT_MS = initialParams.src.includes('/stream/') || initialParams.src.includes('/proxy-audio') ? 15_000 : 8_000;
+    // /stream/ endpoint runs yt-dlp server-side — cold start takes ~10s.
+    const CANPLAY_TIMEOUT_MS = initialParams.src.includes('/stream/') ? 15_000 : 8_000;
 
     // Single ownership chokepoint: whatever engine owned the previous track
     // is released before this one claims playback.
@@ -1033,7 +1055,7 @@ export class AudioService {
     track: Track,
     current: { mode: 'html'; src: string; isLocalFile: boolean; expiresInMs?: number },
   ): Promise<{ mode: 'html'; src: string; isLocalFile: boolean; expiresInMs?: number } | null> {
-    if (current.isLocalFile || !(current.src.includes('/proxy-audio') || current.src.includes('/stream/') || current.src.includes('googlevideo.com'))) return null;
+    if (current.isLocalFile || !(current.src.includes('/stream/') || current.src.includes('googlevideo.com'))) return null;
     const playable = await resolvePlayableSource(track, { force: true });
     if (!playable) return null;
     const fresh = playableToEngineParams(playable);
